@@ -23,7 +23,7 @@ export interface SelectionState {
   debug: boolean;
 }
 
-const store = createStore<SelectionState>({
+const store = createStore<SelectionState>('selection', {
   runId: null,
   envId: null,
   policy: 'oak',
@@ -55,8 +55,10 @@ export function resolveRun(runId: string): void {
 }
 
 function clockStep(): number | null {
+  const pending = store.get().pendingSeekStep;
+  if (pending !== null) return pending;
   const at = Math.floor(currentPosition());
-  return at > 0 ? at : store.get().pendingSeekStep;
+  return at > 0 ? at : null;
 }
 
 export function selectRun(runId: string): void {

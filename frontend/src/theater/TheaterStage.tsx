@@ -12,7 +12,7 @@ export const TheaterStage = memo(function TheaterStage() {
     return () => {
       unmountStage();
     };
-  }, []);
+  }, [mountStage, unmountStage]);
 
   return <div ref={hostRef} className="absolute inset-0" />;
 });

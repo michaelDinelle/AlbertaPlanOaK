@@ -218,7 +218,7 @@ export function App() {
       baselinePending,
       live: sel.policy === 'oak' && live,
     });
-  }, [active, sel.policy, baselineId, baselinePending, live]);
+  }, [active, sel.policy, baselineId, baselinePending, live, setTheaterInputs]);
 
   useEffect(() => {
     const runId = sel.runId;

@@ -1,515 +1,145 @@
 import * as THREE from 'three';
-import {
-  CELL,
-  buildCellField,
-  cellToWorld,
-  gridExtent,
-  type CellFieldHandle,
-  type GridSize,
-  type Vec3Tuple,
-} from '@kit/grid';
-import { applyFog, makeLightRig, type LightRig } from '@kit/lighting';
-import { oakMaterial, oakUniforms, type OakMaterial } from '@kit/materials';
-import { blendTokens, clamp01, shade, smoothstep01 } from '@kit/mix';
-import { makeAmbientParticles, type AmbientParticlesHandle } from '@kit/particles';
-import { hash2f, streamFor } from '@kit/rng';
+import { CELL, buildCellField, type CellFieldHandle } from '@kit/grid';
+import { makeLightRig, type LightRig } from '@kit/lighting';
+import { oakMaterial } from '@kit/materials';
+import { makeAmbientParticles } from '@kit/particles';
 import { skyFromPalette, type SkyHandle } from '@kit/sky';
-import { TOKENS, type Palette } from '@kit/tokens';
 import type { SceneContext } from '@kit/types';
-import { excludeBand, scatterRocks } from '@kit/vegetation';
-import { makeWater, type WaterHandle } from '@kit/water';
+import { makeWater } from '@kit/water';
 import { makeWorld, type WorldCore } from '@kit/world';
-import {
-  MEMORYCHAIN_ACTION,
-  MEMORYCHAIN_CUE,
-  MEMORYCHAIN_END,
-  MEMORYCHAIN_L,
-  MEMORYCHAIN_POS,
-  memoryChainDecoder,
-} from '@sim/envs/memorychain';
+import { MEMORYCHAIN_CUE, MEMORYCHAIN_END, MEMORYCHAIN_POS } from '@sim/envs/memorychain';
 import type { EnvGeometry, GridGeometry } from '@sim/types';
-
-export const PASSAGE_HALF = (MEMORYCHAIN_L * CELL) / 2;
-export const CAVERN_X0 = -PASSAGE_HALF - 6.5;
-export const CAVERN_X1 = PASSAGE_HALF + 5.5;
-export const CAVERN_HALF_W = 5.7;
-export const CAVERN_HEIGHT = 9.2;
-export const CAVERN_SKIRT = 1.6;
-export const WATER_LEVEL = -0.11;
-export const WATER_HALF_Z = 14;
-export const POOL_HALF_Z = 4.5;
-
-export const FOG_EXTENT = 100;
-
-export const SUN_DIR: readonly [number, number, number] = [-0.42, 0.66, 0.62];
-export const SHADOW_CENTER: readonly [number, number, number] = [-6, 0.4, 0];
-export const SHADOW_RADIUS = 13;
-
-export const CAMERA_AZIMUTH = -0.935;
-
-export function resolveGrid(geometry: EnvGeometry): GridGeometry {
-  const g = geometry.grid;
-  if (g && g.w === MEMORYCHAIN_L && g.h === 1) return g;
-  const truth = memoryChainDecoder.geometry(memoryChainDecoder.initStatic(0), 0);
-  return truth.grid ?? { w: MEMORYCHAIN_L, h: 1, walls: new Uint8Array(MEMORYCHAIN_L) };
-}
+import { makeContinuousSurface, makeSceneryBank, type ViewCoverage } from '../jelly-bean-world/view';
+import { extendWater } from '../half-cheetah/world';
 
 export const CUE_CELL = 0;
 export const CHOICE_CELL = MEMORYCHAIN_END;
 
+export function resolveGrid(geometry: EnvGeometry): GridGeometry {
+  const grid = geometry.grid;
+  if (!grid || grid.w !== MEMORYCHAIN_END + 1 || grid.h !== 1) throw new Error('Memory Chain grid is missing or invalid');
+  return grid;
+}
+
 export interface CaveSkin {
   stone: THREE.Color;
-  rockLow: THREE.Color;
-  rockHigh: THREE.Color;
-  mineral: THREE.Color;
-  waterShallow: THREE.Color;
-  waterDeep: THREE.Color;
-  firefly: THREE.Color;
-  quartz: THREE.Color;
   rim: THREE.Color;
-}
-
-export function caveSkin(palette: Palette, tokens: typeof TOKENS): CaveSkin {
-  const silver = tokens.accents['po-maze'] ?? palette.hemiSky;
-  const firefly = tokens.accents['memory-chain'] ?? palette.accentLight;
-  const lift = 0;
-  const up = (c: THREE.Color): THREE.Color => (lift > 0 ? c.lerp(new THREE.Color(silver), lift) : c);
-  return {
-    stone: up(blendTokens(palette.groundB, silver, 0.64)),
-    rockLow: up(blendTokens(palette.groundB, silver, 0.38)),
-    rockHigh: up(blendTokens(palette.groundA, silver, 0.09)),
-    mineral: up(blendTokens(palette.groundB, silver, 0.76)),
-    waterShallow: shade(blendTokens(palette.groundA, palette.hemiSky, 0.45), 0.5),
-    waterDeep: shade(palette.skyBottom, 0.68),
-    firefly: new THREE.Color(firefly),
-    quartz: up(blendTokens(palette.groundB, silver, 0.6)),
-    rim: blendTokens(palette.hemiSky, silver, 0.55),
-  };
-}
-
-export function cavernWidthAt(x: number, seed: number): number {
-  const n = hash2f(Math.floor(x * 0.5) + 97, 3, seed) - 0.5;
-  const m = Math.sin(x * 0.31 + seed * 0.0007) * 0.5;
-  return CAVERN_HALF_W * (1 + 0.09 * m + 0.06 * n);
-}
-
-export function cavernHeightAt(x: number, seed: number): number {
-  const n = hash2f(Math.floor(x * 0.4) + 13, 7, seed) - 0.5;
-  const m = Math.sin(x * 0.22 + 1.7) * 0.5 + Math.sin(x * 0.51 - 0.4) * 0.22;
-  return CAVERN_HEIGHT * (1 + 0.11 * m + 0.08 * n);
-}
-
-export function cavernSurface(
-  x: number,
-  t: number,
-  seed: number,
-  out: { z: number; y: number; nz: number; ny: number },
-): void {
-  const w = cavernWidthAt(x, seed);
-  const h = cavernHeightAt(x, seed);
-  const phi = Math.PI * t;
-  const c = Math.cos(phi);
-  const s = Math.sin(phi);
-  out.z = -w * c;
-  out.y = h * s;
-  const nz = h * c;
-  const ny = -w * s;
-  const len = Math.hypot(nz, ny) || 1;
-  out.nz = nz / len;
-  out.ny = ny / len;
-}
-
-export function makeCavernGeometry(seed: number, skin: CaveSkin): THREE.BufferGeometry {
-  const rings = 19;
-  const sweeps = 96;
-  const rowCount = rings + 2;
-  const vertexCount = (sweeps + 1) * rowCount;
-  const positions = new Float32Array(vertexCount * 3);
-  const colors = new Float32Array(vertexCount * 3);
-  const indices = new Uint32Array(sweeps * (rowCount - 1) * 6);
-
-  const low = skin.rockLow;
-  const high = skin.rockHigh;
-  const c = new THREE.Color();
-  const surf = { z: 0, y: 0, nz: 0, ny: 0 };
-
-  let v = 0;
-  for (let i = 0; i <= sweeps; i++) {
-    const x = CAVERN_X0 + ((CAVERN_X1 - CAVERN_X0) * i) / sweeps;
-    for (let j = 0; j < rowCount; j++) {
-      let z: number;
-      let y: number;
-      if (j === 0 || j === rowCount - 1) {
-        const t = j === 0 ? 0 : 1;
-        cavernSurface(x, t, seed, surf);
-        z = surf.z;
-        y = -CAVERN_SKIRT;
-      } else {
-        const t = (j - 1) / (rings - 1);
-        cavernSurface(x, t, seed, surf);
-        z = surf.z;
-        y = surf.y;
-        const n = hash2f(i, j * 31 + 5, seed) - 0.5;
-        const n2 = hash2f(i * 7 + 3, j, seed ^ 0x51ed270b) - 0.5;
-        const push = (n * 0.62 + n2 * 0.3) * (0.24 + 0.5 * Math.sin(Math.PI * t));
-        z += surf.nz * push;
-        y += surf.ny * push;
-      }
-      positions[v * 3] = x;
-      positions[v * 3 + 1] = y;
-      positions[v * 3 + 2] = z;
-      const k = clamp01(y / CAVERN_HEIGHT);
-      c.copy(low).lerp(high, smoothstep01(k * 1.15));
-      const grain = 1 + (hash2f(i * 13 + 1, j * 5 + 2, seed) - 0.5) * 0.16;
-      colors[v * 3] = c.r * grain;
-      colors[v * 3 + 1] = c.g * grain;
-      colors[v * 3 + 2] = c.b * grain;
-      v++;
-    }
-  }
-
-  let o = 0;
-  for (let i = 0; i < sweeps; i++) {
-    for (let j = 0; j < rowCount - 1; j++) {
-      const a = i * rowCount + j;
-      const b = (i + 1) * rowCount + j;
-      indices[o++] = a;
-      indices[o++] = b;
-      indices[o++] = b + 1;
-      indices[o++] = a;
-      indices[o++] = b + 1;
-      indices[o++] = a + 1;
-    }
-  }
-
-  const g = new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  g.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-  g.setIndex(new THREE.BufferAttribute(indices, 1));
-  g.computeVertexNormals();
-  g.computeBoundingSphere();
-  g.name = 'cavernShell';
-  return g;
-}
-
-function spikeGeometry(): THREE.BufferGeometry {
-  const radial = 7;
-  const g = new THREE.CylinderGeometry(0.02, 0.5, 1, radial, 2);
-  g.rotateX(Math.PI);
-  g.translate(0, -0.5, 0);
-  const pos = g.getAttribute('position');
-  const colors = new Float32Array(pos.count * 3);
-  for (let i = 0; i < pos.count; i++) {
-    const y = pos.getY(i);
-    const t = clamp01(-y);
-    const k = 1 - 0.1 * Math.sin(Math.PI * t);
-    pos.setX(i, pos.getX(i) * k);
-    pos.setZ(i, pos.getZ(i) * k);
-    const grade = 0.72 + 0.5 * t * t;
-    colors[i * 3] = grade;
-    colors[i * 3 + 1] = grade;
-    colors[i * 3 + 2] = grade;
-  }
-  pos.needsUpdate = true;
-  g.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-  g.computeVertexNormals();
-  g.name = 'stalactiteSpike';
-  return g;
-}
-
-export interface StalactiteField {
-  mesh: THREE.InstancedMesh;
-  count: number;
-  dispose(): void;
-}
-
-export function makeStalactites(
-  seed: number,
-  skin: CaveSkin,
-): StalactiteField {
-  const wanted = 54;
-  const geometry = spikeGeometry();
-  const material = oakMaterial({
-    color: blendTokens(skin.rockLow, skin.mineral, 0.22),
-    vertexColors: true,
-    flatShading: true,
-    roughness: 0.86,
-    rimColor: skin.rim,
-    rimStrength: 0.42,
-    emissive: blendTokens(skin.rockLow, skin.mineral, 0.22),
-    emissiveIntensity: 0.03,
-    toonSteps: 2,
-    toonSoftness: 0.34,
-    toonFloor: 0.24,
-    name: 'stalactiteMaterial',
-  });
-  const mesh = new THREE.InstancedMesh(geometry, material, wanted);
-  mesh.name = 'stalactites';
-  mesh.castShadow = true;
-  mesh.receiveShadow = false;
-  mesh.frustumCulled = false;
-  mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(wanted * 3), 3);
-
-  const rng = streamFor(seed | 0, 'stalactites');
-  const matrix = new THREE.Matrix4();
-  const position = new THREE.Vector3();
-  const quaternion = new THREE.Quaternion();
-  const scale = new THREE.Vector3();
-  const axis = new THREE.Vector3();
-  const down = new THREE.Vector3(0, -1, 0);
-  const color = new THREE.Color();
-  const surf = { z: 0, y: 0, nz: 0, ny: 0 };
-
-  for (let i = 0; i < wanted; i++) {
-    const x = CAVERN_X0 + 1.5 + rng() * (CAVERN_X1 - CAVERN_X0 - 3);
-    const foreground = rng() < 0.06;
-    const t = foreground ? 0.6 + rng() * 0.16 : 0.28 + rng() * 0.3;
-    cavernSurface(x, t, seed, surf);
-    const shortness = rng();
-    const len = foreground ? 1.2 + rng() * 1.1 : 0.42 + shortness * shortness * 1.5;
-    const girth = (foreground ? 1.15 : 0.85 + rng() * 0.55) * (0.85 + 0.3 * rng());
-    axis.set(0, -1, 0).lerp(new THREE.Vector3(0, surf.ny, surf.nz), 0.3).normalize();
-    quaternion.setFromUnitVectors(down, axis);
-    position.set(x, surf.y + 0.06, surf.z);
-    scale.set(girth, len, girth);
-    matrix.compose(position, quaternion, scale);
-    mesh.setMatrixAt(i, matrix);
-    const k = 0.82 + rng() * 0.34;
-    color.setRGB(k, k, k);
-    mesh.setColorAt(i, color);
-  }
-  mesh.instanceMatrix.needsUpdate = true;
-  if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
-  mesh.computeBoundingSphere();
-
-  return {
-    mesh,
-    count: wanted,
-    dispose() {
-      mesh.dispose();
-      geometry.dispose();
-      material.dispose();
-      mesh.removeFromParent();
-    },
-  };
 }
 
 export interface WorldHandle extends WorldCore {
   sky: SkyHandle;
   rig: LightRig;
   field: CellFieldHandle;
-  water: WaterHandle;
   skin: CaveSkin;
-  fireflies: AmbientParticlesHandle;
-  flood: AmbientParticlesHandle;
+  setView(coverage: ViewCoverage, camera: THREE.PerspectiveCamera): void;
 }
 
 export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeometry): WorldHandle {
-  const palette: Palette = ctx.tokens.palettes.cave;
-  const skin = caveSkin(palette, ctx.tokens);
-  const w = makeWorld('fireflyCave');
-
-  const sky = skyFromPalette(palette, 'cave', {
-    topSpread: 0.5,
-    bottomSpread: 0.45,
-    dither: 0.01,
-    radius: 320,
-  });
+  const w = makeWorld('limestoneCavernLake');
+  const palette = ctx.tokens.palettes.cave;
+  const skin = { stone: new THREE.Color(0xa8b7ae), rim: new THREE.Color(0xadcfd0) };
+  const sky = w.time(w.own(skyFromPalette(palette, 'cave', { topSpread: 0.8, bottomSpread: 0.5 })));
+  sky.setColors(0x192e3b, 0x2e5b64, 0x112b3a);
   w.add(sky.mesh);
-  w.own(sky);
-  w.time({ setTime: (t) => sky.setTime(t) });
-
-  const rig = makeLightRig(palette, {
-    sunDir: SUN_DIR,
-    pointCount: 4,
-    pointDistance: 15,
-    pointDecay: 1.45,
-    sunDistanceScale: 2.4,
-  });
+  const rig = w.own(makeLightRig(palette, { sunDir: [-0.2, 0.85, 0.42], pointCount: 3, pointDistance: 12 }));
+  rig.hemi.color.set(0xa6c7c8);
+  rig.hemi.intensity = 1.6;
+  rig.hemi.groundColor.set(0x466c73);
+  rig.sun.color.set(0xd5e3ca);
+  rig.sun.intensity = 1.45;
+  rig.setShadowFocus({ x: 0, y: 0, z: 0 }, grid.w * CELL * 0.6);
   w.add(rig.group);
-  w.own(rig);
-  rig.setShadowFocus({ x: SHADOW_CENTER[0], y: SHADOW_CENTER[1], z: SHADOW_CENTER[2] }, SHADOW_RADIUS);
-
-  applyFog(scene, palette, FOG_EXTENT);
-
-  const cavernGeometry = makeCavernGeometry(ctx.seed, skin);
-  const cavernMaterial: OakMaterial = oakMaterial({
-    vertexColors: true,
-    flatShading: true,
-    roughness: 0.97,
-    rimColor: skin.rim,
-    rimStrength: 0.4,
-    emissive: blendTokens(skin.rockLow, skin.rockHigh, 0.72),
-    emissiveIntensity: 0.03,
-    toonSteps: 3,
-    toonSoftness: 0.32,
-    toonFloor: 0.36,
-    side: THREE.FrontSide,
-    name: 'cavernMaterial',
-  });
-  const cavern = new THREE.Mesh(cavernGeometry, cavernMaterial);
-  cavern.name = 'cavernShell';
-  cavern.receiveShadow = true;
-  cavern.castShadow = false;
-  w.add(cavern);
-  w.own({
-    dispose() {
-      cavernGeometry.dispose();
-      cavernMaterial.dispose();
-      cavern.removeFromParent();
-    },
-  });
-
-  const water = makeWater({
-    size: [(CAVERN_X1 - CAVERN_X0) + 34, WATER_HALF_Z * 2],
-    palette,
-    segments: 96,
-    shallow: skin.waterShallow,
-    deep: skin.waterDeep,
-    sky: blendTokens(palette.hemiSky, skin.rim, 0.35),
-    caustic: blendTokens(palette.hemiSky, skin.firefly, 0.25),
-    amplitude: 0.0125,
-    waveScale: 0.65,
-    speed: 0.22,
-    fresnel: 0.24,
-    caustics: 0.14,
-    depthFalloff: 10,
-    opacity: 0.97,
-    sunDir: rig.sunDirection,
-    level: WATER_LEVEL,
-    name: 'cavePools',
-  });
-  water.mesh.position.x = (CAVERN_X0 + CAVERN_X1) * 0.5;
-  water.mesh.position.z = 4;
+  scene.fog = new THREE.FogExp2(0x274853, 0.0085);
+  const water = w.time(w.own(makeWater({
+    size: 2, segments: 2, palette, level: -0.22,
+    shallow: 0x386576, deep: 0x102a43, sky: 0x6997a7, caustic: 0x41606a,
+    amplitude: 0.012, waveScale: 0.6, speed: 0.2, fresnel: 0.26, caustics: 0.025,
+    depthFalloff: 0.85, opacity: 0.96, sunDir: rig.sunDirection, name: 'cavernLake',
+  })));
+  water.setColors(0x386576, 0x102a43);
   w.add(water.mesh);
-  w.time(w.own(water));
-
-  const field = buildCellField(
-    grid,
-    {
-      floorColor: skin.stone,
-      wallColor: skin.stone,
-      floorTint: (x) => {
-        const k = x / Math.max(1, MEMORYCHAIN_L - 1);
-        return blendTokens(0xffffff, 0x9aa6bb, 0.28 * k);
-      },
-      floorInset: 0.09,
-      floorThickness: 0.34,
-      jitter: 0.14,
-      rimColor: skin.rim,
-      rimStrength: 0.6,
-      seed: ctx.seed,
-      name: 'walkwayStones',
-    },
-  );
-  {
-    const floor = oakUniforms(field.floorMaterial);
-    if (floor) floor.uniforms.uToonFloor.value = 0.34;
-    field.floorMaterial.emissive.copy(skin.stone);
-    field.floorMaterial.emissiveIntensity = 0.03;
-  }
+  const half = (grid.w - 1) * CELL / 2;
+  const groundHeight = `float width = 8.2 + sin(p.x*.14)*1.1 + sin(p.x*.34)*.6;
+float lake = length(vec2(p.x/${(half + 0.6).toFixed(4)},(p.y+sin(p.x*.1)*.8)/width));
+float passage = abs(p.y-sin(p.x*.12)*.45)/1.8;
+float bed = -1.1 + smoothstep(.7,.96,min(lake,passage))*1.15 + smoothstep(1.05,2.4,lake)*smoothstep(1.,1.7,passage)*(2.2+sin(p.x*.11)*sin(p.y*.07));
+float wall = smoothstep(${(half + 1).toFixed(4)},${(half + 6).toFixed(4)},abs(p.x))*(1.-smoothstep(8.,12.,abs(p.y)))*smoothstep(1.2,2.8,abs(p.y))*6.;
+float road = 1.-smoothstep(${(half + 0.6).toFixed(4)},${(half + 1.5).toFixed(4)},abs(p.x));
+return mix(bed+wall,clamp(bed+wall,-.4,-.04),road*(1.-smoothstep(.4,.85,abs(p.y))));`;
+  const floor = w.time(w.own(makeContinuousSurface({
+    name: 'flowstoneLakeMargins', colorA: skin.stone, colorB: 0x66828a, segments: 160,
+    height: groundHeight,
+  })));
+  w.add(floor.mesh);
+  water.material.fragmentShader = `float lakeBed(vec2 p) {${groundHeight}}\n${water.material.fragmentShader}`;
+  const field = w.own(buildCellField(grid, {
+    floorColor: skin.stone, wallColor: skin.stone, floorInset: 0.025, floorThickness: 0.42, jitter: 0.015,
+    rimColor: 0xa7ddd5, rimStrength: 0.25, seed: ctx.seed, name: 'luminousCauseway',
+  }));
+  field.floorMaterial.emissive.set(0x5a958e);
+  field.floorMaterial.emissiveIntensity = 0.18;
   w.add(field.group);
-  w.own(field);
-  w.time({ setTime: (t) => field.setTime(t) });
-
-  const extent = gridExtent(grid);
-  const banks = scatterRocks({
-    count: 82,
-    area: { x: 0, z: 0.3, halfX: extent.width * 0.5 + 4.5, halfZ: POOL_HALF_Z },
-    seed: ctx.seed ^ 0x2f19,
-    exclude: excludeBand(0, CELL * 0.5, 0.55),
-    heightAt: () => WATER_LEVEL - 0.24,
-    color: skin.mineral,
-    scale: [0.42, 1.55],
-    stretch: [1.3, 3.6],
-    hueJitter: 0.22,
-    rimColor: skin.rim,
-    rimStrength: 0.8,
-    castShadow: false,
-    receiveShadow: false,
-    name: 'stalagmites',
-  });
-  w.add(banks.group);
-  w.time(w.own(banks));
-
-  const stalactites = makeStalactites(ctx.seed, skin);
-  w.add(stalactites.mesh);
-  w.own(stalactites);
-
-  const fireflies = makeAmbientParticles({
-    preset: 'fireflies',
-    count: 640,
-    bounds: { x: 0, y: 1.4, z: -0.1, halfX: PASSAGE_HALF + 3, halfY: 1.7, halfZ: 3.5 },
-    seed: ctx.seed ^ 0x11e5,
-    color: skin.firefly,
-    size: 2.35,
-    intensity: 2.9,
-    opacity: 0.95,
-    rise: 0.05,
-    swirl: 0.5,
-    name: 'passageFireflies',
-  });
-  w.add(fireflies.points);
-  w.size(w.time(w.own(fireflies)));
-
-  const vaultDust = makeAmbientParticles({
-    preset: 'dust',
-    count: 420,
-    bounds: { x: 0, y: 4.6, z: -0.6, halfX: PASSAGE_HALF + 4, halfY: 3.1, halfZ: 3.4 },
-    seed: ctx.seed ^ 0x7c03,
-    color: blendTokens(palette.hemiSky, skin.mineral, 0.4),
-    size: 1.5,
-    intensity: 0.85,
-    opacity: 0.4,
-    rise: 0.015,
-    swirl: 0.24,
-    name: 'vaultDust',
-  });
-  w.add(vaultDust.points);
-  w.size(w.time(w.own(vaultDust)));
-
-  const flood = makeAmbientParticles({
-    preset: 'fireflies',
-    count: 520,
-    bounds: { x: 0, y: 1.15, z: 0, halfX: 2.4, halfY: 1.3, halfZ: 1.5 },
-    seed: ctx.seed ^ 0x63b1,
-    color: skin.firefly,
-    size: 3.4,
-    intensity: 3.4,
-    opacity: 1,
-    rise: 0.16,
-    swirl: 0.62,
-    name: 'choiceFlood',
-  });
-  flood.setDensity(0);
-  w.add(flood.points);
-  w.size(w.time(w.own(flood)));
-
+  w.time(field);
+  const vaultGeometry = w.own(new THREE.BufferGeometry());
+  const positions: number[] = [];
+  const colors: number[] = [];
+  const indices: number[] = [];
+  const stone = new THREE.Color();
+  const low = new THREE.Color(0x97b4ad);
+  const high = new THREE.Color(0x647e86);
+  for (let ring = 0; ring <= 24; ring++) {
+    const x = ring - 12;
+    for (let arc = 0; arc <= 32; arc++) {
+      const angle = arc / 32 * Math.PI;
+      const rise = Math.sin(angle);
+      const phase = x * Math.PI / 12;
+      const fold = Math.cos(phase * 2 + Math.sin(angle * 3) * 0.25) * 0.65 + Math.cos(phase * 5 + angle * 0.4) * 0.25;
+      const width = 12 + fold * (0.5 + Math.pow(rise, 0.65) * 1.7);
+      const y = -0.7 + rise * (10.6 + Math.cos(phase) * 0.7 + fold);
+      positions.push(x, y, -Math.cos(angle) * width);
+      stone.copy(low).lerp(high, rise * 0.75);
+      colors.push(stone.r, stone.g, stone.b);
+      if (ring < 24 && arc < 32) {
+        const a = ring * 33 + arc;
+        const b = a + 33;
+        indices.push(a, b, a + 1, b, b + 1, a + 1);
+      }
+    }
+  }
+  vaultGeometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  vaultGeometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+  vaultGeometry.setIndex(indices);
+  vaultGeometry.computeVertexNormals();
+  const vaultMaterial = w.own(oakMaterial({ color: 0xffffff, vertexColors: true, roughness: 0.97, rimColor: skin.rim, rimStrength: 0.18, emissive: 0x283f48, emissiveIntensity: 0.04, toonSteps: 3, toonSoftness: 0.32, toonFloor: 0.36, side: THREE.FrontSide }));
+  const vault = w.own(makeSceneryBank({
+    name: 'continuousLimestoneVault', seed: ctx.seed, tileSize: 24, perTile: 1,
+    geometry: vaultGeometry, material: vaultMaterial, colorA: 0xffffff, colorB: 0xffffff,
+    fill(tx, tz, _rng, write) {
+      if (tz === 0) write((tx + 0.5) * 24, 0, 0, 0, 1, 1, 0);
+    },
+  }));
+  w.add(vault.mesh);
+  const motes = w.size(w.time(w.own(makeAmbientParticles({
+    preset: 'fireflies', count: 220, bounds: { y: 2, halfX: 28, halfY: 3, halfZ: 8 },
+    seed: ctx.seed, color: 0xaedbba, size: 1.7, intensity: 1.8, opacity: 0.75, rise: 0.02, name: 'caveMotes',
+  }))));
+  w.add(motes.points);
   return w.seal({
-    sky,
-    rig,
-    field,
-    water,
-    skin,
-    fireflies,
-    flood,
-  }, {
-    time: (t) => {
-      oakUniforms(cavernMaterial)?.setTime(t);
+    sky, rig, field, skin,
+    setView(coverage: ViewCoverage, camera: THREE.PerspectiveCamera) {
+      extendWater(water.mesh, coverage, 2, 2, '-0.22 - lakeBed(vWorld.xz)');
+      floor.setView(coverage);
+      vault.setView(coverage);
+      sky.mesh.position.copy(camera.position);
+      sky.mesh.scale.setScalar(coverage.far * 0.85);
     },
   });
 }
 
 export function readPos(state: { pose: Float32Array }): number {
-  const v = Math.round(state.pose[MEMORYCHAIN_POS] ?? 0);
-  return v < 0 ? 0 : v > MEMORYCHAIN_END ? MEMORYCHAIN_END : v;
+  return Math.max(0, Math.min(MEMORYCHAIN_END, Math.round(state.pose[MEMORYCHAIN_POS] ?? 0)));
 }
 
 export function readCue(state: { pose: Float32Array }): 0 | 1 {
   return Math.round(state.pose[MEMORYCHAIN_CUE] ?? 0) === 1 ? 1 : 0;
 }
-
-export function readChoice(state: { pose: Float32Array }): 0 | 1 {
-  return (Math.trunc(state.pose[MEMORYCHAIN_ACTION] ?? 0) & 1) === 1 ? 1 : 0;
-}
-

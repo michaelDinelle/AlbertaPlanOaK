@@ -31,7 +31,7 @@ export abstract class StageScene<W extends WorldCore> implements SceneModule {
   protected debugOn = false;
 
   protected abstract readonly stageName: string;
-  protected abstract buildWorld(ctx: SceneContext): W;
+  protected abstract buildWorld(ctx: SceneContext): W | Promise<W>;
   protected abstract buildActors(ctx: SceneContext, world: W): void;
   protected abstract rigOptions(ctx: SceneContext): OrbitRigOptions;
   protected abstract overlayOptions(ctx: SceneContext): GroundTruthOptions;
@@ -50,7 +50,7 @@ export abstract class StageScene<W extends WorldCore> implements SceneModule {
   async init(ctx: SceneContext): Promise<void> {
     this.ctx = ctx;
     this.scene.name = `${this.stageName}Scene`;
-    const world = this.buildWorld(ctx);
+    const world = await this.buildWorld(ctx);
     this.world = world;
     this.scene.add(world.group);
     this.buildActors(ctx, world);

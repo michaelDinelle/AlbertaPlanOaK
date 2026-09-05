@@ -1,3 +1,6 @@
+import { sculptureMaterial } from '../key-corridor/world';
+import { makeLandscape } from '../key-corridor/world';
+import type { ViewCoverage } from '../jelly-bean-world/view';
 import * as THREE from 'three';
 import {
   buildCellField,
@@ -12,33 +15,25 @@ import {
 import { applyFog, makeLightRig, type LightRig } from '@kit/lighting';
 import { emissiveMaterial, oakMaterial, oakUniforms, type EmissiveMaterial, type OakMaterial } from '@kit/materials';
 import { blendTokens, clamp01, shade, smoothstep01 } from '@kit/mix';
-import { makeAmbientParticles, makeMistPlanes } from '@kit/particles';
+import { makeAmbientParticles } from '@kit/particles';
 import { mergeColoredParts, type ColoredPart } from '@kit/parts';
 import { skyFromPalette, type SkyHandle } from '@kit/sky';
-import { makeTerrain, type TerrainHandle } from '@kit/terrain';
-import { valueNoise2 } from '@kit/textures';
 import { TOKENS, type Palette } from '@kit/tokens';
 import type { SceneContext } from '@kit/types';
 import {
   excludeAny,
-  excludeRect,
   scatterFlowers,
   scatterGrass,
   scatterRocks,
-  scatterTrees,
   type ExcludeFn,
   type VegetationHandle,
 } from '@kit/vegetation';
 import { makeWorld, type WorldCore } from '@kit/world';
 import {
-  MKC_DOORS,
-  MKC_GOAL,
   MKC_H,
-  MKC_KEYS,
   MKC_ROOM_BASE,
   MKC_W,
   mkcRoomCells,
-  mkcWalls,
 } from '@sim/envs/multikeycorridor';
 import type { EnvGeometry, GridCell, GridGeometry } from '@sim/types';
 
@@ -57,31 +52,28 @@ export const CAMERA_STANDOFF = 13.5;
 export const CHAMBERS = 4;
 
 export function resolveGrid(geometry: EnvGeometry): GridGeometry {
-  const g = geometry.grid;
-  if (g && g.w === MKC_W && g.h === MKC_H) return g;
-  return {
-    w: MKC_W,
-    h: MKC_H,
-    walls: mkcWalls(),
-    goal: { ...MKC_GOAL },
-    doors: MKC_DOORS.map((c) => ({ ...c })),
-    keys: MKC_KEYS.map((c) => ({ ...c })),
-    hallways: MKC_DOORS.map((c) => ({ ...c })),
-  };
+  const grid = geometry.grid;
+  if (!grid || grid.w !== MKC_W || grid.h !== MKC_H || grid.walls.length !== grid.w * grid.h) {
+    throw new Error('Multi-Key Corridor requires complete recorded grid geometry');
+  }
+  return grid;
 }
 
 export function resolveDoors(grid: GridGeometry): readonly GridCell[] {
-  const d = grid.doors && grid.doors.length > 0 ? grid.doors : grid.hallways;
-  return d && d.length > 0 ? d : MKC_DOORS;
+  const doors = grid.doors;
+  if (doors?.length !== 3) throw new Error('Multi-Key Corridor requires three recorded doors');
+  return doors;
 }
 
 export function resolveKeys(grid: GridGeometry): readonly GridCell[] {
-  const k = grid.keys;
-  return k && k.length > 0 ? k : MKC_KEYS;
+  const keys = grid.keys;
+  if (keys?.length !== 3) throw new Error('Multi-Key Corridor requires three recorded initial keys');
+  return keys;
 }
 
 export function resolveGoal(grid: GridGeometry): GridCell {
-  return grid.goal ?? MKC_GOAL;
+  if (!grid.goal) throw new Error('Multi-Key Corridor requires its recorded initial goal');
+  return grid.goal;
 }
 
 const CHAMBER_LOOKUP: Int8Array = (() => {
@@ -231,21 +223,10 @@ export function excludeProcession(grid: GridGeometry, doors: readonly GridCell[]
   return (_x, z) => Math.abs(z - zWorld) < halfWidth;
 }
 
-export function makeGardenHeight(seed: number): (x: number, z: number) => number {
-  return (x, z) => {
-    const out = Math.max(Math.abs(x) - TEMPLE_HALF_X, Math.abs(z) - TEMPLE_HALF_Z);
-    const w = smoothstep01(out / 6);
-    if (w <= 0) return 0;
-    const n1 = valueNoise2(x * 0.08 + 3.1, z * 0.08 + 9.4, 64, seed) - 0.5;
-    const n2 = valueNoise2(x * 0.19 + 1.7, z * 0.19 + 5.2, 64, seed ^ 0x51ed270b) - 0.5;
-    return w * (n1 * 2.6 + n2 * 0.9);
-  };
-}
-
 export interface WorldHandle extends WorldCore {
   sky: SkyHandle;
   rig: LightRig;
-  terrain: TerrainHandle;
+  setView(coverage: ViewCoverage, camera: THREE.Camera): void;
   field: CellFieldHandle;
   portalRoots: THREE.Object3D[];
   doors: readonly GridCell[];
@@ -282,38 +263,20 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   w.own(rig);
   rig.setShadowFocus({ x: 0.5, y: 0.35, z: 0 }, SHADOW_RADIUS);
 
-  applyFog(scene, palette, FOG_EXTENT);
+  const fog = applyFog(scene, palette, FOG_EXTENT);
 
-  const terrain = makeTerrain({
-    size: [TERRAIN_SIZE, TERRAIN_SIZE],
-    segments: [TERRAIN_SEGMENTS, TERRAIN_SEGMENTS],
-    seed: ctx.seed,
-    heightFn: makeGardenHeight(ctx.seed),
-    jitter: 0,
-    colorNoise: 0.05,
-    slopeColor: skin.soil,
-    slopeStrength: 0.5,
-    slopeSharpness: 2.2,
-    flattenMask: { x: 0, z: 0, halfX: TEMPLE_HALF_X, halfZ: TEMPLE_HALF_Z, feather: 2.8 },
-    flattenHeight: COURT_SINK,
-    colorRamp: [
-      { t: 0, color: shade(blendTokens(palette.groundA, skin.soil, 0.45), 0.3) },
-      { t: 0.45, color: shade(palette.groundA, 0.26) },
-      { t: 1, color: shade(blendTokens(palette.groundB, palette.groundA, 0.45), 0.2) },
-    ],
-    materialOptions: {
-      rimColor: palette.skyHorizon,
-      rimStrength: 0.16,
-      toonSteps: 3,
-      toonSoftness: 0.3,
-      toonFloor: 0.26,
-    },
-    receiveShadow: true,
-    castShadow: false,
-    name: 'templeGarden',
+  const landscape = makeLandscape(w, ctx, {
+    name: 'templeOrchards',
+    halfX: TEMPLE_HALF_X,
+    halfZ: TEMPLE_HALF_Z,
+    ground: blendTokens(palette.groundA, skin.soil, 0.35),
+    grass: palette.groundB,
+    trees: [skin.brambleLeaf],
+    grounds: skin.chambers.map((chamber) => chamber.floor),
+    archetypes: ['conifer', 'broadleaf'],
+    treeKind: (x) => x < -TEMPLE_HALF_X ? 'conifer' : 'broadleaf',
+    amplitude: 4.5,
   });
-  w.add(terrain.mesh);
-  w.own(terrain);
 
   const white = palette.sun;
   const field = buildCellField(
@@ -351,13 +314,10 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   w.own(field);
   w.time({ setTime: (t) => field.setTime(t) });
 
-  const stoneMaterial: OakMaterial = oakMaterial({
-    vertexColors: true,
-    flatShading: true,
+  const stoneMaterial: OakMaterial = sculptureMaterial({
     roughness: 0.93,
     rimColor: palette.skyHorizon,
     rimStrength: 0.34,
-    toonSteps: 3,
     toonSoftness: 0.3,
     toonFloor: 0.26,
     name: 'templeStone',
@@ -406,6 +366,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
 
   const lanternGeometry = makeLanternGeometry(skin);
   w.own({ dispose: () => lanternGeometry.dispose() });
+
   const lanternSpots: { x: number; z: number }[] = [];
   {
     const world: Vec3Tuple = [0, 0, 0];
@@ -502,94 +463,34 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     const b = (bounds[spec.chamber]) as ChamberBounds;
     const chamber = skin.chambers[spec.chamber] as ChamberSkin;
     const color = spec.kind === 'flowers' ? chamber.bloom : chamber.litter;
-    const options = {
-      count: spec.count,
-      area: { x: b.cx, z: b.cz, halfX: b.halfX, halfZ: b.halfZ },
-      seed: (ctx.seed ^ 0x5b10) + i * 977,
-      exclude: noPlanting,
-      color,
-      scale: spec.scale,
-      stretch: spec.stretch,
-      hueJitter: 0.24,
-      ...(spec.wind > 0 ? { wind: spec.wind, windFrequency: 1.5 } : {}),
-      rimColor: palette.skyHorizon,
-      rimStrength: 0.3,
-      castShadow: false,
-      name: spec.name,
-    };
-    const handle =
-      spec.kind === 'grass'
-        ? scatterGrass(options)
-        : spec.kind === 'flowers'
-          ? scatterFlowers(options)
-          : scatterRocks(options);
-    w.add(handle.group);
-    w.time(w.own(handle));
-    planted.push(handle);
-  }
-
-  const offTemple = excludeRect(0, 0, TEMPLE_HALF_X, TEMPLE_HALF_Z, 1.4);
-  const nearCamera = excludeRect(
-    Math.sin(CAMERA_AZIMUTH) * CAMERA_STANDOFF,
-    Math.cos(CAMERA_AZIMUTH) * CAMERA_STANDOFF,
-    6,
-    5,
-    0,
-  );
-  const trees: VegetationHandle[] = [];
-  const treeSpecs: readonly {
-    archetype: 'broadleaf' | 'conifer' | 'bare';
-    count: number;
-    area: { x: number; z: number; halfX: number; halfZ: number };
-    color: THREE.Color;
-    name: string;
-  }[] = [
-    {
-      archetype: 'conifer',
-      count: 22,
-      area: { x: -14.5, z: 0, halfX: 6, halfZ: 11 },
-      color: shade(blendTokens(palette.groundA, palette.hemiSky, 0.22), 0.42),
-      name: 'westConifers',
-    },
-    {
-      archetype: 'broadleaf',
-      count: 20,
-      area: { x: 0, z: -13.5, halfX: 14, halfZ: 5 },
-      color: shade(blendTokens(palette.groundA, palette.groundB, 0.35), 0.3),
-      name: 'northBroadleaf',
-    },
-    {
-      archetype: 'broadleaf',
-      count: 18,
-      area: { x: 15, z: 0, halfX: 6, halfZ: 10 },
-      color: shade(blendTokens(palette.groundB, skin.chambers[3]?.litter ?? palette.groundB, 0.4), 0.26),
-      name: 'sanctumBroadleaf',
-    },
-  ];
-  for (let i = 0; i < treeSpecs.length; i++) {
-    const spec = treeSpecs[i] as (typeof treeSpecs)[number];
-    const handle = scatterTrees({
-      archetypes: [spec.archetype],
-      count: spec.count,
-      area: spec.area,
-      seed: (ctx.seed ^ 0x1a70) + i * 613,
-      exclude: excludeAny(offTemple, nearCamera),
-      heightAt: (x, z) => terrain.sampleHeight(x, z),
-      maxSlope: 0.7,
-      color: spec.color,
-      scale: [0.75, 1.35],
-      stretch: [0.9, 1.4],
-      hueJitter: 0.24,
-      wind: 0.03,
-      windFrequency: 0.85,
-      rimColor: palette.skyHorizon,
-      rimStrength: 0.3,
-      castShadow: true,
-      name: spec.name,
-    });
-    w.add(handle.group);
-    w.time(w.own(handle));
-    trees.push(handle);
+    for (const outside of [false, true]) {
+      const options = {
+        count: spec.count * (outside ? 2 : 1),
+        area: { x: b.cx, z: b.cz, halfX: b.halfX + (outside ? 2.8 : 0), halfZ: b.halfZ + (outside ? 3.2 : 0) },
+        seed: (ctx.seed ^ 0x5b10) + i * 977 + (outside ? 917 : 0),
+        exclude: outside ? (x: number, z: number) => Math.max(Math.abs(x) - TEMPLE_HALF_X, Math.abs(z) - TEMPLE_HALF_Z) < 0.04
+          || Math.hypot(Math.max(0, Math.abs(x - b.cx) - b.halfX), Math.max(0, Math.abs(z - b.cz) - b.halfZ)) > 1.8 + Math.sin(x * 0.83 + Math.sin(z * 0.66) * 2) * 1.1 : noPlanting,
+        heightAt: outside ? landscape.heightAt : undefined,
+        color,
+        scale: spec.scale,
+        stretch: spec.stretch,
+        hueJitter: 0.24,
+        ...(spec.wind > 0 ? { wind: spec.wind, windFrequency: 1.5 } : {}),
+        rimColor: palette.skyHorizon,
+        rimStrength: 0.3,
+        castShadow: false,
+        name: spec.name,
+      };
+      const handle =
+        spec.kind === 'grass'
+          ? scatterGrass(options)
+          : spec.kind === 'flowers'
+            ? scatterFlowers(options)
+            : scatterRocks(options);
+      w.add(handle.group);
+      w.time(w.own(handle));
+      planted.push(handle);
+    }
   }
 
   const moteSpecs: readonly {
@@ -628,26 +529,13 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     w.size(w.time(w.own(handle)));
   }
 
-  const haze = makeMistPlanes({
-    size: [TERRAIN_SIZE * 0.9, TERRAIN_SIZE * 0.9],
-    color: blendTokens(palette.fog, palette.hemiSky, 0.3),
-    seed: ctx.seed ^ 0x3c91,
-    layers: 3,
-    baseY: 1.1,
-    spread: 1.6,
-    opacity: 0.05,
-    speed: 0.008,
-    scale: 3.2,
-    nearFade: 8,
-    name: 'gardenHaze',
-  });
-  w.add(haze.group);
-  w.time(w.own(haze));
-
   return w.seal({
     sky,
     rig,
-    terrain,
+    setView(coverage, camera) {
+      fog.density = 2.8 / coverage.far;
+      landscape.setView(coverage, camera, sky);
+    },
     field,
     portalRoots,
     doors,
@@ -658,7 +546,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     },
     drop: () => {
       planted.length = 0;
-      trees.length = 0;
       lanternSpots.length = 0;
       portalRoots.length = 0;
     },
@@ -700,8 +587,7 @@ export function makePortalGeometry(skin: TempleSkin): THREE.BufferGeometry {
 }
 
 export function makeLanternGeometry(skin: TempleSkin): THREE.BufferGeometry {
-  const detail = 1;
-  const radial = Math.max(5, Math.round(8 * detail));
+  const radial = 8;
   const parts: ColoredPart[] = [];
 
   const base = new THREE.CylinderGeometry(0.12, 0.16, 0.08, radial, 1);

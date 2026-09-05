@@ -4,19 +4,15 @@ import { emissiveMaterial, oakMaterial, type OakMaterial } from '@kit/materials'
 import { blendTokens, clamp01, luminance, shade } from '@kit/mix';
 import {
   makeAmbientParticles,
-  makeMistPlanes,
   type AmbientParticlesHandle,
-  type MistPlanesHandle,
 } from '@kit/particles';
 import { hash2f } from '@kit/rng';
 import { skyFromPalette, type SkyHandle } from '@kit/sky';
-import { makeTerrain, type TerrainHandle } from '@kit/terrain';
-import { makeTileBank } from '@kit/tiles';
-import { valueNoise2 } from '@kit/textures';
 import { TOKENS, type Palette } from '@kit/tokens';
 import type { SceneContext } from '@kit/types';
 import { flowerGeometry, grassClumpGeometry } from '@kit/vegetation';
-import { radialSprite } from '@kit/textures';
+import { radialSprite, valueNoise2 } from '@kit/textures';
+import { makeSceneTerrain } from '../half-cheetah/world';
 import { makeWorld, type WorldCore } from '@kit/world';
 import {
   buildBeacon,
@@ -42,16 +38,10 @@ import {
 } from '@sim/envs/jellybeanworld';
 import { FIELD_EDGE, FIELD_TEXELS } from './fieldmath';
 import { ScentField } from './scentfield';
+import { makeSceneryBank, type ContinuousSurface, type ViewCoverage } from './view';
 
-export const GROUND_PERIOD = 256;
-export const GROUND_EXTENT = 1900;
-export const GROUND_QUAD = 4;
-export const GROUND_SEGMENTS = GROUND_EXTENT / GROUND_QUAD;
 export const FOG_EXTENT = 1980;
-export const RELIEF = 6.2;
 export const SCATTER_TILE = 24;
-export const SCATTER_SPAN = 33;
-export const SCATTER_BACK = 16;
 export const SHADOW_REACH = 300;
 export const SHADOW_SPAN = 108;
 const SLAB_LOW = -10;
@@ -63,12 +53,7 @@ const DECAL_DIM = 0.22;
 const BEACON_CAPACITY = 512;
 const SHELL_SCALE = 1.06;
 
-export const CAM_DISTANCE = 78;
-export const CAM_NEAR = 0.6;
-export const CAM_AZIMUTH = 0.68;
-export const SUN_AZIMUTH = CAM_AZIMUTH + Math.PI;
-export const CAM_POLAR = 1.2;
-export const CAM_FOLLOW = 2.6;
+export const SUN_AZIMUTH = 0.68 + Math.PI;
 
 const FRONT_WIDTH = 44;
 
@@ -260,7 +245,7 @@ export function animateItems(
   };
 }
 
-export function paintScent(material: OakMaterial, paint: ScentPaint): void {
+export function paintScent(material: THREE.MeshStandardMaterial, paint: ScentPaint): void {
   const base = material.onBeforeCompile;
   const baseKey = material.customProgramCacheKey;
   material.customProgramCacheKey = () => `${baseKey ? baseKey.call(material) : ''}|orchard`;
@@ -280,12 +265,12 @@ export function paintScent(material: OakMaterial, paint: ScentPaint): void {
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', '#include <common>\nvarying vec3 vOrchard;')
       .replace(
-        '#include <begin_vertex>',
-        '#include <begin_vertex>\nvOrchard = ( modelMatrix * vec4( transformed, 1.0 ) ).xyz;',
+        '#include <project_vertex>',
+        '#include <project_vertex>\nvOrchard = ( modelMatrix * vec4( transformed, 1.0 ) ).xyz;',
       );
     shader.fragmentShader = shader.fragmentShader
       .replace('#include <common>', `#include <common>\n${PAINT_DECL}`)
-      .replace('#include <color_fragment>', `#include <color_fragment>\n${PAINT_TINT}`)
+      .replace('diffuseColor.rgb *= color;', `diffuseColor.rgb *= color;\n${PAINT_TINT}`)
       .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>\n${PAINT_GLOW}`)
       .replace(
         '#include <opaque_fragment>',
@@ -295,15 +280,15 @@ export function paintScent(material: OakMaterial, paint: ScentPaint): void {
 }
 
 export function orchardHeight(seed: number, x: number, z: number): number {
-  const a = valueNoise2(x / 32, z / 32, GROUND_PERIOD / 32, seed);
-  const b = valueNoise2(x / 16, z / 16, GROUND_PERIOD / 16, seed ^ 0x51ed);
-  return (a - 0.5) * RELIEF * 2 + (b - 0.5) * RELIEF * 0.44;
+  const a = valueNoise2(x / 32, z / 32, 8, seed);
+  const b = valueNoise2(x / 16, z / 16, 16, seed ^ 0x51ed);
+  return (a - 0.5) * 6.2 * 2 + (b - 0.5) * 6.2 * 0.44;
 }
 
 export interface OrchardWorld extends WorldCore {
   rig: LightRig;
   sky: SkyHandle;
-  terrain: TerrainHandle;
+  terrain: ContinuousSurface;
   paint: ScentPaint;
   scentField: ScentField;
   items: Map<number, THREE.InstancedMesh>;
@@ -312,6 +297,7 @@ export interface OrchardWorld extends WorldCore {
   cellColor: Float32Array;
   beacon: BeaconHandle;
   setOrigin(x: number, z: number): void;
+  setView(coverage: ViewCoverage, camera: THREE.Camera): void;
   setHour(hour: number): void;
   setRipeness(jellyRipe: number): void;
   decalTint(item: number, out: THREE.Color): THREE.Color;
@@ -334,7 +320,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): OrchardWorld 
   });
   w.own(scentField);
 
-  const sky = w.time(skyFromPalette(palette, 'dusk', { radius: 1800, sunSize: 0.042 }));
+  const sky = w.time(skyFromPalette(palette, 'dusk', { radius: 1, sunSize: 0.042 }));
   w.add(sky.mesh);
   w.own(sky);
 
@@ -366,47 +352,24 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): OrchardWorld 
     uGridColor: { value: new THREE.Color(TOKENS.uiCyan) },
   };
 
-  if (GROUND_PERIOD % GROUND_QUAD !== 0 || !Number.isInteger(GROUND_SEGMENTS)) {
-    throw new Error('orchard quad must divide both the noise period and the ground extent');
-  }
-  const terrain = makeTerrain({
-    size: [GROUND_EXTENT, GROUND_EXTENT],
-    segments: [GROUND_SEGMENTS, GROUND_SEGMENTS],
-    seed: ctx.seed,
-    heightFn: (x, z) => orchardHeight(ctx.seed, x, z),
-    colorRamp: [
-      { t: 0, color: skin.soil },
-      { t: 0.42, color: skin.grassLow },
-      { t: 1, color: skin.grassHigh },
-    ],
-    colorNoise: 0.02,
-    slopeColor: skin.soil,
-    slopeStrength: 0.14,
-    slopeSharpness: 2.1,
-    receiveShadow: true,
-    name: 'orchardGround',
-    materialOptions: {
-      flatShading: false,
-      roughness: 0.94,
-      rimColor: palette.skyHorizon,
-      rimStrength: 0.16,
-      toonSteps: 3,
-      toonSoftness: 0.42,
-      toonFloor: 0.24,
-    },
-  });
+  const terrain = w.own(w.time(makeSceneTerrain({
+    name: 'orchardGround', seed: ctx.seed, segments: 128,
+    colorA: skin.grassLow, colorB: skin.grassHigh,
+    height: `float a = worldNoise(p / 32.0, 8.0, ${ctx.seed >>> 0}u); float b = worldNoise(p / 16.0, 16.0, ${(ctx.seed ^ 0x51ed) >>> 0}u); return (a - 0.5) * 12.4 + (b - 0.5) * 2.728;`,
+    detail: `float h = clamp((p.y + 5.4) / 10.8, 0.0, 1.0); color = h < 0.42 ? mix(vec3(${skin.soil.r}, ${skin.soil.g}, ${skin.soil.b}), uLandA, h / 0.42) : mix(uLandA, uLandB, (h - 0.42) / 0.58);`,
+  }, (x, z) => orchardHeight(ctx.seed, x, z), {
+    roughness: 0.94, rimColor: palette.skyHorizon, rimStrength: 0.16,
+    toonSteps: 3, toonSoftness: 0.42, toonFloor: 0.24,
+  })));
   w.add(terrain.mesh);
-  w.own(terrain);
-  paintScent(terrain.material as OakMaterial, paint);
+  paintScent(terrain.material, paint);
 
   const itemTime = { value: 0 };
-  let groundX = 0;
-  let groundZ = 0;
-  const surfaceAt = (x: number, z: number): number => terrain.sampleHeight(x - groundX, z - groundZ);
+  const surfaceAt = (x: number, z: number): number => orchardHeight(ctx.seed, x, z);
   const items = new Map<number, THREE.InstancedMesh>();
   for (const kind of ITEM_KINDS) {
     const geometry = orchardItemGeometry(kind, skin);
-    w.own({ dispose: () => geometry.dispose() });
+    w.own(geometry);
     const material = oakMaterial({
       vertexColors: true,
       flatShading: true,
@@ -429,13 +392,13 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): OrchardWorld 
     mesh.frustumCulled = false;
     mesh.count = 0;
     w.add(mesh);
-    w.own({ dispose: () => mesh.dispose() });
+    w.own(mesh);
     items.set(kind, mesh);
   }
 
   const decalGeometry = new THREE.PlaneGeometry(1, 1);
   decalGeometry.rotateX(-Math.PI / 2);
-  w.own({ dispose: () => decalGeometry.dispose() });
+  w.own(decalGeometry);
   const decalMaterial = emissiveMaterial(TOKEN_ONE, 0.9, {
     map: w.own(radialSprite(64, 2.2)),
     transparent: true,
@@ -454,7 +417,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): OrchardWorld 
   decals.renderOrder = 2;
   decals.count = 0;
   w.add(decals);
-  w.own({ dispose: () => decals.dispose() });
+  w.own(decals);
 
   const shells = new Map<number, THREE.InstancedMesh>();
   for (const kind of ITEM_KINDS) {
@@ -464,7 +427,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): OrchardWorld 
     if (!source) continue;
     const shellGeometry = source.geometry.clone();
     shellGeometry.scale(SHELL_SCALE, SHELL_SCALE, SHELL_SCALE);
-    w.own({ dispose: () => shellGeometry.dispose() });
+    w.own(shellGeometry);
     const tint = blendTokens(itemHue(kind, skin), TOKEN_ONE, HALO_WHITEN);
     const shellMaterial = emissiveMaterial(tint, HALO_GLOW / luminance(tint), {
       transparent: true,
@@ -484,7 +447,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): OrchardWorld 
     shell.renderOrder = 4;
     shell.count = 0;
     w.add(shell);
-    w.own({ dispose: () => shell.dispose() });
+    w.own(shell);
     shells.set(kind, shell);
   }
 
@@ -502,7 +465,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): OrchardWorld 
   w.own(beacon);
 
   const grassGeometry = grassClumpGeometry(4, 0.4, 0.05);
-  w.own({ dispose: () => grassGeometry.dispose() });
+  w.own(grassGeometry);
   const grassMaterial = oakMaterial({
     vertexColors: true,
     flatShading: true,
@@ -516,13 +479,10 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): OrchardWorld 
     name: 'orchardGrass',
   });
   w.own(grassMaterial);
-  const grassBank = makeTileBank({
+  const grassBank = makeSceneryBank({
     geometry: grassGeometry,
     material: grassMaterial,
-    tilesX: SCATTER_SPAN,
-    tilesZ: SCATTER_SPAN,
-    backX: SCATTER_BACK,
-    backZ: SCATTER_BACK,
+    tileSize: SCATTER_TILE,
     perTile: 96,
     colorA: skin.grassLow,
     colorB: skin.grassHigh,
@@ -550,7 +510,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): OrchardWorld 
   w.own(grassBank);
 
   const flowerGeo = flowerGeometry(5);
-  w.own({ dispose: () => flowerGeo.dispose() });
+  w.own(flowerGeo);
   const flowerMaterial = oakMaterial({
     vertexColors: true,
     flatShading: true,
@@ -564,13 +524,10 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): OrchardWorld 
     name: 'orchardFlowers',
   });
   w.own(flowerMaterial);
-  const flowerBank = makeTileBank({
+  const flowerBank = makeSceneryBank({
     geometry: flowerGeo,
     material: flowerMaterial,
-    tilesX: SCATTER_SPAN,
-    tilesZ: SCATTER_SPAN,
-    backX: SCATTER_BACK,
-    backZ: SCATTER_BACK,
+    tileSize: SCATTER_TILE,
     perTile: 7,
     colorA: skin.bloom,
     colorB: skin.papery,
@@ -601,6 +558,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): OrchardWorld 
   const pollen: AmbientParticlesHandle = w.time(
     makeAmbientParticles({
       preset: 'pollen',
+      count: 300,
       seed: ctx.seed ^ 0x77ab,
       bounds: { halfX: 120, halfY: 16, halfZ: 120, y: 15 },
       color: skin.bloom,
@@ -609,28 +567,15 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): OrchardWorld 
   w.add(pollen.points);
   w.own(pollen);
 
-  const mist: MistPlanesHandle = w.time(
-    makeMistPlanes({
-      size: [GROUND_EXTENT * 0.8, 74],
-      seed: ctx.seed ^ 0x4d31,
-      layers: 4,
-      baseY: 3.4,
-      spread: 640,
-      color: blendTokens(palette.fog, palette.sun, 0.24),
-      opacity: 0.03,
-    }),
-  );
-  w.add(mist.group);
-  w.own(mist);
-
   const sunDir = new THREE.Vector3();
   const baseAzimuth = SUN_AZIMUTH;
-  const fogBase = fog.density;
+  let fogBase = fog.density;
   const grassWind = grassMaterial.oak;
   const flowerWind = flowerMaterial.oak;
   const lightProbe = new THREE.Object3D();
   const probePoint = new THREE.Vector3();
   const shadowCentre = new THREE.Vector3();
+  const shadowInverse = new THREE.Matrix4();
 
   let shadowSpanNow = SHADOW_SPAN;
 
@@ -645,7 +590,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): OrchardWorld 
     lightProbe.position.copy(shadowCentre).addScaledVector(rig.sunDirection, SHADOW_REACH);
     lightProbe.lookAt(shadowCentre);
     lightProbe.updateMatrixWorld();
-    probePoint.copy(shadowCentre).applyMatrix4(lightProbe.matrixWorld.clone().invert());
+    probePoint.copy(shadowCentre).applyMatrix4(shadowInverse.copy(lightProbe.matrixWorld).invert());
     const qx = (2 * halfX) / SHADOW_MAP_X;
     const qy = (2 * halfY) / SHADOW_MAP_Y;
     probePoint.x = Math.round(probePoint.x / qx) * qx;
@@ -706,17 +651,17 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): OrchardWorld 
       cellColor,
       beacon,
       setOrigin(x, z) {
-        const sx = Math.round(x / GROUND_PERIOD) * GROUND_PERIOD;
-        const sz = Math.round(z / GROUND_PERIOD) * GROUND_PERIOD;
-        groundX = sx;
-        groundZ = sz;
-        terrain.mesh.position.set(sx, 0, sz);
-        grassBank.setOrigin(Math.floor(x / SCATTER_TILE), Math.floor(z / SCATTER_TILE));
-        flowerBank.setOrigin(Math.floor(x / SCATTER_TILE), Math.floor(z / SCATTER_TILE));
         pollen.points.position.set(x, 0, z);
-        mist.group.position.set(x, 0, z);
-        sky.mesh.position.set(x, 0, z);
         fitShadow(x, z);
+      },
+      setView(coverage, camera) {
+        terrain.setView(coverage);
+        grassBank.setView(coverage);
+        flowerBank.setView(coverage);
+        sky.mesh.position.copy(camera.position);
+        sky.mesh.scale.setScalar(coverage.far * 0.85);
+        fogBase = 2.8 / coverage.far;
+        fog.density = fogBase;
       },
       setHour,
       setRipeness,
@@ -745,6 +690,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): OrchardWorld 
     {
       time(t) {
         itemTime.value = t;
+        grassMaterial.oak.setTime(t);
+        flowerMaterial.oak.setTime(t);
         const drift = hash2f(1, 2, ctx.seed) * 0.4;
         pollen.points.rotation.y = Math.sin(t * 0.02 + drift) * 0.05;
       },

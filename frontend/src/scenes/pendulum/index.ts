@@ -1,14 +1,13 @@
 import type { GroundTruthOptions } from '@kit/debug';
 import { clampRange } from '@kit/mix';
-import { orbitFromPose, type OrbitRigOptions } from '@kit/rigs';
+import { type OrbitRigOptions } from '@kit/rigs';
+import { makeSceneView, type SceneView } from '../jelly-bean-world/view';
 import { StageScene, type Stage } from '@kit/stage';
 import type { FrameState, FrameUpdate, SceneContext, SceneFactory } from '@kit/types';
 import { PD_L, PD_MAX_SPEED, PD_MAX_TORQUE, PENDULUM_TH, PENDULUM_THDOT, PENDULUM_TORQUE, wrapPi } from '@sim/envs/pendulum';
 import { buildLanternRig, type LanternRigHandle } from './actors';
 import { buildWorld, pivotOf, type WorldHandle } from './world';
 
-const CAM_BASE: readonly [number, number, number] = [0.62, 0.41, 6.55];
-const CAM_LOOK: readonly [number, number, number] = [0, -0.09, 0];
 
 function torqueOf(state: FrameState): number {
   return state.pose[PENDULUM_TORQUE] ?? 0;
@@ -29,6 +28,7 @@ export function serenityOf(theta: number, thetaDot: number, torque = 0): number 
 }
 
 class LanternBellScene extends StageScene<WorldHandle> {
+  private view: SceneView | null = null;
   protected readonly stageName = 'lanternBell';
 
   private lantern: LanternRigHandle | null = null;
@@ -56,24 +56,11 @@ class LanternBellScene extends StageScene<WorldHandle> {
   }
 
   protected rigOptions(ctx: SceneContext): OrbitRigOptions {
-    const home = orbitFromPose(
-      CAM_BASE,
-      CAM_LOOK,
-    );
-    return {
-      target: CAM_LOOK,
-      azimuth: home.azimuth,
-      polar: home.polar,
-      distance: home.distance,
-      near: 0.05,
-      far: 420,
-      rotateSpeed: 0.006,
-      zoomSpeed: 0.0016,
-      damping: 2.6,
-    };
+    this.view = makeSceneView(ctx, { min: [-2.4, -2.1, -0.55], max: [2.4, 2.1, 0.55] }, [0, -0.09, 0], { distance: 6.598249768, azimuth: 0.094375296, polar: 1.360000000 });
+    return this.view.options;
   }
 
-    protected overlayOptions(): GroundTruthOptions {
+  protected overlayOptions(): GroundTruthOptions {
     return {
       agentPos: (state) => {
         const th = state.pose[PENDULUM_TH] ?? 0;
@@ -116,7 +103,6 @@ class LanternBellScene extends StageScene<WorldHandle> {
     pool.update(frame.dtReal, time);
     if (frame.scrubbed) {
       pool.clear();
-      rig.snap();
     }
 
     const theta = state.pose[PENDULUM_TH] ?? 0;
@@ -127,7 +113,7 @@ class LanternBellScene extends StageScene<WorldHandle> {
     world.setTime(time);
     lantern.setTime(time);
 
-    rig.update(frame.dtReal);
+    if (this.view) world.setView(this.view.update(rig, frame.dtReal), this.camera);
   }
 
   protected drop(): void {

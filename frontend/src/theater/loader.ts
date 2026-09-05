@@ -138,26 +138,6 @@ export interface HeroHandle {
   destroy(): void;
 }
 
-export function makeInitialSource(entry: EnvEntry, envId: EnvId, seed: number): PlaybackSource {
-  const decoder = decoders[envId] as EnvDecoder;
-  const st = decoder.initStatic(seed);
-  const init = decoder.initFrame(seed, st);
-  return {
-    envId,
-    seed,
-    controlHz: entry.controlHz,
-    discretePose: entry.discretePose,
-    wrapMask: 0,
-    geometry: decoder.geometry(st, seed),
-    frameCount: 1,
-    complete: false,
-    edge: null,
-    events: EMPTY_EVENT_STREAM,
-    frameAt: () => init,
-    eventsAt: () => NO_EVENTS,
-  };
-}
-
 export function loadHero(options: HeroOptions): HeroHandle {
   const { runId, envId, seed } = options;
   const decoder = decoders[envId] as EnvDecoder;
@@ -361,7 +341,7 @@ export function loadHero(options: HeroOptions): HeroHandle {
       return decodedSteps;
     },
     get totalSteps() {
-      return Math.max(decodedSteps, 1);
+      return Math.max(source.frameCount - 1, 1);
     },
     get bytes() {
       return byteLength;

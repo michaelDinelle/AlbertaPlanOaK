@@ -1,9 +1,12 @@
+import { PULSE_SECONDS } from '@kit/celebrate';
+import { CELL } from '@kit/grid';
+import { makeSceneView, type SceneView } from '../jelly-bean-world/view';
 import type { GroundTruthOptions } from '@kit/debug';
 import type { GridSize } from '@kit/grid';
 import { clamp01, envelope } from '@kit/mix';
 import type { OrbitRigOptions } from '@kit/rigs';
 import { StageScene, type Stage } from '@kit/stage';
-import type { FrameUpdate, SceneContext, SceneFactory } from '@kit/types';
+import type { FrameUpdate, SceneContext, SceneFactory, SceneSize } from '@kit/types';
 import { Wisp } from '@kit/wisp';
 import * as THREE from 'three';
 import type { GridCell, GridGeometry } from '@sim/types';
@@ -18,11 +21,8 @@ import {
   resolveGrid,
   type DiveCell,
 } from './reef';
-import { CAMERA_AZIMUTH, buildWorld, treasureCell, type WorldHandle } from './world';
+import { buildWorld, treasureCell, type WorldHandle } from './world';
 
-const CAM_POLAR = 0.82;
-const CAM_DISTANCE = 17.6;
-const CAM_TARGET: readonly [number, number, number] = [-0.85, -2.08, 1.05];
 
 const BURST_SCALE = 0.78;
 const RIPPLE_SCALE = 0.44;
@@ -42,12 +42,13 @@ const PROXIMITY_COLS = 3;
 
 class SunlitDescentScene extends StageScene<WorldHandle> {
   protected readonly stageName = 'sunlitDescent';
+  private view: SceneView | null = null;
 
   private wisp: Wisp | null = null;
   private bubble: BubbleHandle | null = null;
   private clam: ClamHandle | null = null;
   private readonly diver = new THREE.Group();
-  private grid: GridGeometry = resolveGrid({});
+  private grid!: GridGeometry;
   private reach: Uint8Array = new Uint8Array(0);
   private treasure: GridCell = { x: 0, y: 0 };
 
@@ -65,8 +66,10 @@ class SunlitDescentScene extends StageScene<WorldHandle> {
   private gold = 0xffd166;
 
   protected buildWorld(ctx: SceneContext): WorldHandle {
-    const grid = resolveGrid(ctx.geometry, ctx.seed);
+    const grid = resolveGrid(ctx.geometry);
     this.grid = grid;
+    const half = Math.max(grid.w, grid.h) * CELL * 0.5 + 0.8;
+    this.view = makeSceneView(ctx, { min: [-half, -4.8, -half], max: [half, 2, half] }, [0.05, -2, 1.65], { distance: 19.4, azimuth: 0.78, polar: 0.82 });
     this.reach = reefReachable(grid);
     const goal = treasureCell(grid);
     this.treasure = { x: goal.c, y: goal.r };
@@ -93,11 +96,16 @@ class SunlitDescentScene extends StageScene<WorldHandle> {
         radius: 0.19,
         hop: { duration: HOP_SECONDS, height: HOP_HEIGHT },
         ribbon: false,
+        skirt: false,
+        silhouette: false,
         name: 'diverWisp',
       },
       grid,
     );
     this.wisp = wisp;
+    wisp.core.visible = false;
+    const halo = wisp.group.getObjectByName('oakWispHalo');
+    if (halo) halo.visible = false;
     this.diver.name = 'diverColumn';
     this.diver.add(wisp.group);
     this.scene.add(this.diver);
@@ -123,13 +131,9 @@ class SunlitDescentScene extends StageScene<WorldHandle> {
     this.scene.add(clam.group);
   }
 
-  protected rigOptions(ctx: SceneContext): OrbitRigOptions {
-    return {
-      target: [CAM_TARGET[0], CAM_TARGET[1], CAM_TARGET[2]],
-      distance: CAM_DISTANCE,
-      azimuth: CAMERA_AZIMUTH,
-      polar: CAM_POLAR,
-    };
+  protected rigOptions(_ctx: SceneContext): OrbitRigOptions {
+    if (!this.view) throw new Error('Scene view is missing');
+    return this.view.options;
   }
 
   protected overlayOptions(): GroundTruthOptions {
@@ -156,6 +160,7 @@ class SunlitDescentScene extends StageScene<WorldHandle> {
     overlay.group.matrixWorldNeedsUpdate = true;
 
     world.setTime(0);
+    if (this.view && this.rig) world.setView(this.view.update(this.rig, 0), this.camera);
     wisp.setCell(0, 0, this.grid);
     this.diver.position.y = reefDepthYAt(wisp.position.z, this.grid);
     this.bubble?.setTime(0);
@@ -185,7 +190,31 @@ class SunlitDescentScene extends StageScene<WorldHandle> {
       this.stir = dive.lastA;
       wisp.setCell(dive.c, dive.r, grid);
       wisp.snap();
-      rig.snap();
+      const log = frame.eventLog;
+      let low = 0;
+      let high = log.count;
+      while (low < high) {
+        const mid = (low + high) >>> 1;
+        if ((log.steps[mid] ?? Infinity) <= state.step) low = mid + 1;
+        else high = mid;
+      }
+      const seconds = state.step > 0 ? state.simTime / state.step : 0;
+      for (let i = low - 1; i >= 0; i--) {
+        const at = ((log.steps[i] ?? -1) + 1) * seconds;
+        if (time - at > GAPE_SECONDS) break;
+        if (log.types[log.kinds[i] ?? 0] === 'goal') {
+          this.goalAt = at;
+          cellToReefVec(this.treasure.x, this.treasure.y, grid, this.bloomPos);
+          this.groundPos.copy(this.bloomPos);
+          this.bloomPos.y += clam.pearlHeight;
+          pool.burst(this.bloomPos, this.pearlHue, BURST_SCALE, at);
+          pool.ripple(this.groundPos, this.gold, RIPPLE_SCALE, at);
+          pool.pulse.reset();
+          pool.pulse.fire(Math.max(0, PULSE_STRENGTH - (time - at) / PULSE_SECONDS));
+          pool.update(0, time);
+          break;
+        }
+      }
     }
 
     let hardCut = false;
@@ -270,7 +299,15 @@ class SunlitDescentScene extends StageScene<WorldHandle> {
 
     world.setTime(time);
 
-    rig.update(frame.dtReal);
+    if (this.view) world.setView(this.view.update(rig, frame.dtReal), this.camera);
+  }
+
+  override resize(size: SceneSize): void {
+    super.resize(size);
+    if (this.view && this.rig && this.world) {
+      this.view.resize(size, this.rig);
+      this.world.setView(this.view.update(this.rig, 0), this.camera);
+    }
   }
 
   protected drop(): void {

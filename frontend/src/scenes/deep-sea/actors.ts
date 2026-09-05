@@ -124,9 +124,9 @@ export function buildClam(opts: ClamOptions): ClamHandle {
   body.add(pearl);
 
   const haloGeometry = new THREE.IcosahedronGeometry(0.24, 1);
-  const haloMaterial: EmissiveMaterial = emissiveMaterial(skin.pearl, PEARL_HDR * 0.3, {
+  const haloMaterial: EmissiveMaterial = emissiveMaterial(skin.pearl, PEARL_HDR * 0.16, {
     transparent: true,
-    opacity: 0.3,
+    opacity: 0.18,
     depthWrite: false,
     blending: THREE.AdditiveBlending,
     name: 'clamPearlHalo',
@@ -149,11 +149,11 @@ export function buildClam(opts: ClamOptions): ClamHandle {
       openness = open;
       upperHinge.rotation.x = GAPE_UPPER * open;
       lowerHinge.rotation.x = -GAPE_LOWER * open;
-      const gain = (0.45 + 0.75 * open) * (1 + 3.4 * flare);
-      pearl.scale.setScalar(0.8 + 0.34 * open + 0.5 * flare);
-      halo.scale.setScalar(0.75 + 0.4 * open + 1.5 * flare);
+      const gain = (0.45 + 0.75 * open) * (1 + 1.5 * flare);
+      pearl.scale.setScalar(0.8 + 0.34 * open + 0.2 * flare);
+      halo.scale.setScalar(0.75 + 0.4 * open + 0.6 * flare);
       setEmissiveIntensity(pearlMaterial, PEARL_HDR * gain);
-      setEmissiveIntensity(haloMaterial, PEARL_HDR * 0.3 * gain);
+      setEmissiveIntensity(haloMaterial, PEARL_HDR * 0.16 * gain);
     },
 
     setTime(t) {
@@ -259,71 +259,41 @@ export interface BubbleHandle {
 }
 
 export function buildBubble(opts: BubbleOptions): BubbleHandle {
-  const { palette, skin } = opts;
-  const detail = 2;
   const group = new THREE.Group();
-  group.name = opts.name ?? 'diverBubble';
+  group.name = opts.name ?? 'divingBell';
   group.position.y = opts.height;
-
-  const shellGeometry = new THREE.IcosahedronGeometry(0.33, detail);
-  const shellMaterial: OakMaterial = oakMaterial({
-    color: blendTokens(skin.bubble, palette.skyTop, 0.35),
-    roughness: 0.08,
-    metalness: 0,
-    transparent: true,
-    opacity: 0.15,
-    depthWrite: false,
-    side: THREE.DoubleSide,
-    rimColor: opts.accent,
-    rimStrength: 1.15,
-    rimPower: 2.2,
-    toonSteps: 2,
-    toonSoftness: 0.4,
-    toonFloor: 0.4,
-    name: 'diverBubbleShell',
-  });
-  const shell = new THREE.Mesh(shellGeometry, shellMaterial);
-  shell.name = 'diverBubbleShell';
-  group.add(shell);
-
-  const sheenGeometry = new THREE.TorusGeometry(0.2, 0.018, 4, Math.max(10, 18 * detail));
-  sheenGeometry.rotateX(-Math.PI / 2.6);
-  sheenGeometry.translate(0, 0.15, 0.03);
-  const sheenMaterial: EmissiveMaterial = emissiveMaterial(skin.bubble, 0.9, {
-    transparent: true,
-    opacity: 0.42,
-    depthWrite: false,
-    blending: THREE.AdditiveBlending,
-    name: 'diverBubbleSheen',
-  });
-  const sheen = new THREE.Mesh(sheenGeometry, sheenMaterial);
-  sheen.name = 'diverBubbleSheen';
-  group.add(sheen);
-
+  const brass = oakMaterial({ color: 0xb28f53, metalness: 0.68, roughness: 0.33, rimColor: opts.skin.bubble, rimStrength: 0.35 });
+  const glass = emissiveMaterial(0xc5ffec, 1.5, { name: 'divingBellCore' });
+  const bodyGeometry = new THREE.SphereGeometry(0.28, 12, 7, 0, Math.PI * 2, 0, Math.PI * 0.66);
+  const rimGeometry = new THREE.TorusGeometry(0.246, 0.041, 5, 12);
+  rimGeometry.rotateX(Math.PI / 2);
+  rimGeometry.translate(0, -0.135, 0);
+  const handleGeometry = new THREE.TorusGeometry(0.087, 0.018, 4, 10);
+  handleGeometry.translate(0, 0.325, 0);
+  const windowGeometry = new THREE.SphereGeometry(0.125, 10, 6);
+  const body = new THREE.Mesh(bodyGeometry, brass);
+  const rim = new THREE.Mesh(rimGeometry, brass);
+  const handle = new THREE.Mesh(handleGeometry, brass);
+  const window = new THREE.Mesh(windowGeometry, glass);
+  window.scale.set(1, 0.86, 0.5);
+  window.position.set(0, 0.01, 0.25);
+  body.castShadow = true;
+  group.add(body, rim, handle, window);
   let stress = 0;
-
   return {
     group,
     setTime(t) {
-      const wobble = 0.05 + 0.05 * stress;
-      shell.scale.set(
-        1 + Math.sin(t * 2.3) * wobble,
-        1 + Math.sin(t * 1.7 + 1.1) * wobble,
-        1 + Math.cos(t * 2.05 + 0.4) * wobble,
-      );
-      sheen.rotation.y = t * 0.55;
-      shellMaterial.opacity = 0.13 + 0.05 * (0.5 + 0.5 * Math.sin(t * 1.3));
-      oakUniforms(shellMaterial)?.setTime(t);
+      group.rotation.z = Math.sin(t * 1.7) * 0.025 * (1 + stress);
+      oakUniforms(brass)?.setTime(t);
     },
-    setStress(v) {
-      stress = clamp01(v);
-      setEmissiveIntensity(sheenMaterial, 0.9 * (1 + 0.9 * stress));
+    setStress(value) {
+      stress = value;
+      setEmissiveIntensity(glass, 1.5 + stress * 0.7);
     },
     dispose() {
-      shellGeometry.dispose();
-      shellMaterial.dispose();
-      sheenGeometry.dispose();
-      sheenMaterial.dispose();
+      for (const geometry of [bodyGeometry, rimGeometry, handleGeometry, windowGeometry]) geometry.dispose();
+      brass.dispose();
+      glass.dispose();
       group.removeFromParent();
       group.clear();
     },

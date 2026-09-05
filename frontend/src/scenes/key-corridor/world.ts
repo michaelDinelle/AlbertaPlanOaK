@@ -1,3 +1,4 @@
+import { makeContinuousSurface, makeSceneryBank, type ViewCoverage } from '../jelly-bean-world/view';
 import * as THREE from 'three';
 import {
   buildCellField,
@@ -11,14 +12,12 @@ import {
   type Vec3Tuple,
 } from '@kit/grid';
 import { applyFog, makeLightRig, type LightRig } from '@kit/lighting';
-import { oakMaterial, type OakMaterial } from '@kit/materials';
+import { oakMaterial, type OakMaterial, type OakMaterialOptions } from '@kit/materials';
 import { blendTokens, shade, smoothstep01 } from '@kit/mix';
-import { makeAmbientParticles, makeMistPlanes } from '@kit/particles';
+import { makeAmbientParticles } from '@kit/particles';
 import { mergeColoredParts, type ColoredPart } from '@kit/parts';
 import { hash2f } from '@kit/rng';
 import { skyFromPalette, type SkyHandle } from '@kit/sky';
-import { makeTerrain, type TerrainHandle } from '@kit/terrain';
-import { valueNoise2 } from '@kit/textures';
 import { TOKENS, type Palette } from '@kit/tokens';
 import type { SceneContext } from '@kit/types';
 import {
@@ -27,15 +26,17 @@ import {
   scatterFlowers,
   scatterGrass,
   scatterRocks,
-  scatterTrees,
+  broadleafTreeGeometry,
+  coniferTreeGeometry,
+  bareTreeGeometry,
+  grassClumpGeometry,
+  type TreeArchetype,
   type VegetationHandle,
 } from '@kit/vegetation';
-import { makeWorld, type WorldCore } from '@kit/world';
+import { makeWorld, type WorldCore, type WorldBuilder } from '@kit/world';
 import {
-  KEYCORRIDOR_DOOR,
   KEYCORRIDOR_H,
   KEYCORRIDOR_W,
-  keyCorridorWalls,
 } from '@sim/envs/keycorridor';
 import type { EnvGeometry, GridCell, GridGeometry } from '@sim/types';
 
@@ -64,20 +65,17 @@ export function smoothBand(edge0: number, edge1: number, x: number): number {
 }
 
 export function resolveGrid(geometry: EnvGeometry): GridGeometry {
-  const g = geometry.grid;
-  if (g && g.w === KEYCORRIDOR_W && g.h === KEYCORRIDOR_H) return g;
-  return {
-    w: KEYCORRIDOR_W,
-    h: KEYCORRIDOR_H,
-    walls: keyCorridorWalls(),
-    doors: [{ ...KEYCORRIDOR_DOOR }],
-    hallways: [{ ...KEYCORRIDOR_DOOR }],
-  };
+  const grid = geometry.grid;
+  if (!grid || grid.w !== KEYCORRIDOR_W || grid.h !== KEYCORRIDOR_H || grid.walls.length !== grid.w * grid.h) {
+    throw new Error('Key Corridor requires complete recorded grid geometry');
+  }
+  return grid;
 }
 
 export function resolveDoor(grid: GridGeometry): GridCell {
-  const d = grid.doors?.[0] ?? grid.hallways?.[0];
-  return d ? { x: d.x, y: d.y } : { ...KEYCORRIDOR_DOOR };
+  const door = grid.doors?.[0];
+  if (!door) throw new Error('Key Corridor requires its recorded door');
+  return door;
 }
 
 export const SIDE_WEST = -1;
@@ -202,21 +200,169 @@ export function gardenSkin(palette: Palette, tokens: typeof TOKENS): GardenSkin 
   };
 }
 
-export function makeMeadowHeight(seed: number): (x: number, z: number) => number {
-  return (x, z) => {
-    const out = Math.max(Math.abs(x) - GARDEN_HALF_X, Math.abs(z) - GARDEN_HALF_Z);
-    const w = smoothstep01(out / 3.4);
-    if (w <= 0) return 0;
-    const n1 = valueNoise2(x * 0.062 + 3.7, z * 0.062 + 9.1, 64, seed) - 0.5;
-    const n2 = valueNoise2(x * 0.168 + 1.3, z * 0.168 + 6.7, 64, seed ^ 0x51ed270b) - 0.5;
-    return w * (n1 * 3.4 + n2 * 1.1);
+export interface LandscapeOptions {
+  name: string;
+  halfX: number;
+  halfZ: number;
+  ground: THREE.ColorRepresentation;
+  grass: THREE.ColorRepresentation;
+  trees: readonly THREE.ColorRepresentation[];
+  archetypes?: readonly TreeArchetype[];
+  treeKind?: (x: number, z: number) => TreeArchetype;
+  grounds?: readonly THREE.ColorRepresentation[];
+  amplitude?: number;
+}
+
+export function makeLandscape(w: WorldBuilder, ctx: SceneContext, opts: LandscapeOptions) {
+  const amplitude = opts.amplitude ?? 2.6;
+  const phase = ((ctx.seed >>> 0) % 4096) / 4096 * Math.PI * 2;
+  const heightAt = (x: number, z: number): number => {
+    const outer = Math.max(Math.abs(x) - opts.halfX, Math.abs(z) - opts.halfZ);
+    const bank = smoothstep01((outer + 0.25) / 0.7) * Math.exp(-Math.max(0, outer) / (2.1 + Math.sin(x * 0.5 + z * 0.37) * 0.7));
+    return -0.075 + bank * 0.34 + smoothstep01(outer / 10) * amplitude * (0.55 * Math.sin(x * 0.032 + phase) * Math.cos(z * 0.041) + 0.25 * Math.sin(x * 0.077 + z * 0.056 + phase));
+  };
+  const grounds = opts.grounds?.map((value) => {
+    const c = new THREE.Color(value);
+    return `vec3(${c.r.toFixed(5)}, ${c.g.toFixed(5)}, ${c.b.toFixed(5)})`;
+  });
+  const groundDetail = grounds ? `
+    float seasonX = smoothstep(-4.0, 4.0, p.x + (landNoise(p.xz * 0.08 + 11.0) - 0.5) * 7.0);
+    float seasonZ = smoothstep(-4.0, 4.0, p.z + (landNoise(p.xz * 0.07 + 23.0) - 0.5) * 7.0);
+    vec3 season = mix(mix(${grounds[0]}, ${grounds[1]}, seasonX), mix(${grounds[2]}, ${grounds[3]}, seasonX), seasonZ);
+    float garden = exp(-max(0.0, max(abs(p.x) - ${opts.halfX.toFixed(4)}, abs(p.z) - ${opts.halfZ.toFixed(4)})) * 0.07);
+    color = mix(color, season, garden * 0.62);` : '';
+  const surface = w.time(w.own(makeContinuousSurface({
+    name: `${opts.name}Terrain`,
+    seed: ctx.seed,
+    colorA: opts.ground,
+    colorB: opts.grass,
+    height: `
+      float outer = max(abs(p.x) - ${opts.halfX.toFixed(4)}, abs(p.y) - ${opts.halfZ.toFixed(4)});
+      float roll = 0.55 * sin(p.x * 0.032 + ${phase.toFixed(6)}) * cos(p.y * 0.041)
+        + 0.25 * sin(p.x * 0.077 + p.y * 0.056 + ${phase.toFixed(6)});
+      float bank = smoothstep(-0.25, 0.45, outer) * exp(-max(0.0, outer) / (2.1 + sin(p.x * 0.5 + p.y * 0.37) * 0.7));
+      return -0.075 + bank * 0.34 + smoothstep(0.0, 10.0, outer) * ${amplitude.toFixed(4)} * roll;
+    `,
+    detail: `
+      float grass = sin(p.x * 1.7 + sin(p.z * 1.1)) * sin(p.z * 2.3);
+      ${groundDetail}
+      color *= 0.96 + 0.045 * grass;
+    `,
+  })));
+  w.add(surface.mesh);
+  const material = w.own(oakMaterial({ vertexColors: true, roughness: 0.9, flatShading: true,
+    rimColor: opts.ground, rimStrength: 0.3, wind: { amplitude: 0.03, frequency: 0.8, height: 1.7 }, name: `${opts.name}Trees` }));
+  material.customProgramCacheKey = () => `${opts.name}|grove-colors`;
+  const compile = material.onBeforeCompile;
+  material.onBeforeCompile = (shader, renderer) => {
+    compile.call(material, shader, renderer);
+    shader.uniforms.uGroveColors = { value: Array.from({ length: 4 }, (_, i) => new THREE.Color(opts.trees[i % opts.trees.length] as THREE.ColorRepresentation)) };
+    shader.vertexShader = 'varying vec2 vGroveWorld; varying float vGroveCanopy;\n' + shader.vertexShader;
+    shader.vertexShader = shader.vertexShader.replace('#include <begin_vertex>', `
+      #include <begin_vertex>
+      vGroveWorld = (modelMatrix * instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0)).xz;
+      vGroveCanopy = step(color.r, color.g * 1.35);
+    `);
+    shader.fragmentShader = 'uniform vec3 uGroveColors[4]; varying vec2 vGroveWorld; varying float vGroveCanopy;\n' + shader.fragmentShader;
+    shader.fragmentShader = shader.fragmentShader.replace('#include <color_fragment>', `
+      #include <color_fragment>
+      vec2 season = smoothstep(vec2(-6.0), vec2(6.0), vGroveWorld + sin(vGroveWorld.yx * 0.17) * 2.5);
+      vec3 grove = mix(mix(uGroveColors[0], uGroveColors[1], season.x), mix(uGroveColors[2], uGroveColors[3], season.x), season.y);
+      diffuseColor.rgb *= mix(vec3(1.0), grove, vGroveCanopy);
+    `);
+  };
+  const kinds = opts.archetypes ?? ['broadleaf'];
+  const treeGeometry = (kind: TreeArchetype, detail: number) => {
+    const geometry = kind === 'conifer' ? coniferTreeGeometry(detail) : kind === 'bare' ? bareTreeGeometry(detail) : broadleafTreeGeometry(detail);
+    const colors = geometry.getAttribute('color');
+    const trunk = kind === 'bare' ? colors.count : (kind === 'conifer' ? Math.max(5, 5 + detail * 3) : Math.max(4, 4 + detail * 2)) * 12;
+    for (let i = 0; i < trunk; i++) colors.setXYZ(i, 0.28, 0.15, 0.075);
+    return geometry;
+  };
+  const banks = kinds.map((kind, variant) => {
+    const geometry = w.own(treeGeometry(kind, 1));
+    const bank = w.own(makeSceneryBank({
+      name: `${opts.name}${kind}`, geometry, material, tileSize: 12, perTile: 16,
+      seed: ctx.seed ^ (variant * 997), colorA: 0xffffff, colorB: 0xbdcbb2, receiveShadow: true,
+      fill(tx, tz, rng, write) {
+        for (let i = 0; i < 16; i++) {
+          const x = (tx + (i % 4 + rng()) / 4) * 12;
+          const z = (tz + (Math.floor(i / 4) + rng()) / 4) * 12;
+          if (Math.abs(x) < opts.halfX + 0.7 && Math.abs(z) < opts.halfZ + 0.7) continue;
+          if (opts.treeKind ? opts.treeKind(x, z) !== kind : rng() > 1 / kinds.length) continue;
+          const grove = 0.5 + 0.5 * Math.sin(x * 0.24 + Math.cos(z * 0.21) * 1.8);
+          if (rng() > 0.3 + grove * 0.7) continue;
+          write(x, heightAt(x, z), z, rng() * Math.PI * 2, 0.7 + rng() * 0.65, 0.9 + rng() * 0.45, rng());
+        }
+      },
+    }));
+    w.add(bank.mesh);
+    return bank;
+  });
+  const massParts: ColoredPart[] = [];
+  for (let i = 0; i < 18; i++) {
+    const kind = kinds[i % kinds.length] as TreeArchetype;
+    const crown = treeGeometry(kind, 0);
+    const x = Math.sin(i * 13.37) * 5.2;
+    const z = Math.cos(i * 7.81) * 5.2;
+    const size = 0.75 + hash2f(i, 31, ctx.seed) * 0.55;
+    crown.scale(size, size * (0.9 + hash2f(i, 14, ctx.seed) * 0.45), size);
+    crown.rotateY(i * 2.4);
+    crown.translate(x, 0, z);
+    massParts.push({ geometry: crown, color: new THREE.Color().setScalar(0.78 + (i % 4) * 0.06) });
+  }
+  const massColors = massParts.flatMap(({ geometry }) => Array.from(geometry.getAttribute('color').array));
+  const massGeometry = w.own(mergeColoredParts(massParts, `${opts.name}Woodland`));
+  massGeometry.setAttribute('color', new THREE.Float32BufferAttribute(massColors, 3));
+  const masses = w.own(makeSceneryBank({
+    name: `${opts.name}DistantGroves`, geometry: massGeometry, material,
+    tileSize: 96, perTile: 8, seed: ctx.seed, colorA: 0xffffff, colorB: 0xc9d3d6,
+    fill(tx, tz, rng, write) {
+      for (let i = 0; i < 8; i++) {
+        const x = (tx + rng()) * 96;
+        const z = (tz + rng()) * 96;
+        if (Math.abs(x) < opts.halfX + 70 && Math.abs(z) < opts.halfZ + 70) continue;
+        write(x, heightAt(x, z) - 0.05, z, rng() * Math.PI * 2, 1, 1, rng());
+      }
+    },
+  }));
+  w.add(masses.mesh);
+  const grassMaterial = w.own(oakMaterial({ color: opts.grass, vertexColors: true, roughness: 0.94,
+    side: THREE.DoubleSide, wind: { amplitude: 0.04, frequency: 1.1, height: 0.5 }, name: `${opts.name}Understory` }));
+  const grass = w.own(makeSceneryBank({
+    name: `${opts.name}Meadow`, geometry: w.own(grassClumpGeometry(3)), material: grassMaterial,
+    tileSize: 12, perTile: 256, seed: ctx.seed ^ 0x54ad, colorA: 0xe6efc4, colorB: 0xabb998,
+    fill(tx, tz, rng, write) {
+      for (let i = 0; i < 256; i++) {
+        const x = (tx + rng()) * 12;
+        const z = (tz + rng()) * 12;
+        const outer = Math.max(Math.abs(x) - opts.halfX, Math.abs(z) - opts.halfZ);
+        if (outer < 0.02) continue;
+        const patch = 0.5 + 0.5 * Math.sin(x * 0.8 + Math.sin(z * 0.55) * 2.1);
+        if (rng() > 0.24 + Math.max(Math.exp(-outer * 0.6), patch * 0.65) * 0.76) continue;
+        write(x, heightAt(x, z), z, rng() * Math.PI * 2, 0.32 + rng() * 0.36, 0.8 + rng() * 0.7, rng());
+      }
+    },
+  }));
+  w.add(grass.mesh);
+  w.time({ setTime(t) { material.oak.setTime(t); grassMaterial.oak.setTime(t); } });
+  return {
+    heightAt,
+    setView(coverage: ViewCoverage, camera: THREE.Camera, sky: SkyHandle) {
+      surface.setView(coverage);
+      for (const bank of banks) bank.setView(coverage);
+      grass.setView(coverage);
+      masses.setView(coverage);
+      sky.mesh.position.copy(camera.position);
+      sky.mesh.scale.setScalar(coverage.far * 0.85);
+    },
   };
 }
 
 export interface WorldHandle extends WorldCore {
   sky: SkyHandle;
   rig: LightRig;
-  terrain: TerrainHandle;
+  setView(coverage: ViewCoverage, camera: THREE.Camera): void;
   field: CellFieldHandle;
   door: GridCell;
   gateYaw: number;
@@ -257,39 +403,18 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   w.own(rig);
   rig.setShadowFocus({ x: 0, y: 0.3, z: 0 }, SHADOW_RADIUS);
 
-  applyFog(scene, palette, FOG_EXTENT);
+  const fog = applyFog(scene, palette, FOG_EXTENT);
 
-  const terrain = makeTerrain({
-    size: [TERRAIN_SIZE, TERRAIN_SIZE],
-    segments: [TERRAIN_SEGMENTS, TERRAIN_SEGMENTS],
-    seed: ctx.seed,
-    heightFn: makeMeadowHeight(ctx.seed),
-    jitter: 0,
-    colorNoise: 0.12,
-    slopeColor: skin.soil,
-    slopeStrength: 0.5,
-    slopeSharpness: 2.2,
-    flattenMask: { x: 0, z: 0, halfX: GARDEN_HALF_X + 0.25, halfZ: GARDEN_HALF_Z + 0.25, feather: 1.1 },
-    flattenHeight: GARDEN_SINK,
-    colorRamp: [
-      { t: 0, color: blendTokens(skin.meadow, skin.soil, 0.55) },
-      { t: 0.4, color: skin.meadow },
-      { t: 0.75, color: blendTokens(skin.meadow, palette.groundB, 0.4) },
-      { t: 1, color: blendTokens(skin.meadow, palette.groundB, 0.72) },
-    ],
-    materialOptions: {
-      rimColor: palette.skyHorizon,
-      rimStrength: 0.18,
-      toonSteps: 3,
-      toonSoftness: 0.3,
-      toonFloor: 0.26,
-    },
-    receiveShadow: true,
-    castShadow: false,
-    name: 'ivyGateMeadow',
+  const landscape = makeLandscape(w, ctx, {
+    name: 'ivyGarden',
+    halfX: GARDEN_HALF_X,
+    halfZ: GARDEN_HALF_Z,
+    ground: skin.meadow,
+    grass: blendTokens(skin.meadow, palette.groundB, 0.4),
+    trees: [skin.tree],
+    grounds: [skin.wildFloor, skin.formalFloor, skin.wildFloor, skin.formalFloor],
+    archetypes: ['broadleaf', 'conifer'],
   });
-  w.add(terrain.mesh);
-  w.own(terrain);
 
   const FLOOR_JITTER = 0.17;
   const TINT_WILD_A = skin.wildFloor;
@@ -335,21 +460,18 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
       if (isDividerWall(grid, x, y)) dividerCells.push({ x, y });
     }
   }
-  const dividerMaterial: OakMaterial = oakMaterial({
-    vertexColors: true,
-    flatShading: true,
+  const dividerMaterial: OakMaterial = sculptureMaterial({
     roughness: 0.93,
     rimColor: palette.skyHorizon,
     rimStrength: 0.13,
-    toonSteps: 3,
     toonSoftness: 0.3,
     toonFloor: 0.22,
     name: 'ivyGateDividerMaterial',
   });
   w.own({ dispose: () => dividerMaterial.dispose() });
+  const dividerGeometry = w.own(makeDividerGeometry(skin));
   if (dividerCells.length > 0) {
-    const geometry = makeDividerGeometry(skin);
-    w.own({ dispose: () => geometry.dispose() });
+    const geometry = dividerGeometry;
     const mesh = new THREE.InstancedMesh(geometry, dividerMaterial, dividerCells.length);
     mesh.name = 'ivyGateDivider';
     mesh.castShadow = true;
@@ -466,81 +588,19 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   w.time(w.own(topiary));
   planting.push(topiary);
 
-  const offGarden = excludeRect(0, 0, GARDEN_HALF_X, GARDEN_HALF_Z, 0.9);
-  const nearCamera = excludeRect(
-    Math.sin(CAMERA_AZIMUTH) * CAMERA_STANDOFF,
-    Math.cos(CAMERA_AZIMUTH) * CAMERA_STANDOFF,
-    4.6,
-    4.6,
-    0,
-  );
-  const outside = excludeAny(offGarden, nearCamera);
-
-  const meadowGrass = scatterGrass({
-    count: 380,
-    area: { halfX: 17, halfZ: 17 },
-    seed: ctx.seed ^ 0x6d0b,
-    exclude: outside,
-    heightAt: (x, z) => terrain.sampleHeight(x, z),
-    maxSlope: 0.85,
-    color: blendTokens(palette.groundB, palette.sun, 0.22),
-    scale: [0.42, 0.85],
-    stretch: [0.7, 1.05],
-    hueJitter: 0.3,
-    wind: 0.07,
-    windFrequency: 1.25,
-    rimColor: palette.skyHorizon,
-    rimStrength: 0.44,
-    castShadow: false,
-    name: 'meadowGrass',
-  });
-  w.add(meadowGrass.group);
-  w.time(w.own(meadowGrass));
-  planting.push(meadowGrass);
-
   const verge = scatterFlowers({
-    count: 105,
-    area: { halfX: GARDEN_HALF_X + 1.5, halfZ: GARDEN_HALF_Z + 1.5 },
+    count: 450,
+    area: { halfX: GARDEN_HALF_X + 3.2, halfZ: GARDEN_HALF_Z + 3.2 },
     seed: ctx.seed ^ 0x58ba,
-    exclude: excludeAny(excludeRect(0, 0, GARDEN_HALF_X, GARDEN_HALF_Z, 0.08), nearCamera),
-    heightAt: (x, z) => terrain.sampleHeight(x, z),
-    color: shade(blendTokens(skin.wildBloom, palette.groundB, 0.5), 0.2),
+    exclude: excludeRect(0, 0, GARDEN_HALF_X, GARDEN_HALF_Z, 0.08),
+    heightAt: landscape.heightAt,
+    color: skin.wildBloom,
     scale: [0.34, 0.62],
-    stretch: [0.9, 1.5],
-    hueJitter: 0.34,
     wind: 0.05,
-    windFrequency: 1.3,
-    rimColor: palette.skyHorizon,
-    rimStrength: 0.34,
-    castShadow: false,
-    name: 'wallVerge',
+    name: 'gardenVerge',
   });
   w.add(verge.group);
   w.time(w.own(verge));
-  planting.push(verge);
-
-  const treeLine = scatterTrees({
-    archetypes: ['broadleaf', 'conifer'],
-    count: 58,
-    area: { halfX: 17.5, halfZ: 17.5, innerRadius: 7.6 },
-    seed: ctx.seed ^ 0x1a70,
-    exclude: outside,
-    heightAt: (x, z) => terrain.sampleHeight(x, z),
-    maxSlope: 0.7,
-    color: skin.tree,
-    scale: [0.8, 1.5],
-    stretch: [0.9, 1.4],
-    hueJitter: 0.26,
-    wind: 0.03,
-    windFrequency: 0.8,
-    rimColor: palette.skyHorizon,
-    rimStrength: 0.3,
-    castShadow: true,
-    name: 'treeLine',
-  });
-  w.add(treeLine.group);
-  w.time(w.own(treeLine));
-  planting.push(treeLine);
 
   const wildMotes = makeAmbientParticles({
     preset: 'pollen',
@@ -574,28 +634,15 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   w.add(formalMotes.points);
   w.size(w.time(w.own(formalMotes)));
 
-  const mist = makeMistPlanes({
-    size: [38, 36],
-    color: blendTokens(palette.fog, palette.sun, 0.3),
-    seed: ctx.seed ^ 0x3ac1,
-    layers: 2,
-    baseY: 1.75,
-    spread: 1.1,
-    opacity: 0.05,
-    speed: 0.008,
-    scale: 2.0,
-    nearFade: 9,
-    name: 'morningAir',
-  });
-  w.add(mist.group);
-  w.time(w.own(mist));
-
   const restoreColor = new THREE.Color();
 
   return w.seal({
     sky,
     rig,
-    terrain,
+    setView(coverage, camera) {
+      fog.density = 2.8 / coverage.far;
+      landscape.setView(coverage, camera, sky);
+    },
     field,
     door,
     gateYaw: yaw,
@@ -616,7 +663,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
 }
 
 export function makeDividerGeometry(skin: GardenSkin): THREE.BufferGeometry {
-  const detail = 1;
   const parts: ColoredPart[] = [];
   const size = CELL - 0.03;
 
@@ -642,7 +688,7 @@ export function makeDividerGeometry(skin: GardenSkin): THREE.BufferGeometry {
   parts.push({ geometry: footing, color: skin.dividerCap });
 
   const rows = 2;
-  const perRow = Math.max(5, Math.round(9 * detail));
+  const perRow = 9;
   for (let r = 0; r < rows; r++) {
     for (let i = 0; i < perRow; i++) {
       const t = (i + (r % 2) * 0.5) / perRow;
@@ -663,7 +709,7 @@ export function makeDividerGeometry(skin: GardenSkin): THREE.BufferGeometry {
   }
 
   const runners = 2;
-  const leavesPer = Math.max(3, Math.round(8 * detail));
+  const leavesPer = 8;
   for (let r = 0; r < runners; r++) {
     const x0 = r === 0 ? -0.24 : 0.26;
     for (let i = 0; i < leavesPer; i++) {
@@ -684,6 +730,20 @@ export function makeDividerGeometry(skin: GardenSkin): THREE.BufferGeometry {
   return mergeColoredParts(parts, 'ivyWallSegment');
 }
 
+export function sculptureMaterial(opts: OakMaterialOptions): OakMaterial {
+  return oakMaterial({ vertexColors: true, flatShading: true, toonSteps: 3, ...opts });
+}
+
+export function gradedGeometry(name: string, vertices: readonly (readonly [number, number, number, number])[]): THREE.BufferGeometry {
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices.flatMap(([x, y, z]) => [x, y, z]), 3));
+  geometry.setAttribute('color', new THREE.Float32BufferAttribute(vertices.flatMap(([, , , grade]) => [grade, grade, grade]), 3));
+  geometry.computeVertexNormals();
+  geometry.computeBoundingSphere();
+  geometry.name = name;
+  return geometry;
+}
+
 export function ivyLeafGeometry(): THREE.BufferGeometry {
   const w = 0.105;
   const l = 0.2;
@@ -700,27 +760,5 @@ export function ivyLeafGeometry(): THREE.BufferGeometry {
     [lobe0, lobe1, tip],
   ];
   const grade: readonly number[] = [0.62, 0.86, 0.86, 0.86, 0.86, 1.02, 0.86, 1.02, 1.02, 1.02, 1.02, 1.18];
-  const n = tris.length * 3;
-  const positions = new Float32Array(n * 3);
-  const colors = new Float32Array(n * 3);
-  let o = 0;
-  for (const tri of tris) {
-    for (const v of tri) {
-      positions[o * 3] = v[0];
-      positions[o * 3 + 1] = v[1];
-      positions[o * 3 + 2] = v[2];
-      const k = grade[o] ?? 1;
-      colors[o * 3] = k;
-      colors[o * 3 + 1] = k;
-      colors[o * 3 + 2] = k;
-      o++;
-    }
-  }
-  const g = new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  g.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-  g.computeVertexNormals();
-  g.computeBoundingSphere();
-  g.name = 'ivyLeaf';
-  return g;
+  return gradedGeometry('ivyLeaf', tris.flat().map((point, i) => [...point, grade[i]!]));
 }

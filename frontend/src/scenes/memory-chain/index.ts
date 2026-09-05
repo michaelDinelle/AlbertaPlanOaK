@@ -1,352 +1,208 @@
-import type { CelebrationPoolOptions } from '@kit/celebrate';
+import * as THREE from 'three';
 import type { GroundTruthOptions } from '@kit/debug';
-import { cellToWorld, cellToWorldVec, type Vec3Tuple } from '@kit/grid';
-import { clamp01, envelope } from '@kit/mix';
+import { cellToWorld, cellToWorldVec } from '@kit/grid';
+import { envelope } from '@kit/mix';
 import type { OrbitRigOptions } from '@kit/rigs';
 import { StageScene, type Stage } from '@kit/stage';
-import { TOKENS } from '@kit/tokens';
-import type { FrameUpdate, SceneContext, SceneFactory } from '@kit/types';
+import type { FrameUpdate, SceneContext, SceneFactory, SceneSize } from '@kit/types';
 import { Wisp } from '@kit/wisp';
-import * as THREE from 'three';
-import type { GridCell, GridGeometry } from '@sim/types';
-import {
-  buildCueCrystal,
-  buildExitMouth,
-  type CueCrystalHandle,
-  type ExitMouthHandle,
-} from './actors';
-import {
-  CAMERA_AZIMUTH,
-  CHOICE_CELL,
-  CUE_CELL,
-  buildWorld,
-  readChoice,
-  readCue,
-  readPos,
-  resolveGrid,
-  type WorldHandle,
-} from './world';
+import { philoxDraw } from '@sim/philox';
+import type { EventStream, GridCell, GridGeometry } from '@sim/types';
+import { makeSceneView, type SceneView } from '../jelly-bean-world/view';
+import { buildCueCrystal, buildExitMouth, buildTraveler, type CueCrystalHandle, type ExitMouthHandle } from './actors';
+import { buildWorld, CUE_CELL, CHOICE_CELL, readCue, readPos, resolveGrid, type WorldHandle } from './world';
 
-const CAM_TARGET: readonly [number, number, number] = [-4, 1.0, 0];
-const CAM_DISTANCE = 24.8;
-const CAM_POLAR = 1.263;
+interface Outcome {
+  step: number;
+  choice: 0 | 1;
+  success: boolean;
+}
 
-const HOP_SECONDS = 0.11;
-const HOP_HEIGHT = 0.14;
+class RecordedOutcomes {
+  private stream: EventStream | null = null;
+  private consumed = 0;
+  private seed = Number.NaN;
+  private goalStep = -Infinity;
+  private readonly outcomes: Outcome[] = [];
 
-const BURST_SCALE = 0.72;
-const RIPPLE_SCALE = 0.62;
-const PULSE_STRENGTH = 0.3;
-const SIGH_STRENGTH = 0.85;
+  at(stream: EventStream, step: number, seed: number): Outcome | undefined {
+    if (stream !== this.stream || stream.count < this.consumed || seed !== this.seed) {
+      this.stream = stream;
+      this.seed = seed;
+      this.consumed = 0;
+      this.goalStep = -Infinity;
+      this.outcomes.length = 0;
+    }
+    for (; this.consumed < stream.count; this.consumed++) {
+      const type = stream.types[stream.kinds[this.consumed] ?? 0];
+      const eventStep = stream.steps[this.consumed] ?? -1;
+      if (type === 'goal') this.goalStep = eventStep;
+      if (type !== 'done') continue;
+      const generation = this.outcomes.length;
+      const cue = generation === 0 ? 0 : philoxDraw(seed >>> 0, 3, generation - 1, 0)[0] & 1;
+      const success = this.goalStep === eventStep;
+      this.outcomes.push({ step: eventStep, choice: (success ? cue : 1 - cue) as 0 | 1, success });
+    }
+    let low = 0;
+    let high = this.outcomes.length;
+    while (low < high) {
+      const mid = (low + high) >>> 1;
+      if ((this.outcomes[mid]?.step ?? Infinity) <= step) low = mid + 1;
+      else high = mid;
+    }
+    return this.outcomes[low - 1];
+  }
+}
 
-const BLOOM_Y = 1.25;
-
-const FLARE_SECONDS = 1.35;
-const DOUSE_SECONDS = 1.15;
-const KINDLE_SECONDS = 0.8;
-const FLOOD_SECONDS = 1.9;
-
-const MOUTH_REST = 1;
-const MOUTH_FLARE = 3.4;
-
-class FireflyCaveScene extends StageScene<WorldHandle> {
-  protected readonly stageName = 'fireflyCave';
-
+class LimestoneLakeScene extends StageScene<WorldHandle> {
+  protected readonly stageName = 'limestoneLake';
+  private view: SceneView | null = null;
+  private grid!: GridGeometry;
+  private traveler: ReturnType<typeof buildTraveler> | null = null;
   private wisp: Wisp | null = null;
-  private crystal: CueCrystalHandle | null = null;
-  private mouthCyan: ExitMouthHandle | null = null;
-  private mouthMagenta: ExitMouthHandle | null = null;
-  private grid: GridGeometry = resolveGrid({});
-
-  private kindleAt = -Infinity;
-  private flareAt = -Infinity;
-  private douseAt = -Infinity;
-  private floodAt = -Infinity;
-  private winner: 0 | 1 = 0;
-
-  private readonly cell: GridCell = { x: 0, y: 0 };
-  private readonly overlayCell: GridCell = { x: 0, y: 0 };
+  private cue: CueCrystalHandle | null = null;
+  private readonly choices: ExitMouthHandle[] = [];
+  private readonly outcomes = new RecordedOutcomes();
+  private shownStep = -Infinity;
+  private outcomeAt = -Infinity;
+  private selected: 0 | 1 = 0;
+  private succeeded = false;
+  private readonly agentCell: GridCell = { x: 0, y: 0 };
   private readonly goalCell: GridCell = { x: CHOICE_CELL, y: 0 };
-  private readonly choicePos = new THREE.Vector3();
-  private readonly bloomPos = new THREE.Vector3();
-  private readonly lightPos = new THREE.Vector3();
-  private readonly cueColors: [THREE.Color, THREE.Color] = [
-    new THREE.Color(TOKENS.cueCyan),
-    new THREE.Color(TOKENS.cueMagenta),
-  ];
-  private cueX = 0;
-  private choiceX = 0;
+  private readonly effectPosition = new THREE.Vector3();
 
   protected buildWorld(ctx: SceneContext): WorldHandle {
-    const grid = resolveGrid(ctx.geometry);
-    this.grid = grid;
-    this.cueColors[0].set(ctx.tokens.cueCyan);
-    this.cueColors[1].set(ctx.tokens.cueMagenta);
-    return buildWorld(ctx, this.scene, grid);
+    this.grid = resolveGrid(ctx.geometry);
+    const start = cellToWorld(0, 0, this.grid)[0];
+    const end = cellToWorld(CHOICE_CELL, 0, this.grid)[0];
+    this.view = makeSceneView(ctx, { min: [start - 1.5, -0.4, -4], max: [end + 2.6, 3.5, 4] }, [0, 1, 0], { distance: 33.5, azimuth: -0.45, polar: 1.36 });
+    return buildWorld(ctx, this.scene, this.grid);
   }
 
   protected buildActors(ctx: SceneContext, world: WorldHandle): void {
-    const grid = this.grid;
-    const accent = this.accentOf(ctx);
-
-    const anchor: Vec3Tuple = [0, 0, 0];
-    this.cueX = cellToWorld(CUE_CELL, 0, grid, anchor)[0];
-    this.choiceX = cellToWorld(CHOICE_CELL, 0, grid, anchor)[0];
-    this.choicePos.set(this.choiceX, 0, 0);
-
-    const wisp = new Wisp(
-      {
-        color: accent,
-        radius: 0.21,
-        hop: { duration: HOP_SECONDS, height: HOP_HEIGHT },
-        name: 'caveWisp',
-      },
-      grid,
-    );
+    const colors = [ctx.tokens.cueCyan, ctx.tokens.cueMagenta] as const;
+    const wisp = new Wisp({ color: 0xffe4b0, radius: 0.2, skirt: false, ribbon: false, silhouette: false, hop: { duration: 0.11, height: 0.1 } }, this.grid);
+    wisp.core.visible = false;
+    const halo = wisp.group.getObjectByName('oakWispHalo');
+    if (halo) halo.visible = false;
     this.wisp = wisp;
+    this.traveler = buildTraveler();
+    wisp.avatar.add(this.traveler.group);
     this.scene.add(wisp.group);
-
-    const crystal = buildCueCrystal({
-      skin: world.skin,
-      cueColors: [ctx.tokens.cueCyan, ctx.tokens.cueMagenta],
-      name: 'cueCrystal',
-    });
-    this.crystal = crystal;
-    this.scene.add(crystal.group);
-    cellToWorldVec(CUE_CELL, 0, grid, crystal.root.position);
-
-    const mouthCyan = buildExitMouth({
-      skin: world.skin,
-      color: ctx.tokens.cueCyan,
-      side: -1,
-      name: 'exitMouthCyan',
-    });
-    const mouthMagenta = buildExitMouth({
-      skin: world.skin,
-      color: ctx.tokens.cueMagenta,
-      side: 1,
-      name: 'exitMouthMagenta',
-    });
-    this.mouthCyan = mouthCyan;
-    this.mouthMagenta = mouthMagenta;
-    this.scene.add(mouthCyan.group, mouthMagenta.group);
-    cellToWorldVec(CHOICE_CELL, 0, grid, mouthCyan.root.position);
-    cellToWorldVec(CHOICE_CELL, 0, grid, mouthMagenta.root.position);
-
-    const wispLight = world.rig.points[0];
-    if (wispLight) {
-      wispLight.color.set(accent);
-      wispLight.intensity = 0;
+    this.cue = buildCueCrystal({ skin: world.skin, cueColors: colors });
+    cellToWorldVec(CUE_CELL, 0, this.grid, this.cue.root.position);
+    this.cue.root.position.z = -1.6;
+    this.scene.add(this.cue.group);
+    for (const choice of [0, 1] as const) {
+      const alcove = buildExitMouth({ skin: world.skin, color: colors[choice], choice });
+      cellToWorldVec(CHOICE_CELL, 0, this.grid, alcove.root.position);
+      alcove.root.position.x += 0.85;
+      alcove.root.position.z = choice === 0 ? -2.6 : 2.6;
+      this.choices.push(alcove);
+      this.scene.add(alcove.group);
     }
-    const crystalLight = world.rig.points[1];
-    if (crystalLight) {
-      crystalLight.color.copy(this.cueColors[0]);
-      crystalLight.intensity = 0;
-      crystalLight.position.set(this.cueX, crystal.coreHeight, crystal.offsetZ);
-    }
-    const choiceLight = world.rig.points[2];
-    if (choiceLight) {
-      choiceLight.color.copy(this.cueColors[0]).lerp(this.cueColors[1], 0.5);
-      choiceLight.intensity = 0;
-      choiceLight.position.set(this.choiceX + 0.4, mouthCyan.glowHeight, 0);
-    }
-    const floodLight = world.rig.points[3];
-    if (floodLight) {
-      floodLight.color.copy(this.cueColors[0]);
-      floodLight.intensity = 0;
-      floodLight.position.set(this.choiceX, 1.2, 0);
-    }
+    world.rig.points[0]?.color.set(0xffe4b0);
+    world.rig.points[1]?.color.set(colors[0]);
+    world.rig.points[2]?.color.set(colors[1]);
   }
 
-  protected rigOptions(ctx: SceneContext): OrbitRigOptions {
-    return {
-      target: CAM_TARGET,
-      distance: CAM_DISTANCE,
-      azimuth: CAMERA_AZIMUTH,
-      polar: CAM_POLAR,
-      zoomSpeed: 0.0014,
-    };
-  }
-
-  protected poolOptions(ctx: SceneContext): CelebrationPoolOptions {
-    return {
-      sighRadius: 3.4,
-      sighHeight: 4,
-    };
+  protected rigOptions(_ctx: SceneContext): OrbitRigOptions {
+    if (!this.view) throw new Error('Cavern view is missing');
+    return this.view.options;
   }
 
   protected overlayOptions(): GroundTruthOptions {
-    const overlayCell = this.overlayCell;
-    const goalCell = this.goalCell;
     return {
-      agentCell: (state) => {
-        overlayCell.x = readPos(state);
-        overlayCell.y = 0;
-        return overlayCell;
-      },
-      goalCell: () => goalCell,
+      agentCell: state => { this.agentCell.x = readPos(state); return this.agentCell; },
+      goalCell: () => this.goalCell,
     };
   }
 
   protected start(_ctx: SceneContext, world: WorldHandle): void {
-    world.setTime(0);
     this.wisp?.setCell(CUE_CELL, 0, this.grid);
-    this.crystal?.setCue(0);
-    this.crystal?.setGlow(1);
-    this.crystal?.setTime(0);
-    this.mouthCyan?.setGlow(MOUTH_REST);
-    this.mouthMagenta?.setGlow(MOUTH_REST);
-    this.mouthCyan?.setTime(0);
-    this.mouthMagenta?.setTime(0);
+    world.setTime(0);
+    if (this.rig && this.view) world.setView(this.view.update(this.rig, 0), this.camera);
   }
 
   protected tick(frame: FrameUpdate, { ctx, world, pool, rig, time }: Stage<WorldHandle>): void {
     const wisp = this.wisp;
-    const crystal = this.crystal;
-    const cyan = this.mouthCyan;
-    const magenta = this.mouthMagenta;
-    if (!wisp || !crystal || !cyan || !magenta) return;
-
-    const state = frame.state;
-    const grid = this.grid;
-
+    const cue = this.cue;
+    if (!wisp || !cue || !this.view) return;
     pool.update(frame.dtReal, time);
-
-    const pos = readPos(state);
-    const cue = readCue(state);
-    this.cell.x = pos;
-    this.cell.y = 0;
-
+    const pos = readPos(frame.state);
+    const outcome = this.outcomes.at(frame.eventLog, frame.state.step, ctx.seed);
     if (frame.scrubbed) {
       pool.clear();
-      this.kindleAt = -Infinity;
-      this.flareAt = -Infinity;
-      this.douseAt = -Infinity;
-      this.floodAt = -Infinity;
-      wisp.setCell(pos, 0, grid);
+      this.outcomeAt = -Infinity;
+      this.shownStep = outcome?.step ?? -Infinity;
+      wisp.setCell(pos, 0, this.grid);
       wisp.snap();
-      rig.snap();
     }
-
-    let teleported = false;
-    let scored = false;
-    for (let i = 0; i < frame.events.length; i++) {
-      const ev = frame.events[i];
-      if (!ev) continue;
-      if (ev.type === 'goal') {
-        scored = true;
-        this.winner = readChoice(state);
-        const color = this.cueColors[this.winner];
-        this.flareAt = time;
-        this.floodAt = time;
-        world.flood.setColor(color);
-        this.bloomPos.set(this.choiceX, BLOOM_Y, 0);
-        pool.burst(this.bloomPos, color, BURST_SCALE, time);
-        pool.ripple(this.choicePos, color, RIPPLE_SCALE, time);
-        pool.pulse.fire(PULSE_STRENGTH);
-        wisp.flare(0.6);
-        const floodLight = world.rig.points[3];
-        if (floodLight) floodLight.color.copy(color);
-      } else if (ev.type === 'cue') {
-        this.kindleAt = time;
-      } else if (ev.type === 'teleport') {
-        teleported = true;
-      } else if (ev.type === 'done') {
-        if (!scored) {
-          this.douseAt = time;
-          this.bloomPos.set(this.choiceX, BLOOM_Y, 0);
-          pool.sigh(SIGH_STRENGTH, this.bloomPos, time);
-        }
-        scored = false;
+    if (outcome) {
+      const newlyShown = outcome.step !== this.shownStep && !frame.scrubbed;
+      this.shownStep = outcome.step;
+      this.selected = outcome.choice;
+      this.succeeded = outcome.success;
+      this.outcomeAt = (outcome.step + 1) * frame.state.simTime / frame.state.step;
+      const alcove = this.choices[outcome.choice];
+      if (alcove && newlyShown) {
+        this.effectPosition.copy(alcove.root.position);
+        this.effectPosition.y = 1.4;
+        if (outcome.success) pool.burst(this.effectPosition, outcome.choice === 0 ? ctx.tokens.cueCyan : ctx.tokens.cueMagenta, 0.6, time);
+        else pool.sigh(0.55, this.effectPosition, time);
       }
     }
-
-    if (teleported || Math.abs(pos - wisp.cellX) > 1) {
-      wisp.setCell(pos, 0, grid);
+    if (Math.abs(pos - wisp.cellX) > 1 || frame.events.some(event => event.type === 'teleport')) {
+      wisp.setCell(pos, 0, this.grid);
       wisp.snap();
     } else if (pos !== wisp.cellX) {
-      wisp.hopTo(this.cell, time);
+      this.agentCell.x = pos;
+      wisp.hopTo(this.agentCell, time);
     }
     wisp.update(frame.dtReal, time);
-
-    const kindle = envelope(time - this.kindleAt, KINDLE_SECONDS, 3.4);
-    const atCue = pos === CUE_CELL;
-    crystal.setCue(cue);
-    crystal.setGlow(atCue ? 1.3 + 0.45 * kindle + 0.18 * Math.sin(time * 2.1) : 0);
-    crystal.setTime(time);
-
-    const flare = envelope(time - this.flareAt, FLARE_SECONDS, 2.3);
-    const douse = envelope(time - this.douseAt, DOUSE_SECONDS, 1.6);
-    const asking = pos === CHOICE_CELL ? 0.8 : 0;
-    const rest = MOUTH_REST * (1 + asking) * (1 - 0.94 * douse);
-    cyan.setGlow(rest + (this.winner === 0 ? MOUTH_FLARE * flare : 0));
-    magenta.setGlow(rest + (this.winner === 1 ? MOUTH_FLARE * flare : 0));
-    cyan.setTime(time);
-    magenta.setTime(time);
-
-    const floodAge = time - this.floodAt;
-    const flooding = floodRunning(floodAge);
-    const flood = floodProgress(floodAge);
-    if (flooding) {
-      const eased = 1 - (1 - flood) * (1 - flood);
-      world.flood.points.position.x = this.choiceX + (this.cueX - this.choiceX) * eased;
-      world.flood.setDensity(1);
-      world.flood.setIntensity(2.4 * (1 - flood * flood));
-    } else {
-      world.flood.points.position.x = this.choiceX;
-      world.flood.setDensity(0);
+    cue.setCue(readCue(frame.state));
+    cue.setGlow(pos === CUE_CELL ? 1 : 0);
+    cue.setTime(time);
+    const outcomeAge = time - this.outcomeAt;
+    const flare = outcomeAge >= 0 ? envelope(Math.max(0, outcomeAge - 0.6), 2.2, 1.4) : 0;
+    for (let i = 0; i < this.choices.length; i++) {
+      const gain = 1 + (i === this.selected ? flare * (this.succeeded ? 2.5 : 0.8) : 0);
+      this.choices[i]?.setGlow(gain, this.succeeded);
+      this.choices[i]?.setTime(time);
+      const light = world.rig.points[i + 1];
+      const alcove = this.choices[i];
+      if (light && alcove) {
+        light.position.copy(alcove.root.position);
+        light.position.y = 1.5;
+        light.intensity = 1.1 * (i === this.selected && !this.succeeded ? 1 - flare * 0.85 : gain);
+      }
     }
-
-    const wispLight = world.rig.points[0];
-    if (wispLight) {
-      this.lightPos.copy(wisp.position);
-      this.lightPos.y += ctx.tokens.wispHeight;
-      wispLight.position.copy(this.lightPos);
-      wispLight.intensity = 2.4 + 2.6 * flare;
-    }
-    const crystalLight = world.rig.points[1];
-    if (crystalLight) {
-      crystalLight.color.copy(this.cueColors[cue]);
-      crystalLight.intensity = atCue ? 4.2 + 2.2 * kindle : 0;
-    }
-    const choiceLight = world.rig.points[2];
-    if (choiceLight) {
-      choiceLight.intensity = 2.4 * (1 - 0.94 * douse) + 3.5 * flare;
-    }
-    const floodLight = world.rig.points[3];
-    if (floodLight) {
-      floodLight.position.x = world.flood.points.position.x;
-      floodLight.intensity = flooding ? 3.4 * (1 - flood * flood) : 0;
-    }
-
+    const light = world.rig.points[0];
+    if (light) { light.position.copy(wisp.position); light.position.y += 0.6; light.intensity = 1.6; }
     world.setTime(time);
+    world.setView(this.view.update(rig, frame.dtReal), this.camera);
+  }
 
-    rig.update(frame.dtReal);
+  override resize(size: SceneSize): void {
+    super.resize(size);
+    if (this.view && this.rig && this.world) {
+      this.view.resize(size, this.rig);
+      this.world.setView(this.view.update(this.rig, 0), this.camera);
+    }
   }
 
   protected drop(): void {
-    this.mouthCyan?.dispose();
-    this.mouthCyan = null;
-    this.mouthMagenta?.dispose();
-    this.mouthMagenta = null;
-    this.crystal?.dispose();
-    this.crystal = null;
+    for (const choice of this.choices) choice.dispose();
+    this.choices.length = 0;
+    this.cue?.dispose();
+    this.cue = null;
+    this.traveler?.dispose();
+    this.traveler = null;
     this.wisp?.dispose();
     this.wisp = null;
-    this.kindleAt = -Infinity;
-    this.flareAt = -Infinity;
-    this.douseAt = -Infinity;
-    this.floodAt = -Infinity;
+    this.outcomeAt = -Infinity;
+    this.shownStep = -Infinity;
   }
 }
 
-export function floodRunning(age: number): boolean {
-  return age >= 0 && age < FLOOD_SECONDS;
-}
-
-export function floodProgress(age: number): number {
-  if (!(age >= 0) || age >= FLOOD_SECONDS) return 0;
-  return clamp01(age / FLOOD_SECONDS);
-}
-
-export default ((() => new FireflyCaveScene()) satisfies SceneFactory);
+export default ((() => new LimestoneLakeScene()) satisfies SceneFactory);

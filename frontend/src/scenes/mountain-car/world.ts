@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { applyFog, makeLightRig, type LightRig } from '@kit/lighting';
+import type { LightRig } from '@kit/lighting';
 import { oakMaterial, oakUniforms, setMaterialsTime, type OakMaterial } from '@kit/materials';
 import { blendTokens, smoothstep01, TOKEN_WHITE } from '@kit/mix';
 import {
@@ -10,8 +10,10 @@ import {
 } from '@kit/particles';
 import { mergeColoredParts, type ColoredPart } from '@kit/parts';
 import { streamFor } from '@kit/rng';
-import { skyFromPalette, type SkyHandle } from '@kit/sky';
-import { makeTerrain, type TerrainHandle } from '@kit/terrain';
+import type { SkyHandle } from '@kit/sky';
+import { makeTerrain } from '@kit/terrain';
+import { extendVegetation, makeLandscape, makeSceneTerrain } from '../half-cheetah/world';
+import type { ViewCoverage } from '../jelly-bean-world/view';
 import { valueNoise2 } from '@kit/textures';
 import { TOKENS, type Palette } from '@kit/tokens';
 import type { SceneContext } from '@kit/types';
@@ -23,14 +25,11 @@ import {
   scatterTrees,
   type ExcludeFn,
 } from '@kit/vegetation';
-import { makeWorld, type WorldCore } from '@kit/world';
+import type { WorldCore } from '@kit/world';
 import type { EnvGeometry } from '@sim/types';
-import { MC_GOAL_POS, MC_MAX_POS, MC_MIN_POS, MC_START_POS, mountainCarHeight } from '@sim/envs/mountaincar';
+import { MC_GOAL_POS, MC_MAX_POS, MC_MIN_POS, MC_START_POS } from '@sim/envs/mountaincar';
 
 export const TERRAIN_W = 10.24;
-export const TERRAIN_D = 8;
-export const TERRAIN_SEG_X = 416;
-export const TERRAIN_SEG_Z = 84;
 export const BAND_HALF_Z = 0.34;
 const BAND_FEATHER = 0.6;
 export const SNOW_LINE = 0.7;
@@ -43,7 +42,9 @@ const EAGLE_TRAVEL: readonly [number, number, number] = [0.35, -0.06, -0.935];
 const EAGLE_SWEEP = 2;
 
 export function heightResolver(geometry: EnvGeometry): (x: number) => number {
-  return geometry.classic?.heightAt ?? mountainCarHeight;
+  const height = geometry.classic?.heightAt;
+  if (!height) throw new Error('mountain car height profile required');
+  return height;
 }
 
 export function makeRidgeHeight(
@@ -71,7 +72,8 @@ export function makeRidgeHeight(
 export interface WorldHandle extends WorldCore {
   sky: SkyHandle;
   rig: LightRig;
-  terrain: TerrainHandle;
+  terrain: ReturnType<typeof makeSceneTerrain>;
+  setView(coverage: ViewCoverage, camera: THREE.Camera): void;
   cairnRoot: THREE.Object3D;
   trailheadRoot: THREE.Object3D;
   summitBurst: THREE.Vector3;
@@ -83,7 +85,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   const palette: Palette = ctx.tokens.palettes.dusk;
   const accent = ctx.tokens.accents['mountain-car'] ?? ctx.tokens.celebrationGold;
   const heightAt = heightResolver(ctx.geometry);
-  const w = makeWorld('alpineValley');
 
   const cValley = blendTokens(palette.groundA, palette.hemiGround, 0.55);
   const cMeadow = blendTokens(palette.groundA, TOKENS.palettes.noon.groundA, 0.5);
@@ -93,7 +94,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   const woodDark = blendTokens(palette.groundA, palette.hemiGround, 0.62);
   const stone = blendTokens(palette.hemiGround, palette.skyTop, 0.5);
 
-  const sky = skyFromPalette(palette, 'dusk', {
+  const land = makeLandscape(scene, 'alpineValley', palette, 'dusk', { sky: {
     sunDir: SUN_DIR,
     sunSize: 0.05,
     sunHdr: 7,
@@ -102,59 +103,53 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     topSpread: 0.62,
     bottomSpread: 0.3,
     radius: 320,
-  });
-  w.add(sky.mesh);
-  w.own(sky);
-  w.time({ setTime: (t) => sky.setTime(t) });
-
-  const rig = makeLightRig(palette, {
-    sunDir: sky.sunDirection,
+  }, light: {
     pointCount: 2,
     pointDistance: 2.6,
     sunDistanceScale: 3,
-  });
-  w.add(rig.group);
-  w.own(rig);
+  }, fogExtent: FOG_EXTENT });
+  const { world: w, sky, rig } = land;
   rig.setShadowFocus({ x: -0.1, y: 0.5, z: -0.6 }, 5.5);
 
-  applyFog(scene, palette, FOG_EXTENT);
-
   const ridge = makeRidgeHeight(heightAt, ctx.seed);
-  const rampColor = new THREE.Color();
-  const terrain = makeTerrain({
-    size: [TERRAIN_W, TERRAIN_D],
-    segments: [TERRAIN_SEG_X, TERRAIN_SEG_Z],
-    seed: ctx.seed,
-    heightFn: ridge,
-    jitter: 0,
-    colorNoise: 0.055,
-    slopeColor: cRock,
-    slopeStrength: 0.72,
-    slopeSharpness: 2.2,
-    colorRamp: (h, _slope, x, z) => {
-      const ragged = valueNoise2(x * 1.35 + 3.1, z * 1.35 + 7.7, 64, ctx.seed) - 0.5;
-      const snow = smoothstep01((h + ragged * 0.16 - (SNOW_LINE - 0.05)) / 0.22);
-      const meadow = smoothstep01((h - 0.08) / 0.46);
-      rampColor.copy(cValley).lerp(cMeadow, meadow);
-      rampColor.lerp(cSnow, snow);
-      return rampColor;
-    },
-    materialOptions: {
-      rimColor: palette.skyHorizon,
-      rimStrength: 0.24,
-      toonSteps: 3,
-      toonSoftness: 0.32,
-      toonFloor: 0.2,
-    },
-    receiveShadow: true,
-    castShadow: false,
-    name: 'alpineRidge',
-  });
+  const terrain = makeSceneTerrain({
+    name: 'alpineRidge', seed: ctx.seed, colorA: cValley, colorB: cMeadow, segments: 160,
+    height: `
+float base = sin(p.x * 3.0) * 0.45 + 0.55;
+float az = abs(p.y);
+float lateral = smoothstep(0.34, 0.94, az);
+float outside = max(0.0, max(-1.2 - p.x, p.x - 0.6));
+float w = max(lateral, smoothstep(0.0, 0.45, outside));
+float behind = -p.y;
+float swell = behind <= 0.0 ? behind * 0.46 : behind * 0.115 + behind * behind * 0.022;
+float amp = behind <= 0.0 ? 0.05 : 0.08 + 0.08 * min(2.2, az);
+float n1 = worldNoise(p * 0.62 + vec2(11.3, 5.1), 64.0, ${ctx.seed >>> 0}u) - 0.5;
+float n2 = worldNoise(p * 1.94 + vec2(2.7, 9.4), 64.0, ${(ctx.seed ^ 0x5f3a91) >>> 0}u) - 0.5;
+float local = base + w * (swell + n1 * 2.0 * amp + n2 * 0.8 * amp);
+float mountain = 0.3 + pow(abs(sin(p.x * 0.07 + sin(p.y * 0.039)) * cos(p.y * 0.073)), 1.2) * 14.0;
+return mix(local, mountain, smoothstep(5.0, 14.0, length(p)));
+`,
+    detail: `float ragged = worldNoise(p.xz * 1.35 + vec2(3.1, 7.7), 64.0, ${ctx.seed >>> 0}u) - 0.5; float snow = smoothstep(0.65, 0.87, p.y + ragged * 0.16); color = mix(uLandA, uLandB, smoothstep(0.08, 0.54, p.y)); color = mix(color, vec3(${cSnow.r}, ${cSnow.g}, ${cSnow.b}), snow);`,
+  }, (x, z) => {
+    const t = smoothstep01((Math.hypot(x, z) - 5) / 9);
+    const mountain = 0.3 + Math.pow(Math.abs(Math.sin(x * 0.07 + Math.sin(z * 0.039)) * Math.cos(z * 0.073)), 1.2) * 14;
+    return ridge(x, z) * (1 - t) + mountain * t;
+  }, { rimColor: palette.skyHorizon, rimStrength: 0.24, toonSteps: 3, toonSoftness: 0.32, toonFloor: 0.2 });
   w.add(terrain.mesh);
-  w.own(terrain);
+  w.time(w.own(terrain));
+  const route = w.own(makeTerrain({
+    size: [MC_MAX_POS - MC_MIN_POS, 0.42], segments: [256, 4],
+    heightFn: (x) => heightAt(x + (MC_MIN_POS + MC_MAX_POS) * 0.5) + 0.003,
+    colorRamp: (h) => new THREE.Color(cValley).lerp(cMeadow, smoothstep01((h - 0.08) / 0.46)).lerp(cSnow, smoothstep01((h - 0.65) / 0.22)),
+    materialOptions: { rimColor: palette.skyHorizon, rimStrength: 0.24, toonSteps: 3, toonSoftness: 0.32, toonFloor: 0.2 },
+    name: 'exactAlpineTrack',
+  }));
+  route.mesh.position.x = (MC_MIN_POS + MC_MAX_POS) * 0.5;
+  w.add(route.mesh);
 
   const aboveSnow: ExcludeFn = (x, z) => terrain.sampleHeight(x, z) > SNOW_LINE + 0.02;
   const nearCamera: ExcludeFn = (_x, z) => z > 0.62;
+  const valleyOpening: ExcludeFn = (x, z) => z > -3.2 && Math.abs(x + 0.45 + Math.sin(z * 1.4) * 0.22) < 0.5;
   const sampleAt = (x: number, z: number): number => terrain.sampleHeight(x, z);
 
   const trees = scatterTrees({
@@ -162,7 +157,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     count: 190,
     area: { x: -0.4, z: -2.2, halfX: 3.6, halfZ: 2 },
     seed: ctx.seed,
-    exclude: excludeAny(excludeBand(0, 1.2, 0.15), nearCamera, aboveSnow),
+    exclude: excludeAny(excludeBand(0, 1.2, 0.15), nearCamera, aboveSnow, valleyOpening),
     heightAt: sampleAt,
     maxSlope: 0.62,
     color: blendTokens(TOKENS.palettes.noon.groundA, palette.skyTop, 0.45),
@@ -217,6 +212,13 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   w.add(grass.group);
   w.time(w.own(grass));
 
+  const woodland = w.own(extendVegetation(trees, {
+    name: 'alpineWoodlands', seed: ctx.seed, tileSize: 4, perTile: 30,
+    scale: [0.16, 0.42], stretch: [0.9, 1.5], heightAt: sampleAt, bark: 0x88735a,
+    exclude: (x, z, height) => Math.abs(x + 0.4) < 3.6 && Math.abs(z + 2.2) < 2 || height > 0.72 || Math.abs(z) < 1.2,
+  }));
+  for (const mesh of woodland.meshes) w.add(mesh);
+
   const cairnRoot = new THREE.Object3D();
   cairnRoot.name = 'summitCairnRoot';
   cairnRoot.position.set(MC_GOAL_POS, heightAt(MC_GOAL_POS), 0);
@@ -257,12 +259,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   cairnMesh.castShadow = true;
   cairnMesh.receiveShadow = true;
   cairnRoot.add(cairnMesh);
-  w.own({
-    dispose: () => {
-      cairnGeometry.dispose();
-      propMaterial.dispose();
-    },
-  });
+  w.own(propMaterial);
+  w.own(cairnGeometry);
 
   const cordTopA = heightAt(MC_GOAL_POS) + cairnStack + POLE_H * 0.94;
   const summitBurst = new THREE.Vector3(MC_GOAL_POS, cordTopA - 0.05, 0);
@@ -303,7 +301,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   buntingMesh.name = 'buntingRig';
   buntingMesh.castShadow = false;
   w.add(buntingMesh);
-  w.own({ dispose: () => buntingGeometry.dispose() });
+  w.own(buntingGeometry);
 
   const FLAG_W = 0.038;
   const FLAG_H = 0.052;
@@ -377,13 +375,9 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     flags.computeBoundingSphere();
   }
   w.add(flags);
-  w.own({
-    dispose: () => {
-      flags.dispose();
-      flagGeometry.dispose();
-      flagMaterial.dispose();
-    },
-  });
+  w.own(flagMaterial);
+  w.own(flagGeometry);
+  w.own(flags);
   const animated: OakMaterial[] = [flagMaterial];
   w.time({ setTime: (t) => setMaterialsTime(animated, t) });
 
@@ -410,7 +404,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   signMesh.name = 'trailheadSign';
   signMesh.castShadow = true;
   trailheadRoot.add(signMesh);
-  w.own({ dispose: () => signGeometry.dispose() });
+  w.own(signGeometry);
 
   const mist: MistPlanesHandle = makeMistPlanes({
     size: [4.6, 3.2],
@@ -499,19 +493,18 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   const eagleTangent = new THREE.Vector3(EAGLE_TRAVEL[0], EAGLE_TRAVEL[1], EAGLE_TRAVEL[2]).normalize();
   eagle.rotation.y = Math.atan2(-eagleTangent.z, eagleTangent.x);
   w.add(eagle);
-  w.own({
-    dispose: () => {
-      eagleBody.dispose();
-      tailGeometry.dispose();
-      wingGeometry.dispose();
-      eagleMaterial.dispose();
-    },
-  });
+  w.own(eagleMaterial);
+  w.own(wingGeometry);
+  w.own(tailGeometry);
+  w.own(eagleBody);
 
   return w.seal({
     sky,
     rig,
     terrain,
+    setView(coverage, camera) {
+      land.setView(coverage, camera, terrain, woodland);
+    },
     cairnRoot,
     trailheadRoot,
     summitBurst,
@@ -522,7 +515,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
       trees.setWind(0.02 * (1 + 1.0 * e), 0.9 + 0.35 * e);
     },
     setEagle(progress) {
-      if (progress === null || false) {
+      if (progress === null) {
         eagle.visible = false;
         return;
       }

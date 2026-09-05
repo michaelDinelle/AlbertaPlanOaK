@@ -190,7 +190,7 @@ export async function mountSceneHost(
       tokens: TOKENS,
       envId,
       geometry: source.geometry,
-      seed: source.seed,
+      get seed() { return source.seed; },
       time: () => clock.time(),
     };
     await module.init(context);
@@ -303,6 +303,7 @@ export async function mountSceneHost(
     },
     seek(position) {
       clock.seek(position);
+      resetCursor();
     },
     async setSource(next, opts = {}) {
       if (next.envId !== envId) throw new SceneHostError('setSource cannot change env — use setEnv');

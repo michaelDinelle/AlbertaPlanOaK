@@ -1,3 +1,4 @@
+import { makeSceneView, type SceneView } from '../jelly-bean-world/view';
 import type { GroundTruthOptions } from '@kit/debug';
 import { CELL, cellToWorldVec, clampCell, type GridSize } from '@kit/grid';
 import { blendTokens, clamp01, envelope } from '@kit/mix';
@@ -11,11 +12,8 @@ import * as THREE from 'three';
 import type { GridCell, GridGeometry } from '@sim/types';
 import { HIGHDIMMAZE_ACTION, HIGHDIMMAZE_ACTIONS, HIGHDIMMAZE_DASH, HIGHDIMMAZE_GX, HIGHDIMMAZE_GY, HIGHDIMMAZE_HEADING, HIGHDIMMAZE_STAY, HIGHDIMMAZE_X, HIGHDIMMAZE_Y } from '@sim/envs/highdimmaze';
 import { buildGust, buildOasis, buildScarf, type GustHandle, type OasisHandle, type ScarfHandle } from './actors';
-import { CAMERA_AZIMUTH, buildWorld, canyonSkin, resolveGrid, type WorldHandle } from './world';
+import { buildWorld, canyonSkin, resolveGrid, type WorldHandle } from './world';
 
-const CAM_POLAR = 0.86;
-const CAM_DISTANCE = 17;
-const CAM_TARGET_Y = 0.62;
 
 const BURST_SCALE = 0.84;
 const RIPPLE_SCALE = 0.52;
@@ -55,6 +53,8 @@ function read(state: FrameState, grid: GridSize, out: Reading): Reading {
 }
 
 class SlotCanyonsScene extends StageScene<WorldHandle> {
+  private sceneView: SceneView | null = null;
+
   protected readonly stageName = 'slotCanyons';
 
   private wisp: Wisp | null = null;
@@ -62,7 +62,8 @@ class SlotCanyonsScene extends StageScene<WorldHandle> {
   private gust: GustHandle | null = null;
   private oasis: OasisHandle | null = null;
   private settleDust: AmbientParticlesHandle | null = null;
-  private grid: GridGeometry = resolveGrid({});
+  private travelerMaterial: THREE.MeshStandardMaterial | null = null;
+  private grid!: GridGeometry;
 
   private growAt = -Infinity;
   private bloomAt = -Infinity;
@@ -93,7 +94,7 @@ class SlotCanyonsScene extends StageScene<WorldHandle> {
     const palette = ctx.tokens.palettes.afternoon;
     const skin = canyonSkin(palette, ctx.tokens);
     const accent = this.accentOf(ctx);
-    const ember = accent;
+    const ember = skin.sandSun;
     this.spray = blendTokens(skin.water, skin.waterDeep, 0.4).getHex();
     this.gold = ctx.tokens.celebrationGold;
 
@@ -109,10 +110,17 @@ class SlotCanyonsScene extends StageScene<WorldHandle> {
         color: ember,
         radius: 0.165,
         hop: { duration: HOP_SECONDS, height: HOP_HEIGHT },
-        name: 'canyonWisp',
+        name: 'sandTraveler',
+        skirt: false,
+        ribbon: false,
+        silhouette: false,
       },
       grid,
     );
+    this.travelerMaterial = new THREE.MeshStandardMaterial({ color: skin.sandSun, roughness: 0.84 });
+    wisp.core.material = this.travelerMaterial;
+    const halo = wisp.group.getObjectByName('oakWispHalo');
+    if (halo) halo.visible = false;
     this.wisp = wisp;
     this.scene.add(wisp.group);
 
@@ -155,12 +163,11 @@ class SlotCanyonsScene extends StageScene<WorldHandle> {
   }
 
   protected rigOptions(ctx: SceneContext): OrbitRigOptions {
-    return {
-      target: [0, CAM_TARGET_Y, 0],
-      distance: CAM_DISTANCE,
-      azimuth: CAMERA_AZIMUTH,
-      polar: CAM_POLAR,
-    };
+    const grid = this.grid;
+    const halfX = grid.w * CELL / 2;
+    const halfZ = grid.h * CELL / 2;
+    this.sceneView = makeSceneView(ctx, { min: [-halfX, 0, -halfZ], max: [halfX, 1.8, halfZ] }, [0, 0.62, 0], { distance: 17, azimuth: 0.25, polar: 0.86 });
+    return this.sceneView.options;
   }
 
   protected overlayOptions(): GroundTruthOptions {
@@ -210,7 +217,6 @@ class SlotCanyonsScene extends StageScene<WorldHandle> {
       this.scarfYaw = facingYaw(now.lastDir);
       wisp.face(this.scarfYaw);
       wisp.snap();
-      rig.snap();
       this.lastGoal.x = goal.x;
       this.lastGoal.y = goal.y;
     }
@@ -242,11 +248,13 @@ class SlotCanyonsScene extends StageScene<WorldHandle> {
       wisp.snap();
       gust.clear();
       this.clearDash(agent);
-      rig.snap();
     }
 
     const moved = agent.x !== wisp.cellX || agent.y !== wisp.cellY;
-    const dashing = now.action === HIGHDIMMAZE_DASH ? 1 : 0;
+    const dx = agent.x - wisp.cellX;
+    const dy = agent.y - wisp.cellY;
+    const displacement = teleported || frame.scrubbed ? 0 : Math.hypot(dx, dy);
+    const dashing = displacement > 1 ? 1 : 0;
     if (dashing > 0) {
       cellToWorldVec(wisp.cellX, wisp.cellY, grid, this.dashFrom);
       cellToWorldVec(agent.x, agent.y, grid, this.dashTo);
@@ -257,11 +265,14 @@ class SlotCanyonsScene extends StageScene<WorldHandle> {
       }
     }
     if (moved) wisp.hopTo(agent, time);
-    wisp.face(facingDelta(now.lastDir));
+    if (displacement > 0) {
+      wisp.face({ dx, dy });
+      this.scarfYaw = yawFromGridDelta(dx, dy);
+    }
     wisp.update(frame.dtReal, time);
 
-    this.scarfYaw = dampAngle(this.scarfYaw, facingYaw(now.lastDir), frame.dtReal);
-    const staying = now.action === HIGHDIMMAZE_STAY ? 1 : 0;
+    wisp.core.scale.set(0.82, 1.2, 0.82);
+    const staying = displacement === 0 && !wisp.motion.airborne ? 1 : 0;
     const airborne = wisp.motion.airborne ? 1 - wisp.motion.progress : 0;
     const speed = clamp01(airborne * (0.55 + 0.45 * dashing) + 0.35 * dashing);
     scarf.setState(this.scarfYaw, staying, speed, time);
@@ -317,7 +328,7 @@ class SlotCanyonsScene extends StageScene<WorldHandle> {
 
     world.setTime(time);
 
-    rig.update(frame.dtReal);
+    if (this.sceneView) world.setView(this.sceneView.update(rig, frame.dtReal), this.camera);
 
     this.lastGoal.x = goal.x;
     this.lastGoal.y = goal.y;
@@ -351,6 +362,8 @@ class SlotCanyonsScene extends StageScene<WorldHandle> {
   }
 
   protected drop(): void {
+    this.travelerMaterial?.dispose();
+    this.travelerMaterial = null;
     this.oasis?.dispose();
     this.oasis = null;
     this.settleDust?.dispose();

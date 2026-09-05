@@ -1,6 +1,7 @@
+import { makeSceneView, type SceneView } from '../jelly-bean-world/view';
 import { POMAZE_GX, POMAZE_GY, POMAZE_X, POMAZE_Y } from '@sim/envs/pomaze';
 import type { GroundTruthOptions } from '@kit/debug';
-import { cellToWorldVec, clampCell, type GridSize } from '@kit/grid';
+import { CELL, cellToWorldVec, clampCell, type GridSize } from '@kit/grid';
 import { blendTokens, clamp01, envelope } from '@kit/mix';
 import type { OrbitRigOptions } from '@kit/rigs';
 import { StageScene, type Stage } from '@kit/stage';
@@ -21,20 +22,12 @@ import {
 } from './actors';
 import {
   BUBBLE_OUTER,
-  CAMERA_AZIMUTH,
-  bubbleVisibility,
   buildWorld,
   forestSkin,
   resolveGrid,
-  revealVisibility,
-  REVEAL_RADIUS,
   type WorldHandle,
 } from './world';
 
-const CAM_POLAR = 1.32;
-const CAM_DISTANCE = 4.7;
-const CAM_TARGET_Y = 0.82;
-const CAM_FOLLOW_RATE = 2.2;
 
 const BURST_SCALE = 0.45;
 const RIPPLE_SCALE = 0.52;
@@ -42,7 +35,6 @@ const PULSE_STRENGTH = 0.5;
 const BLOOM_Y = 0.55;
 
 export const REVEAL_SECONDS = 1.9;
-export const LINGER_SECONDS = 1.35;
 
 const HOP_SECONDS = 0.11;
 const HOP_HEIGHT = 0.14;
@@ -59,6 +51,8 @@ export function readCells(state: FrameState, grid: GridSize, agent: GridCell, go
 }
 
 class FogboundForestScene extends StageScene<WorldHandle> {
+  private sceneView: SceneView | null = null;
+
   protected readonly stageName = 'fogboundForest';
 
   private wisp: Wisp | null = null;
@@ -66,10 +60,9 @@ class FogboundForestScene extends StageScene<WorldHandle> {
   private beacon: GoalBeaconHandle | null = null;
   private lantern: LanternPoolHandle | null = null;
   private aura: WispAuraHandle | null = null;
-  private grid: GridGeometry = resolveGrid({});
+  private grid!: GridGeometry;
 
   private revealAt = -Infinity;
-  private lingerAt = -Infinity;
   private revealX = 0;
   private revealZ = 0;
 
@@ -80,10 +73,7 @@ class FogboundForestScene extends StageScene<WorldHandle> {
   private readonly bloomPos = new THREE.Vector3();
   private readonly groundPos = new THREE.Vector3();
   private readonly goalWorld = new THREE.Vector3();
-  private readonly camAnchor = new THREE.Vector3();
   private readonly lightPos = new THREE.Vector3();
-  private camPrimed = false;
-  private lingering = false;
   private gold = TOKENS.celebrationGold;
   private bloomColor = DEFAULT_BLOOM;
 
@@ -149,13 +139,11 @@ class FogboundForestScene extends StageScene<WorldHandle> {
   }
 
   protected rigOptions(ctx: SceneContext): OrbitRigOptions {
-    this.camAnchor.y = CAM_TARGET_Y;
-    return {
-      target: [this.camAnchor.x, CAM_TARGET_Y, this.camAnchor.z],
-      distance: CAM_DISTANCE,
-      azimuth: CAMERA_AZIMUTH,
-      polar: CAM_POLAR,
-    };
+    const grid = this.grid;
+    const halfX = grid.w * CELL / 2;
+    const halfZ = grid.h * CELL / 2;
+    this.sceneView = makeSceneView(ctx, { min: [-halfX, 0, -halfZ], max: [halfX, 1.8, halfZ] }, [0, 0.82, 0], { distance: 4.7, azimuth: -1.35, polar: 1.32 });
+    return this.sceneView.options;
   }
 
   protected overlayOptions(): GroundTruthOptions {
@@ -202,11 +190,8 @@ class FogboundForestScene extends StageScene<WorldHandle> {
     if (frame.scrubbed) {
       pool.clear();
       this.revealAt = -Infinity;
-      this.lingerAt = -Infinity;
       wisp.setCell(agent.x, agent.y, grid);
       wisp.snap();
-      this.camPrimed = false;
-      this.lingering = false;
     }
 
     let teleported = false;
@@ -231,7 +216,6 @@ class FogboundForestScene extends StageScene<WorldHandle> {
         wisp.flare(1);
         flower.flare(0.9);
         this.revealAt = time;
-        this.lingerAt = time;
       } else if (ev.type === 'teleport') {
         teleported = true;
       }
@@ -253,22 +237,6 @@ class FogboundForestScene extends StageScene<WorldHandle> {
     const breath = clamp01(reveal * 2.2);
     world.spruce.setBubble(wx, wz, this.revealX, this.revealZ, breath);
     world.setFogLift(reveal);
-    world.setShadowFocus(wx, wz);
-
-    for (let i = 0; i < world.gates.length; i++) {
-      const gate = world.gates[i];
-      if (!gate) continue;
-      const gx = gate.root.position.x;
-      const gz = gate.root.position.z;
-      let v = bubbleVisibility(wx, wz, gx, gz);
-      if (breath > 0) {
-        const r = breath * revealVisibility(this.revealX, this.revealZ, gx, gz, REVEAL_RADIUS);
-        if (r > v) v = r;
-      }
-      const e = v <= 0 ? 0.0001 : v;
-      gate.body.scale.set(e, e * (0.4 + 0.6 * e), e);
-      gate.body.visible = v > 0.002;
-    }
 
     cellToWorldVec(goal.x, goal.y, grid, this.goalWorld);
     flower.root.position.copy(this.goalWorld);
@@ -314,25 +282,7 @@ class FogboundForestScene extends StageScene<WorldHandle> {
 
     world.setTime(time);
 
-    {
-      const linger = time - this.lingerAt >= 0 && time - this.lingerAt < LINGER_SECONDS;
-      const tx = linger ? this.revealX : wx;
-      const tz = linger ? this.revealZ : wz;
-      const cut = !this.camPrimed || frame.scrubbed || teleported || (this.lingering && !linger);
-      if (cut) {
-        this.camAnchor.set(tx, CAM_TARGET_Y, tz);
-        this.camPrimed = true;
-        rig.setTarget(tx, CAM_TARGET_Y, tz);
-        rig.snap();
-      } else {
-        const k = 1 - Math.exp(-CAM_FOLLOW_RATE * Math.max(0, frame.dtReal));
-        this.camAnchor.x += (tx - this.camAnchor.x) * k;
-        this.camAnchor.z += (tz - this.camAnchor.z) * k;
-        rig.setTarget(this.camAnchor.x, CAM_TARGET_Y, this.camAnchor.z);
-      }
-      this.lingering = linger;
-    }
-    rig.update(frame.dtReal);
+    if (this.sceneView) world.setView(this.sceneView.update(rig, frame.dtReal, [wx, 0.82, wz]), this.camera);
   }
 
   protected drop(): void {
@@ -347,10 +297,6 @@ class FogboundForestScene extends StageScene<WorldHandle> {
     this.wisp?.dispose();
     this.wisp = null;
     this.revealAt = -Infinity;
-    this.lingerAt = -Infinity;
-    this.camPrimed = false;
-    this.lingering = false;
-    this.camAnchor.set(0, 0, 0);
   }
 }
 

@@ -1,13 +1,15 @@
+import { philoxDraw } from '@sim/philox';
+import { makeSceneView, type SceneView } from '../jelly-bean-world/view';
 import { MKC_CARRY, MKC_GATES, MKC_GX, MKC_GY, MKC_X, MKC_Y, mkcBit } from '@sim/envs/multikeycorridor';
 import type { GroundTruthOptions } from '@kit/debug';
-import { cellToWorldVec, clampCell, type GridSize } from '@kit/grid';
+import { CELL, cellToWorldVec, clampCell, type GridSize } from '@kit/grid';
 import { envelope } from '@kit/mix';
 import type { OrbitRigOptions } from '@kit/rigs';
 import { StageScene, type Stage } from '@kit/stage';
 import { TOKENS } from '@kit/tokens';
 import type { FrameState, FrameUpdate, SceneContext, SceneFactory } from '@kit/types';
 import { Wisp } from '@kit/wisp';
-import type { GridCell, GridGeometry } from '@sim/types';
+import type { EventStream, GridCell, GridGeometry } from '@sim/types';
 import * as THREE from 'three';
 import {
   GATE_FLARE_SECONDS,
@@ -24,7 +26,6 @@ import {
   type ShrineHandle,
 } from './actors';
 import {
-  CAMERA_AZIMUTH,
   buildWorld,
   chamberBounds,
   gateFacesX,
@@ -36,9 +37,6 @@ import {
   type WorldHandle,
 } from './world';
 
-const CAM_POLAR = 0.58;
-const CAM_DISTANCE = 15.5;
-const CAM_TARGET_Y = 0.35;
 
 const BURST_SCALE = 0.85;
 const RIPPLE_SCALE = 0.55;
@@ -85,15 +83,51 @@ function makeView(): TempleView {
   };
 }
 
-function seedKeys(view: TempleView, grid: GridGeometry): void {
-  const keys = resolveKeys(grid);
+export class KeyHistory {
+  private stream: EventStream | null = null;
+  private taken = 0;
+  private readonly goals: number[] = [];
+
+  sync(stream: EventStream): void {
+    if (this.stream !== stream || stream.count < this.taken) {
+      this.stream = stream;
+      this.taken = 0;
+      this.goals.length = 0;
+    }
+    const goal = stream.types.indexOf('goal');
+    while (this.taken < stream.count) {
+      const at = this.taken++;
+      if (stream.kinds[at] === goal) this.goals.push(stream.steps[at] as number);
+    }
+  }
+
+  generationAt(step: number): number {
+    let lo = 0;
+    let hi = this.goals.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if ((this.goals[mid] as number) <= step) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  }
+}
+
+export function keyCells(seed: number, generation: number, grid: GridGeometry, out: GridCell[]): void {
+  const initial = resolveKeys(grid);
+  const words = generation > 0 ? philoxDraw(seed >>> 0, 3, generation - 1, 0) : null;
   for (let j = 0; j < KEYS; j++) {
-    const cell = view.keys[j] as GridCell;
-    const source = keys[j];
-    if (!source) continue;
-    cell.x = source.x;
-    cell.y = source.y;
-    clampCell(cell, grid);
+    const cell = out[j] as GridCell;
+    if (words) {
+      const index = Math.trunc(Math.fround(((words[j + 1] as number) >>> 8) * 2 ** -24 * 15));
+      cell.x = 1 + j * 4 + index % 3;
+      cell.y = 1 + Math.floor(index / 3);
+    } else {
+      const source = initial[j];
+      if (!source) throw new Error('Multi-Key Corridor has no initial key cell');
+      cell.x = source.x;
+      cell.y = source.y;
+    }
   }
 }
 
@@ -128,6 +162,8 @@ export function readGoalCell(state: FrameState, grid: GridSize, out: GridCell): 
 }
 
 class TempleOfThreeGatesScene extends StageScene<WorldHandle> {
+  private sceneView: SceneView | null = null;
+
   protected readonly stageName = 'templeOfThreeGates';
 
   private wisp: Wisp | null = null;
@@ -135,7 +171,7 @@ class TempleOfThreeGatesScene extends StageScene<WorldHandle> {
   private altars: KeyAltarHandle[] = [];
   private rack: CarryRackHandle | null = null;
   private shrine: ShrineHandle | null = null;
-  private grid: GridGeometry = resolveGrid({});
+  private grid!: GridGeometry;
   private doors: readonly GridCell[] = [];
 
   private growAt = -Infinity;
@@ -144,6 +180,8 @@ class TempleOfThreeGatesScene extends StageScene<WorldHandle> {
   private readonly doorAt: number[] = [-Infinity, -Infinity, -Infinity];
 
   private readonly view = makeView();
+  private readonly history = new KeyHistory();
+  private readonly eventKeys: GridCell[] = [{ x: 0, y: 0 }, { x: 0, y: 0 }, { x: 0, y: 0 }];
   private readonly prevGoal: GridCell = { x: 0, y: 0 };
   private readonly bloomPos = new THREE.Vector3();
   private readonly groundPos = new THREE.Vector3();
@@ -157,7 +195,7 @@ class TempleOfThreeGatesScene extends StageScene<WorldHandle> {
     const grid = resolveGrid(ctx.geometry);
     this.grid = grid;
     this.doors = resolveDoors(grid);
-    seedKeys(this.view, grid);
+    keyCells(ctx.seed, 0, grid, this.view.keys);
     return buildWorld(ctx, this.scene, grid);
   }
 
@@ -242,20 +280,20 @@ class TempleOfThreeGatesScene extends StageScene<WorldHandle> {
   }
 
   protected rigOptions(ctx: SceneContext): OrbitRigOptions {
-    return {
-      target: [0, CAM_TARGET_Y, 0],
-      distance: CAM_DISTANCE,
-      azimuth: CAMERA_AZIMUTH,
-      polar: CAM_POLAR,
-    };
+    const grid = this.grid;
+    const halfX = grid.w * CELL / 2;
+    const halfZ = grid.h * CELL / 2;
+    this.sceneView = makeSceneView(ctx, { min: [-halfX, 0, -halfZ], max: [halfX, 1.8, halfZ] }, [0, 0.35, 0], { distance: 15.5, azimuth: 0.14, polar: 0.58 });
+    return this.sceneView.options;
   }
 
   protected overlayOptions(): GroundTruthOptions {
     const grid = this.grid;
     const overlayView = makeView();
-    seedKeys(overlayView, grid);
+
     const readOverlay = (state: FrameState): TempleView => {
       readState(state, grid, overlayView);
+      keyCells(this.ctx?.seed ?? 0, this.history.generationAt(state.step), grid, overlayView.keys);
       return overlayView;
     };
     return {
@@ -306,7 +344,12 @@ class TempleOfThreeGatesScene extends StageScene<WorldHandle> {
 
     pool.update(frame.dtReal, time);
 
+    this.history.sync(frame.eventLog);
     readState(state, grid, view);
+    const generation = this.history.generationAt(state.step);
+    keyCells(ctx.seed, generation, grid, view.keys);
+    let eventGeneration = generation;
+    for (const event of frame.events) if (event.type === 'goal') eventGeneration--;
 
     if (frame.scrubbed) {
       pool.clear();
@@ -316,7 +359,6 @@ class TempleOfThreeGatesScene extends StageScene<WorldHandle> {
       for (let j = 0; j < KEYS; j++) this.doorAt[j] = -Infinity;
       wisp.setCell(view.x, view.y, grid);
       wisp.snap();
-      rig.snap();
     }
 
     let teleported = false;
@@ -324,6 +366,7 @@ class TempleOfThreeGatesScene extends StageScene<WorldHandle> {
       const ev = frame.events[i];
       if (!ev) continue;
       if (ev.type === 'goal') {
+        eventGeneration++;
         if (frame.prev) readGoalCell(frame.prev, grid, this.prevGoal);
         else {
           this.prevGoal.x = view.gx;
@@ -342,7 +385,8 @@ class TempleOfThreeGatesScene extends StageScene<WorldHandle> {
         const light = world.rig.points[2];
         if (light) light.color.copy(this.relicColor);
       } else if (ev.type === 'key') {
-        const cell = view.keys[ev.index];
+        keyCells(ctx.seed, eventGeneration, grid, this.eventKeys);
+        const cell = this.eventKeys[ev.index];
         if (cell) {
           cellToWorldVec(cell.x, cell.y, grid, this.eventPos);
           this.eventPos.y = KEY_BURST_Y;
@@ -433,7 +477,7 @@ class TempleOfThreeGatesScene extends StageScene<WorldHandle> {
 
     world.setTime(time);
 
-    rig.update(frame.dtReal);
+    if (this.sceneView) world.setView(this.sceneView.update(rig, frame.dtReal), this.camera);
   }
 
   protected drop(): void {

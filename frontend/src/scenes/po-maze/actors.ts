@@ -1,3 +1,4 @@
+import { sculptureMaterial } from '../key-corridor/world';
 import { emissiveMaterial, oakMaterial, setEmissiveIntensity, type EmissiveMaterial, type OakMaterial } from '@kit/materials';
 import { clamp01, smoothstep01 } from '@kit/mix';
 import { mergeColoredParts, type ColoredPart } from '@kit/parts';
@@ -104,7 +105,6 @@ const CROWN_HEIGHT = 0.3;
 
 export function buildMoonflower(opts: MoonflowerOptions): MoonflowerHandle {
   const { skin } = opts;
-  const detail = 1;
   const root = new THREE.Object3D();
   root.name = opts.name ?? 'moonflowerRoot';
   const body = new THREE.Object3D();
@@ -112,9 +112,9 @@ export function buildMoonflower(opts: MoonflowerOptions): MoonflowerHandle {
 
   const geometries: THREE.BufferGeometry[] = [];
 
-  const petals = Math.max(4, Math.round(6 * detail));
+  const petals = 6;
   const parts: ColoredPart[] = [];
-  const stem = new THREE.CylinderGeometry(0.016, 0.026, CROWN_HEIGHT, Math.max(4, Math.round(6 * detail)), 1);
+  const stem = new THREE.CylinderGeometry(0.016, 0.026, CROWN_HEIGHT, 6, 1);
   stem.translate(0, CROWN_HEIGHT / 2, 0);
   parts.push({ geometry: stem, color: skin.fern });
   for (let i = 0; i < petals; i++) {
@@ -129,9 +129,7 @@ export function buildMoonflower(opts: MoonflowerOptions): MoonflowerHandle {
   }
   const petalGeo = mergeColoredParts(parts, 'moonflowerPetals');
   geometries.push(petalGeo);
-  const petalMaterial: OakMaterial = oakMaterial({
-    vertexColors: true,
-    flatShading: true,
+  const petalMaterial: OakMaterial = sculptureMaterial({
     roughness: 0.72,
     rimColor: opts.glow,
     rimStrength: 0.65,

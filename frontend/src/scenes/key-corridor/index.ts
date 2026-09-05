@@ -1,6 +1,7 @@
+import { makeSceneView, type SceneView } from '../jelly-bean-world/view';
 import { KEYCORRIDOR_CARRY, KEYCORRIDOR_GATE, KEYCORRIDOR_GX, KEYCORRIDOR_GY, KEYCORRIDOR_KX, KEYCORRIDOR_KY, KEYCORRIDOR_X, KEYCORRIDOR_Y } from '@sim/envs/keycorridor';
 import type { GroundTruthOptions } from '@kit/debug';
-import { cellToWorldVec, clampCell, type GridSize } from '@kit/grid';
+import { CELL, cellToWorldVec, clampCell, type GridSize } from '@kit/grid';
 import { clamp01, envelope, smoothstep01 } from '@kit/mix';
 import type { OrbitRigOptions } from '@kit/rigs';
 import { StageScene, type Stage } from '@kit/stage';
@@ -19,7 +20,6 @@ import {
   type ShrineHandle,
 } from './actors';
 import {
-  CAMERA_AZIMUTH,
   buildWorld,
   gardenSkin,
   resolveDoor,
@@ -28,12 +28,6 @@ import {
   type WorldHandle,
 } from './world';
 
-const CAM_POLAR = 0.62;
-const CAM_DISTANCE = 13.0;
-const CAM_TARGET_Y = 0.5;
-const CAM_TARGET_BIAS = 1.2;
-const CAM_TARGET_X = CAM_TARGET_BIAS * Math.sin(CAMERA_AZIMUTH);
-const CAM_TARGET_Z = CAM_TARGET_BIAS * Math.cos(CAMERA_AZIMUTH);
 
 const BURST_SCALE = 0.8;
 const RIPPLE_SCALE = 0.46;
@@ -93,13 +87,15 @@ export function readState(state: FrameState, grid: GridSize, out: GardenState): 
 }
 
 class IvyGateScene extends StageScene<WorldHandle> {
+  private sceneView: SceneView | null = null;
+
   protected readonly stageName = 'ivyGate';
 
   private wisp: Wisp | null = null;
   private gate: GateHandle | null = null;
   private shrine: ShrineHandle | null = null;
   private seed: SeedBedHandle | null = null;
-  private grid: GridGeometry = resolveGrid({});
+  private grid!: GridGeometry;
   private door: GridCell = { x: 0, y: 0 };
   private skin: GardenSkin | null = null;
 
@@ -168,12 +164,11 @@ class IvyGateScene extends StageScene<WorldHandle> {
   }
 
   protected rigOptions(ctx: SceneContext): OrbitRigOptions {
-    return {
-      target: [CAM_TARGET_X, CAM_TARGET_Y, CAM_TARGET_Z],
-      distance: CAM_DISTANCE,
-      azimuth: CAMERA_AZIMUTH,
-      polar: CAM_POLAR,
-    };
+    const grid = this.grid;
+    const halfX = grid.w * CELL / 2;
+    const halfZ = grid.h * CELL / 2;
+    this.sceneView = makeSceneView(ctx, { min: [-halfX, 0, -halfZ], max: [halfX, 1.8, halfZ] }, [Math.sin(-0.72) * 1.2, 0.5, Math.cos(-0.72) * 1.2], { distance: 13, azimuth: -0.72, polar: 0.62 });
+    return this.sceneView.options;
   }
 
   protected overlayOptions(): GroundTruthOptions {
@@ -231,7 +226,6 @@ class IvyGateScene extends StageScene<WorldHandle> {
       this.bloomAt = -Infinity;
       wisp.setCell(s.agent.x, s.agent.y, grid);
       wisp.snap();
-      rig.snap();
     }
 
     let teleported = false;
@@ -277,7 +271,6 @@ class IvyGateScene extends StageScene<WorldHandle> {
     if (teleported) {
       wisp.setCell(s.agent.x, s.agent.y, grid);
       wisp.snap();
-      rig.snap();
     }
 
     if (s.agent.x !== wisp.cellX || s.agent.y !== wisp.cellY) {
@@ -348,7 +341,7 @@ class IvyGateScene extends StageScene<WorldHandle> {
 
     world.setTime(time);
 
-    rig.update(frame.dtReal);
+    if (this.sceneView) world.setView(this.sceneView.update(rig, frame.dtReal), this.camera);
   }
 
   private readBloomCell(frame: FrameUpdate, wisp: Wisp): void {

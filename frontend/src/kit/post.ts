@@ -30,8 +30,6 @@ export interface GradeUniforms {
   uTintStrength: { value: number };
   uGamma: { value: number };
   uVignette: { value: number };
-  uGrain: { value: number };
-  uResolution: { value: THREE.Vector2 };
 }
 
 export interface ComposerHandle {
@@ -64,17 +62,7 @@ uniform vec3 uTint;
 uniform float uTintStrength;
 uniform float uGamma;
 uniform float uVignette;
-uniform float uGrain;
-uniform vec2 uResolution;
 varying vec2 vUv;
-
-float oakBayer2( vec2 a ) {
-	a = floor( a );
-	return fract( a.x * 0.5 + a.y * a.y * 0.75 );
-}
-float oakBayer8( vec2 a ) {
-	return oakBayer2( 0.25 * a ) * 0.0625 + oakBayer2( 0.5 * a ) * 0.25 + oakBayer2( a );
-}
 
 void main() {
 	vec4 texel = texture2D( tDiffuse, vUv );
@@ -89,8 +77,6 @@ void main() {
 	float d = distance( vUv, vec2( 0.5 ) );
 	col *= 1.0 - uVignette * smoothstep( 0.34, 0.86, d );
 
-	col += ( oakBayer8( gl_FragCoord.xy ) - 0.5 ) * uGrain;
-
 	gl_FragColor = vec4( max( col, 0.0 ), texel.a );
 }
 `;
@@ -104,8 +90,6 @@ export const OakGradeShader = {
     uTintStrength: { value: 0.14 },
     uGamma: { value: 1.0 },
     uVignette: { value: 0.34 },
-    uGrain: { value: 0.02 },
-    uResolution: { value: new THREE.Vector2(1, 1) },
   },
   vertexShader: GRADE_VERT,
   fragmentShader: GRADE_FRAG,
@@ -155,7 +139,6 @@ export function buildComposer(
   const gradePass = new ShaderPass(OakGradeShader);
   const gradeUniforms = gradePass.uniforms as unknown as GradeUniforms;
   gradeUniforms.uTint.value.set(resolveFog(post.fog));
-  gradeUniforms.uResolution.value.set(width * dpr, height * dpr);
   composer.addPass(gradePass);
 
   const outputPass = new OutputPass();
@@ -182,7 +165,6 @@ export function buildComposer(
       composer.setPixelRatio(ratio);
       composer.setSize(rw, rh);
       resizeBloom(rw, rh, ratio);
-      gradeUniforms.uResolution.value.set(rw * ratio, rh * ratio);
     },
     dispose() {
       composer.removePass(renderPass);

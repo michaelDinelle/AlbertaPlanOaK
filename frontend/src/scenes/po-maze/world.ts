@@ -1,87 +1,30 @@
 import * as THREE from 'three';
-import {
-  CELL,
-  buildCellField,
-  cellToWorld,
-  isWall,
-  type CellFieldHandle,
-  type Vec3Tuple,
-} from '@kit/grid';
+import { CELL, buildCellField, cellToWorldVec, isWall, excludeCellCenters, type CellFieldHandle } from '@kit/grid';
 import { applyFog, makeLightRig, type LightRig } from '@kit/lighting';
-import { oakMaterial, oakUniforms, type OakMaterial } from '@kit/materials';
 import { blendTokens, clamp01, shade, smoothstep01 } from '@kit/mix';
-import { makeAmbientParticles, makeMistPlanes } from '@kit/particles';
-import { mergeColoredParts, type ColoredPart } from '@kit/parts';
+import { oakMaterial, oakUniforms } from '@kit/materials';
+import { makeAmbientParticles } from '@kit/particles';
 import { hash2f } from '@kit/rng';
+import { mergeColoredParts, type ColoredPart } from '@kit/parts';
 import { skyFromPalette, type SkyHandle } from '@kit/sky';
-import { makeTerrain, type TerrainHandle } from '@kit/terrain';
-import { valueNoise2 } from '@kit/textures';
 import { TOKENS, type Palette } from '@kit/tokens';
 import type { SceneContext } from '@kit/types';
-import {
-  coniferTreeGeometry,
-  scatterGrass,
-  scatterRocks,
-  scatterTrees,
-  type ExcludeFn,
-} from '@kit/vegetation';
+import { coniferTreeGeometry, scatterGrass, scatterRocks } from '@kit/vegetation';
 import { makeWorld, type WorldCore } from '@kit/world';
-import {
-  POMAZE_GAPS,
-  POMAZE_H,
-  POMAZE_W,
-  poMazeWalls,
-} from '@sim/envs/pomaze';
-import type { EnvGeometry, GridCell, GridGeometry } from '@sim/types';
+import { POMAZE_H, POMAZE_W } from '@sim/envs/pomaze';
+import type { EnvGeometry, GridGeometry } from '@sim/types';
+import { makeContinuousSurface, makeSceneryBank, type ViewCoverage } from '../jelly-bean-world/view';
 
-export const MAZE_HALF = (POMAZE_W * CELL) / 2;
-export const TERRAIN_SIZE = 84;
-export const TERRAIN_SEGMENTS = 120;
-export const FLOOR_SINK = -0.05;
-
-export const FOG_EXTENT = POMAZE_W * 2.6;
-
-export const SUN_DIR: readonly [number, number, number] = [0.62, 0.55, -0.556];
-export const SHADOW_RADIUS = 5;
-
-export const CAMERA_AZIMUTH = -1.35;
-
-export const BUBBLE_INNER = CELL;
 export const BUBBLE_OUTER = CELL * 2;
-
 export const REVEAL_RADIUS = 3.2;
-export const FOG_LIFT = 0.55;
-
-export const OUTER_FOREST_INNER = 14;
-export const OUTER_FOREST_OUTER = 21;
+const SUN_DIR: readonly [number, number, number] = [0.62, 0.55, -0.556];
 
 export function resolveGrid(geometry: EnvGeometry): GridGeometry {
-  const g = geometry.grid;
-  if (g && g.w === POMAZE_W && g.h === POMAZE_H) return g;
-  return {
-    w: POMAZE_W,
-    h: POMAZE_H,
-    walls: poMazeWalls(),
-    hallways: POMAZE_GAPS.map((c) => ({ ...c })),
-  };
-}
-
-export function resolveGaps(grid: GridGeometry): readonly GridCell[] {
-  const h = grid.hallways;
-  return h && h.length > 0 ? h : POMAZE_GAPS;
-}
-
-export function bubbleVisibility(wx: number, wz: number, cx: number, cz: number): number {
-  const d = Math.max(Math.abs(cx - wx), Math.abs(cz - wz));
-  if (d <= BUBBLE_INNER) return 1;
-  if (d >= BUBBLE_OUTER) return 0;
-  return 1 - smoothstep01((d - BUBBLE_INNER) / (BUBBLE_OUTER - BUBBLE_INNER));
-}
-
-export function revealVisibility(rx: number, rz: number, cx: number, cz: number, radius: number): number {
-  const d = Math.hypot(cx - rx, cz - rz);
-  if (d >= radius) return 0;
-  return 1 - smoothstep01((d - radius * 0.45) / (radius * 0.55));
+  const grid = geometry.grid;
+  if (!grid || grid.w !== POMAZE_W || grid.h !== POMAZE_H || grid.walls.length !== grid.w * grid.h) {
+    throw new Error('PO Maze requires complete recorded grid geometry');
+  }
+  return grid;
 }
 
 export interface ForestSkin {
@@ -103,11 +46,11 @@ export function forestSkin(palette: Palette, tokens: typeof TOKENS): ForestSkin 
   const gold = tokens.celebrationGold;
   const haze = shade(blendTokens(palette.fog, palette.skyTop, 0.62), 0.62);
   return {
-    litterA: shade(blendTokens(palette.groundA, haze, 0.55), 0.6),
-    litterB: shade(blendTokens(palette.groundB, haze, 0.5), 0.6),
-    spruce: shade(blendTokens(palette.groundA, silver, 0.1), 0.74),
+    litterA: shade(blendTokens(palette.groundA, haze, 0.4), 0.53),
+    litterB: shade(blendTokens(palette.groundB, haze, 0.35), 0.53),
+    spruce: shade(blendTokens(palette.groundA, silver, 0.08), 0.68),
     spruceFar: shade(blendTokens(palette.groundA, haze, 0.5), 0.5),
-    fern: shade(blendTokens(palette.groundA, palette.groundB, 0.3), 0.62),
+    fern: shade(blendTokens(palette.groundA, palette.groundB, 0.3), 0.54),
     stone: shade(blendTokens(silver, palette.hemiGround, 0.4), 0.44),
     stoneDark: shade(blendTokens(palette.hemiGround, silver, 0.2), 0.58),
     haze,
@@ -117,542 +60,231 @@ export function forestSkin(palette: Palette, tokens: typeof TOKENS): ForestSkin 
   };
 }
 
-export function excludeCellCenters(radius: number): ExcludeFn {
-  const r2 = radius * radius;
-  return (x, z) => {
-    const cx = Math.round(x / CELL);
-    const cz = Math.round(z / CELL);
-    const dx = x - cx * CELL;
-    const dz = z - cz * CELL;
-    return dx * dx + dz * dz < r2;
-  };
-}
-
-export function excludeDisc(radius: number): ExcludeFn {
-  const r2 = radius * radius;
-  return (x, z) => x * x + z * z < r2;
-}
-
-export function makeForestHeight(seed: number): (x: number, z: number) => number {
-  return (x, z) => {
-    const out = Math.max(Math.abs(x), Math.abs(z)) - MAZE_HALF;
-    const w = smoothstep01(out / 6);
-    if (w <= 0) return 0;
-    const n1 = valueNoise2(x * 0.07 + 3.1, z * 0.07 + 9.4, 64, seed) - 0.5;
-    const n2 = valueNoise2(x * 0.19 + 6.7, z * 0.19 + 2.2, 64, seed ^ 0x51ed270b) - 0.5;
-    return w * (n1 * 1.5 + n2 * 0.5);
-  };
-}
-
-export interface SpruceRanksOptions {
-  grid: GridGeometry;
-  seed: number;
-  color: THREE.ColorRepresentation;
-  rimColor: THREE.ColorRepresentation;
-  name?: string;
-}
-
-export interface SpruceRanksHandle {
-  group: THREE.Group;
-  mesh: THREE.InstancedMesh;
-  material: OakMaterial;
-  cellCount: number;
-  treesPerCell: number;
-  visibilityAt(x: number, y: number): number;
-  setBubble(wx: number, wz: number, rx: number, rz: number, reveal: number): void;
-  setTime(t: number): void;
-  dispose(): void;
-}
-
-export function buildSpruceRanks(opts: SpruceRanksOptions): SpruceRanksHandle {
-  const { grid, seed } = opts;
-  const group = new THREE.Group();
-  group.name = opts.name ?? 'spruceRanks';
-  const detail = 2;
-  const treesPerCell = 3;
-
-  const total = grid.w * grid.h;
-  const index = new Int32Array(total).fill(-1);
-  const cellX: number[] = [];
-  const cellY: number[] = [];
-  for (let y = 0; y < grid.h; y++) {
-    for (let x = 0; x < grid.w; x++) {
-      if (!isWall(grid, x, y)) continue;
-      index[y * grid.w + x] = cellX.length;
-      cellX.push(x);
-      cellY.push(y);
-    }
-  }
-  const cellCount = cellX.length;
-  const instances = Math.max(1, cellCount * treesPerCell);
-
-  const baseX = new Float32Array(instances);
-  const baseZ = new Float32Array(instances);
-  const baseScale = new Float32Array(instances);
-  const baseStretch = new Float32Array(instances);
-  const baseYaw = new Float32Array(instances);
-  const baseTilt = new Float32Array(instances);
-  const phase = new Float32Array(instances);
-  const vis = new Float32Array(Math.max(1, cellCount)).fill(-1);
-
-  const world: Vec3Tuple = [0, 0, 0];
-  const colorAttr = new Float32Array(instances * 3);
-  for (let i = 0; i < cellCount; i++) {
-    const x = cellX[i] ?? 0;
-    const y = cellY[i] ?? 0;
-    cellToWorld(x, y, grid, world);
-    for (let k = 0; k < treesPerCell; k++) {
-      const id = i * treesPerCell + k;
-      const h1 = hash2f(x * 7 + k, y * 13 + k * 3, seed ^ 0x2f6b);
-      const h2 = hash2f(x * 3 + k * 5, y * 11 + k, seed ^ 0x91c3);
-      const h3 = hash2f(x + k * 17, y + k * 29, seed ^ 0x5ab1);
-      const ring = ((k + 0.5) / treesPerCell) * Math.PI * 2 + h1 * 1.1;
-      const radius = treesPerCell > 1 ? 0.27 + h2 * 0.08 : 0.1;
-      baseX[id] = world[0] + Math.cos(ring) * radius;
-      baseZ[id] = world[2] + Math.sin(ring) * radius;
-      baseScale[id] = 0.34 + h3 * 0.18 + (k === 0 ? 0.06 : 0);
-      baseStretch[id] = 1.45 + h1 * 1.0;
-      baseYaw[id] = h2 * Math.PI * 2;
-      baseTilt[id] = (h3 - 0.5) * 0.14;
-      phase[id] = k === 0 ? 0 : 0.18 + h1 * 0.3;
-      const j = 1 + (h3 - 0.5) * 0.24;
-      colorAttr[id * 3] = j;
-      colorAttr[id * 3 + 1] = j * (1 + (h1 - 0.5) * 0.1);
-      colorAttr[id * 3 + 2] = j * (1 + (h2 - 0.5) * 0.14);
-    }
-  }
-
-  const geometry = coniferTreeGeometry(detail);
-  geometry.name = 'spruceRank';
-  const material = oakMaterial({
-    color: opts.color,
-    roughness: 0.95,
-    flatShading: true,
-    vertexColors: true,
-    rimColor: opts.rimColor,
-    rimStrength: 0.5,
-    toonSteps: 2,
-    toonSoftness: 0.34,
-    toonFloor: 0.22,
-    wind: { amplitude: 0.024, frequency: 0.75, height: 1.8 },
-    name: 'spruceRankMaterial',
-  });
-
-  const mesh = new THREE.InstancedMesh(geometry, material, instances);
-  mesh.name = 'spruceRankMesh';
-  mesh.castShadow = true;
-  mesh.receiveShadow = false;
-  mesh.frustumCulled = false;
-  mesh.instanceColor = new THREE.InstancedBufferAttribute(colorAttr, 3);
-  mesh.instanceColor.needsUpdate = true;
-  mesh.count = instances;
-  group.add(mesh);
-
-  const matrix = new THREE.Matrix4();
-  const position = new THREE.Vector3();
-  const quaternion = new THREE.Quaternion();
-  const euler = new THREE.Euler();
-  const scale = new THREE.Vector3();
-
-  const writeCell = (i: number, v: number): void => {
-    for (let k = 0; k < treesPerCell; k++) {
-      const id = i * treesPerCell + k;
-      const p = phase[id] ?? 0;
-      const raw = p >= 1 ? 0 : (v - p) / (1 - p);
-      const g = smoothstep01(raw);
-      const s = baseScale[id] ?? 1;
-      position.set(baseX[id] ?? 0, 0, baseZ[id] ?? 0);
-      euler.set(baseTilt[id] ?? 0, baseYaw[id] ?? 0, (baseTilt[id] ?? 0) * 0.7);
-      quaternion.setFromEuler(euler);
-      const wide = s * g * (0.55 + 0.45 * g);
-      scale.set(wide, s * (baseStretch[id] ?? 1) * g, wide);
-      matrix.compose(position, quaternion, scale);
-      mesh.setMatrixAt(id, matrix);
-    }
-  };
-
-  for (let i = 0; i < cellCount; i++) writeCell(i, 0);
-  vis.fill(0);
-  mesh.instanceMatrix.needsUpdate = true;
-
-  return {
-    group,
-    mesh,
-    material,
-    cellCount,
-    treesPerCell,
-    visibilityAt(x, y) {
-      if (x < 0 || y < 0 || x >= grid.w || y >= grid.h) return 0;
-      const i = index[y * grid.w + x] ?? -1;
-      return i < 0 ? 0 : (vis[i] ?? 0);
-    },
-    setBubble(wx, wz, rx, rz, reveal) {
-      let dirty = false;
-      for (let i = 0; i < cellCount; i++) {
-        cellToWorld(cellX[i] ?? 0, cellY[i] ?? 0, grid, world);
-        let v = bubbleVisibility(wx, wz, world[0], world[2]);
-        if (reveal > 0) {
-          const r = reveal * revealVisibility(rx, rz, world[0], world[2], REVEAL_RADIUS);
-          if (r > v) v = r;
-        }
-        if (Math.abs(v - (vis[i] ?? -1)) < 1e-4) continue;
-        vis[i] = v;
-        writeCell(i, v);
-        dirty = true;
-      }
-      if (dirty) mesh.instanceMatrix.needsUpdate = true;
-    },
-    setTime(t) {
-      oakUniforms(material)?.setTime(t);
-    },
-    dispose() {
-      mesh.dispose();
-      geometry.dispose();
-      material.dispose();
-      group.removeFromParent();
-      group.clear();
-    },
-  };
-}
-
-export interface GapGateHandle {
-  root: THREE.Object3D;
-  body: THREE.Object3D;
-  cell: GridCell;
-}
-
-export function buildGapGates(
-  grid: GridGeometry,
-  gaps: readonly GridCell[],
-  material: THREE.Material,
-  skin: ForestSkin,
-): { handles: GapGateHandle[]; geometry: THREE.BufferGeometry } {
-  const geometry = makeGateStonesGeometry(skin);
-  const handles: GapGateHandle[] = [];
-  const world: Vec3Tuple = [0, 0, 0];
-  for (let i = 0; i < gaps.length; i++) {
-    const g = gaps[i];
-    if (!g) continue;
-    const root = new THREE.Object3D();
-    root.name = `gapGateRoot${i}`;
-    cellToWorld(g.x, g.y, grid, world);
-    root.position.set(world[0], 0, world[2]);
-    const body = new THREE.Object3D();
-    body.name = `gapGateBody${i}`;
-    const bandRunsAlongX = isWall(grid, g.x - 1, g.y) && isWall(grid, g.x + 1, g.y);
-    body.rotation.y = bandRunsAlongX ? 0 : Math.PI / 2;
-    body.scale.setScalar(0.0001);
-    const mesh = new THREE.Mesh(geometry, material);
-    mesh.name = `gapGateStones${i}`;
-    mesh.castShadow = true;
-    mesh.receiveShadow = true;
-    body.add(mesh);
-    root.add(body);
-    handles.push({ root, body, cell: { x: g.x, y: g.y } });
-  }
-  return { handles, geometry };
-}
-
-export function makeGateStonesGeometry(skin: ForestSkin): THREE.BufferGeometry {
-  const parts: ColoredPart[] = [];
-  const segments = 6;
-  for (const sx of [-1, 1]) {
-    const stone = new THREE.CylinderGeometry(0.1, 0.17, 0.74, segments, 1);
-    stone.translate(0, 0.37, 0);
-    stone.rotateZ(sx * -0.13);
-    stone.translate(sx * 0.4, 0, 0);
-    parts.push({ geometry: stone, color: skin.stone });
-    const cap = new THREE.IcosahedronGeometry(0.11, 0);
-    cap.scale(1, 0.55, 1);
-    cap.translate(sx * 0.44, 0.74, 0);
-    parts.push({ geometry: cap, color: skin.stoneDark });
-  }
-  return mergeColoredParts(parts, 'gapGateStones');
+interface ForestReveal {
+  setBubble(x: number, z: number, revealX: number, revealZ: number, amount: number): void;
 }
 
 export interface WorldHandle extends WorldCore {
   sky: SkyHandle;
   rig: LightRig;
-  fog: THREE.FogExp2;
-  terrain: TerrainHandle;
   field: CellFieldHandle;
-  spruce: SpruceRanksHandle;
-  gates: GapGateHandle[];
-  gaps: readonly GridCell[];
+  spruce: ForestReveal;
   skin: ForestSkin;
-  setShadowFocus(x: number, z: number): void;
   setFogLift(amount: number): void;
+  setView(coverage: ViewCoverage, camera: THREE.Camera): void;
 }
 
 export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeometry): WorldHandle {
-  const palette: Palette = ctx.tokens.palettes.dawn;
+  const palette = ctx.tokens.palettes.dawn;
   const skin = forestSkin(palette, ctx.tokens);
   const w = makeWorld('fogboundForest');
-
-  const sky = skyFromPalette(palette, 'dawn', {
+  const sky = w.time(w.own(skyFromPalette(palette, 'dawn', {
     sunDir: SUN_DIR,
-    sunSize: 0.045,
     sunHdr: 3.4,
     sunGlow: 0.5,
     sunGlowPower: 9,
-    topSpread: 0.5,
-    bottomSpread: 0.3,
-    radius: 340,
-  });
-  sky.setColors(
-    blendTokens(palette.skyTop, skin.haze, 0.18),
-    blendTokens(palette.skyHorizon, skin.haze, 0.34),
-    skin.haze,
-  );
+  })));
+  sky.setColors(blendTokens(palette.skyTop, skin.haze, 0.2), blendTokens(palette.skyHorizon, skin.haze, 0.35), skin.haze);
   w.add(sky.mesh);
-  w.own(sky);
-  w.time({ setTime: (t) => sky.setTime(t) });
-
-  const rig = makeLightRig(palette, {
-    sunDir: sky.sunDirection,
-    pointCount: 4,
-    pointDistance: 5.5,
-    sunDistanceScale: 2.6,
-  });
+  const rig = w.own(makeLightRig(palette, { sunDir: sky.sunDirection, pointCount: 4, pointDistance: 5.5, sunDistanceScale: 2.6 }));
   w.add(rig.group);
-  w.own(rig);
-  rig.setShadowFocus({ x: 0, y: 0.3, z: 0 }, SHADOW_RADIUS);
-
-  const fog = applyFog(scene, palette, FOG_EXTENT);
+  rig.setShadowFocus({ x: 0, y: 0.3, z: 0 }, 5);
+  const fog = applyFog(scene, palette, POMAZE_W * 2.6);
   fog.color.copy(skin.haze);
-  const baseDensity = fog.density;
-
-  const terrain = makeTerrain({
-    size: [TERRAIN_SIZE, TERRAIN_SIZE],
-    segments: [TERRAIN_SEGMENTS, TERRAIN_SEGMENTS],
+  let density = 3.8 / 256;
+  const halfX = grid.w * CELL / 2;
+  const halfZ = grid.h * CELL / 2;
+  const heightAt = (x: number, z: number): number => -0.04 + smoothstep01(Math.max(Math.abs(x) - halfX, Math.abs(z) - halfZ) / 6)
+    * (Math.sin(x * 0.07) * Math.cos(z * 0.085) * 0.6 + Math.sin(x * 0.19 + z * 0.13) * 0.15);
+  const surface = w.time(w.own(makeContinuousSurface({
+    name: 'forestLitter', seed: ctx.seed,
+    colorA: skin.litterA, colorB: skin.litterB,
+    height: `return -0.04 + smoothstep(0.0, 6.0, max(abs(p.x) - ${halfX.toFixed(3)}, abs(p.y) - ${halfZ.toFixed(3)}))
+      * (sin(p.x * 0.07) * cos(p.y * 0.085) * 0.6 + sin(p.x * 0.19 + p.y * 0.13) * 0.15);`,
+    detail: 'color *= 0.97 + 0.06 * landNoise(p.xz * 5.0);',
+  })));
+  w.add(surface.mesh);
+  const field = w.time(w.own(buildCellField(grid, {
+    floorColor: palette.sun,
+    wallColor: palette.sun,
+    floorUnderWalls: true,
+    floorTint: (x, y) => blendTokens(skin.litterA, skin.litterB, hash2f(x, y, ctx.seed)),
+    wallHeight: 0,
+    floorInset: 0.035,
+    floorThickness: 0.12,
+    jitter: 0.08,
     seed: ctx.seed,
-    heightFn: makeForestHeight(ctx.seed),
-    jitter: 0,
-    colorNoise: 0.06,
-    slopeColor: skin.stoneDark,
-    slopeStrength: 0.45,
-    slopeSharpness: 2.4,
-    flattenMask: { x: 0, z: 0, halfX: MAZE_HALF, halfZ: MAZE_HALF, feather: 3.4 },
-    flattenHeight: FLOOR_SINK,
-    colorRamp: [
-      { t: 0, color: blendTokens(skin.litterA, skin.stoneDark, 0.22) },
-      { t: 0.45, color: skin.litterA },
-      { t: 1, color: blendTokens(skin.litterB, skin.haze, 0.12) },
-    ],
-    materialOptions: {
-      rimColor: skin.haze,
-      rimStrength: 0.14,
-      toonSteps: 3,
-      toonSoftness: 0.32,
-      toonFloor: 0.26,
-    },
-    receiveShadow: true,
-    castShadow: false,
-    name: 'forestFloor',
-  });
-  w.add(terrain.mesh);
-  w.own(terrain);
-
-  const white = palette.sun;
-  const field = buildCellField(
-    grid,
-    {
-      floorColor: white,
-      wallColor: white,
-      floorUnderWalls: true,
-      floorTint: (x, y) => {
-        const h = hash2f(x, y, ctx.seed ^ 0x3b71);
-        return blendTokens(skin.litterA, skin.litterB, h * h);
-      },
-      wallTint: () => skin.spruce,
-      wallShape: 'block',
-      wallHeight: 0.6,
-      wallInset: 0.04,
-      floorInset: 0.03,
-      floorThickness: 0.12,
-      jitter: 0.14,
-      rimColor: skin.haze,
-      rimStrength: 0.16,
-      seed: ctx.seed,
-      name: 'forestFloorCells',
-    },
-  );
+    name: 'forestPaths',
+  })));
   w.add(field.group);
-  w.own(field);
-  w.time({ setTime: (t) => field.setTime(t) });
-
-  collapseAllWalls(field, grid);
-
-  const spruce = buildSpruceRanks({
-    grid,
-    seed: ctx.seed,
-    color: skin.spruce,
-    rimColor: skin.haze,
-    name: 'spruceRanks',
+  for (const mesh of [...field.wallMeshes, ...field.floorMeshes]) mesh.visible = false;
+  const agent = { value: new THREE.Vector2() };
+  const reveal = { value: new THREE.Vector3() };
+  const time = { value: 0 };
+  const material = w.own(oakMaterial({
+    color: skin.spruce, vertexColors: true, roughness: 0.95, flatShading: true,
+    rimColor: skin.haze, rimStrength: 0.5, toonSteps: 2, toonSoftness: 0.34, toonFloor: 0.22,
+    wind: { amplitude: 0.024, frequency: 0.75, height: 1.8 }, name: 'forestSpruce',
+  }));
+  const revealedMaterial = w.own(material.clone());
+  const spruceCompile = material.onBeforeCompile;
+  revealedMaterial.customProgramCacheKey = () => `${material.customProgramCacheKey()}|forest-reveal`;
+  revealedMaterial.onBeforeCompile = (shader, renderer) => {
+    spruceCompile.call(material, shader, renderer);
+    shader.uniforms.uForestAgent = agent;
+    shader.uniforms.uForestReveal = reveal;
+    shader.uniforms.uForestTime = time;
+    shader.vertexShader = `
+      uniform vec2 uForestAgent;
+      uniform vec3 uForestReveal;
+      uniform float uForestTime;
+    ` + shader.vertexShader;
+    shader.vertexShader = shader.vertexShader.replace('#include <begin_vertex>', `
+      #include <begin_vertex>
+      vec3 worldCenter = (modelMatrix * instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
+      vec2 cellCenter = floor(worldCenter.xz + 0.5);
+      vec2 agentDistance = abs(cellCenter - uForestAgent);
+      float nearAgent = 1.0 - smoothstep(1.0, ${BUBBLE_OUTER.toFixed(2)}, max(agentDistance.x, agentDistance.y));
+      float nearBloom = uForestReveal.z * (1.0 - smoothstep(1.3, 3.2, length(worldCenter.xz - uForestReveal.xy)));
+      float visibility = max(nearAgent, nearBloom);
+      transformed *= vec3(visibility * (0.55 + 0.45 * visibility), visibility, visibility * (0.55 + 0.45 * visibility));
+      transformed.x += sin(uForestTime * 0.8 + worldCenter.z * 0.7) * transformed.y * 0.009;
+    `);
+  };
+  const shadowMaterial = w.own(new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking }));
+  shadowMaterial.onBeforeCompile = revealedMaterial.onBeforeCompile;
+  shadowMaterial.customProgramCacheKey = () => 'forest-reveal-shadow';
+  const geometry = w.own(coniferTreeGeometry(2));
+  const bark = new THREE.Color(0x4e3e2d);
+  bark.setRGB(bark.r / skin.spruce.r, bark.g / skin.spruce.g, bark.b / skin.spruce.b);
+  const treeColors = geometry.getAttribute('color');
+  for (let i = 0; i < 11 * 12; i++) treeColors.setXYZ(i, bark.r, bark.g, bark.b);
+  const walls: [number, number][] = [];
+  for (let y = 0; y < grid.h; y++) {
+    for (let x = 0; x < grid.w; x++) if (isWall(grid, x, y)) walls.push([x, y]);
+  }
+  const trees = w.own(new THREE.InstancedMesh(geometry, revealedMaterial, walls.length * 3));
+  trees.name = 'revealedSpruce';
+  trees.frustumCulled = false;
+  trees.castShadow = true;
+  trees.customDepthMaterial = shadowMaterial;
+  const transform = new THREE.Object3D();
+  const tint = new THREE.Color();
+  walls.forEach(([x, y], cell) => {
+    for (let i = 0; i < 3; i++) {
+      cellToWorldVec(x, y, grid, transform.position);
+      const h1 = hash2f(x * 7 + i, y * 13 + i * 3, ctx.seed ^ 0x2f6b);
+      const h2 = hash2f(x * 3 + i * 5, y * 11 + i, ctx.seed ^ 0x91c3);
+      const h3 = hash2f(x + i * 17, y + i * 29, ctx.seed ^ 0x5ab1);
+      const angle = (i + 0.5) / 3 * Math.PI * 2 + h1 * 1.1;
+      const radius = 0.27 + h2 * 0.08;
+      const scale = 0.34 + h3 * 0.18 + (i === 0 ? 0.06 : 0);
+      transform.position.x += Math.cos(angle) * radius;
+      transform.position.z += Math.sin(angle) * radius;
+      transform.scale.set(scale, scale * (1.45 + h1), scale);
+      transform.rotation.set((h3 - 0.5) * 0.14, h2 * Math.PI * 2, (h3 - 0.5) * 0.1);
+      transform.updateMatrix();
+      trees.setMatrixAt(cell * 3 + i, transform.matrix);
+      trees.setColorAt(cell * 3 + i, tint.setScalar(0.88 + h3 * 0.24));
+    }
   });
-  w.add(spruce.group);
-  w.time(w.own(spruce));
-
-  const stoneMaterial: OakMaterial = oakMaterial({
-    vertexColors: true,
-    flatShading: true,
-    roughness: 0.95,
-    rimColor: skin.haze,
-    rimStrength: 0.32,
-    toonSteps: 3,
-    toonSoftness: 0.3,
-    toonFloor: 0.24,
-    name: 'forestStone',
-  });
-  w.own({ dispose: () => stoneMaterial.dispose() });
-  const gaps = resolveGaps(grid);
-  const gates = buildGapGates(grid, gaps, stoneMaterial, skin);
-  w.own({ dispose: () => gates.geometry.dispose() });
-  for (const gate of gates.handles) w.add(gate.root);
-
-  const clearCenters = excludeCellCenters(0.34);
-  const ferns = scatterGrass({
+  trees.instanceMatrix.needsUpdate = true;
+  w.add(trees);
+  const outer = w.own(makeSceneryBank({
+    name: 'continuingSpruce', geometry, material, tileSize: 12, perTile: 100,
+    seed: ctx.seed ^ 0x77c1, colorA: 0xe3e9dd, colorB: 0x9caba3,
+    receiveShadow: true,
+    fill(tx, tz, rng, write) {
+      for (let i = 0; i < 100; i++) {
+        const x = (tx + (i % 10 + rng()) / 10) * 12;
+        const z = (tz + (Math.floor(i / 10) + rng()) / 10) * 12;
+        if (Math.abs(x) < halfX + 0.35 && Math.abs(z) < halfZ + 0.35) continue;
+        const scale = 0.42 + rng() * 0.26;
+        write(x, heightAt(x, z), z, rng() * Math.PI * 2, scale, 1.5 + rng() * 0.8, rng());
+      }
+    },
+  }));
+  w.add(outer.mesh);
+  const groveParts: ColoredPart[] = [];
+  for (let i = 0; i < 12; i++) {
+    const tree = coniferTreeGeometry(0);
+    const colors = tree.getAttribute('color');
+    for (let j = 0; j < 5 * 12; j++) colors.setXYZ(j, bark.r, bark.g, bark.b);
+    const scale = 0.42 + hash2f(i, 10, ctx.seed) * 0.26;
+    tree.scale(scale, scale * (1.5 + hash2f(i, 11, ctx.seed) * 0.8), scale);
+    tree.translate(Math.sin(i * 13.3) * 2, 0, Math.cos(i * 8.7) * 2);
+    groveParts.push({ geometry: tree, color: new THREE.Color().setScalar(0.8 + (i % 4) * 0.06) });
+  }
+  const groveColors = groveParts.flatMap(({ geometry: tree }) => Array.from(tree.getAttribute('color').array));
+  const groveGeometry = w.own(mergeColoredParts(groveParts, 'spruceGrove'));
+  groveGeometry.setAttribute('color', new THREE.Float32BufferAttribute(groveColors, 3));
+  const farForest = w.own(makeSceneryBank({
+    name: 'continuingSpruceGroves', geometry: groveGeometry, material,
+    tileSize: 96, perTile: 48, seed: ctx.seed ^ 0x631, colorA: 0xe3e9dd, colorB: 0x9caba3,
+    fill(tx, tz, rng, write) {
+      for (let i = 0; i < 48; i++) {
+        const x = (tx + rng()) * 96;
+        const z = (tz + rng()) * 96;
+        if (Math.abs(x) < halfX + 64 && Math.abs(z) < halfZ + 64) continue;
+        write(x, heightAt(x, z), z, rng() * Math.PI * 2, 1, 1, rng());
+      }
+    },
+  }));
+  w.add(farForest.mesh);
+  const ferns = w.time(w.own(scatterGrass({
     count: 5200,
-    area: { halfX: MAZE_HALF + 2.5, halfZ: MAZE_HALF + 2.5 },
+    area: { halfX: halfX + 2.5, halfZ: halfZ + 2.5 },
     seed: ctx.seed ^ 0x1f4d,
-    exclude: clearCenters,
+    exclude: excludeCellCenters(grid, 0.35),
     color: skin.fern,
     scale: [0.11, 0.27],
     stretch: [0.7, 1.6],
-    hueJitter: 0.24,
-    wind: 0.04,
-    windFrequency: 1.1,
-    rimColor: skin.haze,
-    rimStrength: 0.34,
+    wind: 0.04, rimColor: skin.haze, rimStrength: 0.34, hueJitter: 0.24,
     name: 'forestFerns',
-  });
+  })));
   w.add(ferns.group);
-  w.time(w.own(ferns));
-
-  const stones = scatterRocks({
-    count: 240,
-    area: { halfX: MAZE_HALF + 6, halfZ: MAZE_HALF + 6 },
-    seed: ctx.seed ^ 0x6b23,
-    exclude: clearCenters,
-    heightAt: (x, z) => terrain.sampleHeight(x, z),
-    color: skin.stone,
-    scale: [0.12, 0.34],
-    stretch: [0.45, 0.85],
-    hueJitter: 0.22,
-    rimColor: skin.haze,
-    rimStrength: 0.3,
-    castShadow: false,
-    name: 'forestStones',
-  });
+  const stones = w.time(w.own(scatterRocks({
+    count: 240, area: { halfX: halfX + 6, halfZ: halfZ + 6 }, seed: ctx.seed ^ 0x6b23,
+    exclude: excludeCellCenters(grid, 0.34), heightAt, color: skin.stone,
+    scale: [0.12, 0.34], stretch: [0.45, 0.85], hueJitter: 0.22,
+    rimColor: skin.haze, rimStrength: 0.3, castShadow: false, name: 'forestStones',
+  })));
   w.add(stones.group);
-  w.time(w.own(stones));
-
-  const outer = scatterTrees({
-    archetypes: ['conifer'],
-    count: 1400,
-    area: { halfX: OUTER_FOREST_OUTER, halfZ: OUTER_FOREST_OUTER, innerRadius: OUTER_FOREST_INNER },
-    seed: ctx.seed ^ 0x77c1,
-    exclude: excludeDisc(OUTER_FOREST_INNER),
-    heightAt: (x, z) => terrain.sampleHeight(x, z),
-    maxSlope: 0.8,
-    color: skin.spruceFar,
-    scale: [0.52, 1.22],
-    stretch: [0.85, 1.3],
-    hueJitter: 0.18,
-    wind: 0.03,
-    windFrequency: 0.7,
-    rimColor: skin.haze,
-    rimStrength: 0.4,
-    castShadow: false,
-    name: 'outerForest',
-  });
-  w.add(outer.group);
-  w.time(w.own(outer));
-
-  const mist = makeMistPlanes({
-    size: [18, 18],
-    color: blendTokens(skin.haze, palette.sun, 0.28),
-    seed: ctx.seed ^ 0x2ab7,
-    layers: 3,
-    baseY: 0.06,
-    spread: 0.5,
-    opacity: 0.1,
-    speed: 0.009,
-    scale: 3.2,
-    nearFade: 2.6,
-    name: 'forestMist',
-  });
-  w.add(mist.group);
-  w.time(w.own(mist));
-
-  const dust = makeAmbientParticles({
-    preset: 'dust',
-    count: 340,
-    bounds: { x: 0, y: 0.85, z: 0, halfX: MAZE_HALF + 2, halfY: 0.8, halfZ: MAZE_HALF + 2 },
-    seed: ctx.seed ^ 0x4e11,
-    color: skin.motes,
-    size: 0.5,
-    intensity: 1.3,
-    opacity: 0.34,
-    rise: 0.015,
-    swirl: 0.16,
-    name: 'forestDust',
-  });
-  w.add(dust.points);
-  w.size(w.time(w.own(dust)));
-
-  const spores = makeAmbientParticles({
-    preset: 'pollen',
-    count: 150,
-    bounds: { x: 0, y: 1.9, z: 0, halfX: MAZE_HALF + 2, halfY: 1.1, halfZ: MAZE_HALF + 2 },
+  const spores = w.size(w.time(w.own(makeAmbientParticles({
+    preset: 'pollen', count: 340,
+    bounds: { x: 0, y: 1.2, z: 0, halfX, halfY: 1.1, halfZ },
     seed: ctx.seed ^ 0x7d05,
-    color: blendTokens(skin.motes, skin.bloom, 0.3),
-    size: 0.7,
-    intensity: 1.5,
-    opacity: 0.3,
-    rise: -0.05,
-    swirl: 0.24,
-    name: 'forestSpores',
-  });
+    color: skin.motes,
+    opacity: 0.36,
+    size: 0.8,
+    intensity: 1.6,
+    rise: 0.04,
+    swirl: 0.2,
+    name: 'forestFireflies',
+  }))));
   w.add(spores.points);
-  w.size(w.time(w.own(spores)));
-
   return w.seal({
     sky,
     rig,
-    fog,
-    terrain,
     field,
-    spruce,
-    gates: gates.handles,
-    gaps,
     skin,
-    setShadowFocus(x, z) {
-      rig.setShadowFocus({ x, y: 0.3, z }, SHADOW_RADIUS);
+    spruce: {
+      setBubble(x, z, revealX, revealZ, amount) {
+        agent.value.set(x, z);
+        reveal.value.set(revealX, revealZ, amount);
+      },
     },
-    setFogLift(amount) {
-      const a = clamp01(amount);
-      fog.density = baseDensity * (1 - FOG_LIFT * a);
+    setFogLift(amount) { fog.density = density * (1 - clamp01(amount) * 0.35); },
+    setView(coverage, camera) {
+      density = 3.8 / coverage.far;
+      surface.setView(coverage);
+      outer.setView(coverage);
+      farForest.setView(coverage);
+      sky.mesh.position.copy(camera.position);
+      sky.mesh.scale.setScalar(coverage.far * 0.85);
+      rig.setShadowFocus({ x: agent.value.x, y: 0.3, z: agent.value.y }, 5);
     },
+  }, {
+    time(t) { time.value = t; oakUniforms(material)?.setTime(t); },
   });
-}
-
-export function collapseAllWalls(field: CellFieldHandle, grid: GridGeometry): void {
-  const mesh = field.wallMeshes[0];
-  if (!mesh) return;
-  const m = new THREE.Matrix4();
-  const p = new THREE.Vector3();
-  const q = new THREE.Quaternion();
-  const s = new THREE.Vector3();
-  for (let y = 0; y < grid.h; y++) {
-    for (let x = 0; x < grid.w; x++) {
-      const id = field.wallInstanceAt(x, y);
-      if (id < 0) continue;
-      mesh.getMatrixAt(id, m);
-      m.decompose(p, q, s);
-      m.compose(p, q, s.set(0, 0, 0));
-      mesh.setMatrixAt(id, m);
-    }
-  }
-  mesh.instanceMatrix.needsUpdate = true;
 }

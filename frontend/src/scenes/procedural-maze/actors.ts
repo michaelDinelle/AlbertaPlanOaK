@@ -1,3 +1,4 @@
+import { sculptureMaterial } from '../key-corridor/world';
 import { emissiveMaterial, oakMaterial, oakUniforms, setEmissiveIntensity } from '@kit/materials';
 import type { EmissiveMaterial, OakMaterial } from '@kit/materials';
 import { clamp01 } from '@kit/mix';
@@ -72,7 +73,6 @@ void main() {
 
 export function buildSunShaft(opts: SunShaftOptions): SunShaftHandle {
   const { palette, skin, sunDir } = opts;
-  const detail = 1;
   const group = new THREE.Group();
   group.name = opts.name ?? 'sunShaft';
 
@@ -84,7 +84,7 @@ export function buildSunShaft(opts: SunShaftOptions): SunShaftHandle {
   decor.name = 'sunShaftDecor';
   root.add(decor);
 
-  const radial = Math.max(8, Math.round(22 * detail));
+  const radial = 22;
   const beamGeometry = new THREE.CylinderGeometry(
     BEAM_TOP_RADIUS,
     BEAM_BASE_RADIUS,
@@ -157,13 +157,10 @@ export function buildSunShaft(opts: SunShaftOptions): SunShaftHandle {
   decor.add(halo);
 
   const stubGeometry = atriumGeometry(skin);
-  const stubMaterial: OakMaterial = oakMaterial({
-    vertexColors: true,
-    flatShading: true,
+  const stubMaterial: OakMaterial = sculptureMaterial({
     roughness: 0.94,
     rimColor: palette.skyHorizon,
     rimStrength: 0.34,
-    toonSteps: 3,
     toonSoftness: 0.28,
     toonFloor: 0.42,
     name: 'sunShaftStubMaterial',
@@ -233,8 +230,7 @@ export function buildSunShaft(opts: SunShaftOptions): SunShaftHandle {
 }
 
 function atriumGeometry(skin: RuinSkin): THREE.BufferGeometry {
-  const detail = 1;
-  const radial = Math.max(5, Math.round(10 * detail));
+  const radial = 10;
   const parts: ColoredPart[] = [];
 
   const corners: readonly (readonly [number, number, number])[] = [
@@ -252,7 +248,7 @@ function atriumGeometry(skin: RuinSkin): THREE.BufferGeometry {
     parts.push({ geometry: stub, color: i % 2 === 0 ? skin.stoneLight : skin.stoneDark });
   }
 
-  const ring = new THREE.RingGeometry(0.3, 0.42, Math.max(10, Math.round(24 * detail)));
+  const ring = new THREE.RingGeometry(0.3, 0.42, 24);
   ring.rotateX(-Math.PI / 2);
   ring.translate(0, 0.028, 0);
   parts.push({ geometry: ring, color: skin.stoneLight });

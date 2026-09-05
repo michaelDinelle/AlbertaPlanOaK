@@ -1,6 +1,7 @@
+import { makeSceneView, type SceneView } from '../jelly-bean-world/view';
 import { PROCMAZE_GX, PROCMAZE_GY, PROCMAZE_X, PROCMAZE_Y } from '@sim/envs/proceduralmaze';
 import type { GroundTruthOptions } from '@kit/debug';
-import { cellToWorldVec, clampCell, type GridSize } from '@kit/grid';
+import { CELL, cellToWorldVec, clampCell, type GridSize } from '@kit/grid';
 import { blendTokens, envelope } from '@kit/mix';
 import type { OrbitRigOptions } from '@kit/rigs';
 import { StageScene, type Stage } from '@kit/stage';
@@ -11,11 +12,6 @@ import * as THREE from 'three';
 import type { GridCell, GridGeometry } from '@sim/types';
 import { buildSunShaft, type SunShaftHandle } from './actors';
 import {
-  CAMERA_AZIMUTH,
-  CAMERA_DISTANCE,
-  CAMERA_POLAR,
-  CAMERA_TARGET_BIAS,
-  CAMERA_TARGET_Y,
   SUN_DIR,
   buildWorld,
   floorTintFor,
@@ -51,11 +47,13 @@ export function readGoalCell(state: FrameState, grid: GridSize, out: GridCell): 
 }
 
 class OvergrownRuinsScene extends StageScene<WorldHandle> {
+  private sceneView: SceneView | null = null;
+
   protected readonly stageName = 'overgrownRuins';
 
   private wisp: Wisp | null = null;
   private shaft: SunShaftHandle | null = null;
-  private gridGeom: GridGeometry | null = null;
+  private gridGeom!: GridGeometry;
   private skin: RuinSkin | null = null;
   private seed = 0;
 
@@ -76,7 +74,7 @@ class OvergrownRuinsScene extends StageScene<WorldHandle> {
   private moteColor = TOKENS.celebrationGold;
 
   protected buildWorld(ctx: SceneContext): WorldHandle {
-    const grid = resolveGrid(ctx.geometry, ctx.seed);
+    const grid = resolveGrid(ctx.geometry);
     this.gridGeom = grid;
     this.seed = ctx.seed;
     return buildWorld(ctx, this.scene, grid);
@@ -84,7 +82,6 @@ class OvergrownRuinsScene extends StageScene<WorldHandle> {
 
   protected buildActors(ctx: SceneContext, world: WorldHandle): void {
     const grid = this.gridGeom;
-    if (!grid) return;
     const palette = ctx.tokens.palettes.noon;
     const skin = ruinSkin(palette, ctx.tokens);
     this.skin = skin;
@@ -127,17 +124,15 @@ class OvergrownRuinsScene extends StageScene<WorldHandle> {
   }
 
   protected rigOptions(ctx: SceneContext): OrbitRigOptions {
-    const bias = CAMERA_TARGET_BIAS;
-    return {
-      target: [Math.sin(CAMERA_AZIMUTH) * bias, CAMERA_TARGET_Y, Math.cos(CAMERA_AZIMUTH) * bias],
-      distance: CAMERA_DISTANCE,
-      azimuth: CAMERA_AZIMUTH,
-      polar: CAMERA_POLAR,
-    };
+    const grid = this.gridGeom;
+    const halfX = grid.w * CELL / 2;
+    const halfZ = grid.h * CELL / 2;
+    this.sceneView = makeSceneView(ctx, { min: [-halfX, 0, -halfZ], max: [halfX, 1.8, halfZ] }, [Math.sin(0.62) * 1.2, 0.15, Math.cos(0.62) * 1.2], { distance: 19, azimuth: 0.62, polar: 0.73 });
+    return this.sceneView.options;
   }
 
   protected overlayOptions(): GroundTruthOptions {
-    const grid = this.gridGeom ?? resolveGrid({}, 0);
+    const grid = this.gridGeom;
     const overlayAgent: GridCell = { x: 0, y: 0 };
     const overlayGoal: GridCell = { x: 0, y: 0 };
     return {
@@ -154,7 +149,7 @@ class OvergrownRuinsScene extends StageScene<WorldHandle> {
 
   protected start(_ctx: SceneContext, world: WorldHandle): void {
     world.setTime(0);
-    this.wisp?.setCell(0, 0, this.gridGeom ?? resolveGrid({}, 0));
+    this.wisp?.setCell(0, 0, this.gridGeom);
     this.shaft?.setState(1);
     this.shaft?.setTime(0);
   }
@@ -163,7 +158,7 @@ class OvergrownRuinsScene extends StageScene<WorldHandle> {
     const wisp = this.wisp;
     const shaft = this.shaft;
     const grid = this.gridGeom;
-    if (!wisp || !shaft || !grid) return;
+    if (!wisp || !shaft) return;
 
     const state = frame.state;
     const agent = this.agentCell;
@@ -179,7 +174,6 @@ class OvergrownRuinsScene extends StageScene<WorldHandle> {
       this.growAt = -Infinity;
       wisp.setCell(agent.x, agent.y, grid);
       wisp.snap();
-      rig.snap();
     }
 
     let teleported = false;
@@ -245,7 +239,7 @@ class OvergrownRuinsScene extends StageScene<WorldHandle> {
 
     world.setTime(time);
 
-    rig.update(frame.dtReal);
+    if (this.sceneView) world.setView(this.sceneView.update(rig, frame.dtReal), this.camera);
   }
 
   private relightFloor(x: number, y: number): void {
@@ -253,7 +247,7 @@ class OvergrownRuinsScene extends StageScene<WorldHandle> {
     const world = this.world;
     const grid = this.gridGeom;
     const skin = this.skin;
-    if (!world || !grid || !skin) return;
+    if (!world || !skin) return;
     if (this.litX >= 0) {
       floorTintFor(grid, skin, this.litX, this.litY, this.seed, this.restoreTint);
       world.field.setFloorColor(this.litX, this.litY, this.restoreTint);
@@ -268,7 +262,6 @@ class OvergrownRuinsScene extends StageScene<WorldHandle> {
     this.shaft = null;
     this.wisp?.dispose();
     this.wisp = null;
-    this.gridGeom = null;
     this.skin = null;
     this.seed = 0;
     this.growAt = -Infinity;

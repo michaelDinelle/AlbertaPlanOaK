@@ -1,6 +1,7 @@
 import type { GroundTruthOptions } from '@kit/debug';
 import { clampRange, envelope } from '@kit/mix';
-import { orbitFromPose, type OrbitRigOptions } from '@kit/rigs';
+import { type OrbitRigOptions } from '@kit/rigs';
+import { makeSceneView, type SceneView } from '../jelly-bean-world/view';
 import { StageScene, type Stage } from '@kit/stage';
 import type { FrameState, FrameUpdate, SceneContext, SceneFactory, SceneSize } from '@kit/types';
 import * as THREE from 'three';
@@ -15,8 +16,6 @@ import {
   type WorldHandle,
 } from './world';
 
-const CAM_BASE: readonly [number, number, number] = [0.58, -0.24, 5.7];
-const CAM_LOOK: readonly [number, number, number] = [-0.06, -0.5, 0];
 
 const FLARE_SECONDS = 1.9;
 const PETAL_SECONDS = 5;
@@ -34,6 +33,7 @@ export function torqueOf(state: FrameState): number {
 }
 
 class WillowSwingScene extends StageScene<WorldHandle> {
+  private view: SceneView | null = null;
   protected readonly stageName = 'willowSwing';
 
   private arm: ArmHandle | null = null;
@@ -85,21 +85,8 @@ class WillowSwingScene extends StageScene<WorldHandle> {
   }
 
   protected rigOptions(ctx: SceneContext): OrbitRigOptions {
-    const home = orbitFromPose(
-      CAM_BASE,
-      CAM_LOOK,
-    );
-    return {
-      target: CAM_LOOK,
-      azimuth: home.azimuth,
-      polar: home.polar,
-      distance: home.distance,
-      near: 0.05,
-      far: 420,
-      rotateSpeed: 0.006,
-      zoomSpeed: 0.0016,
-      damping: 2.4,
-    };
+    this.view = makeSceneView(ctx, { min: [-2.35, -2.5, -0.45], max: [2.35, 2.1, 0.45] }, [-0.06, -0.5, 0], { distance: 5.741707063, azimuth: 0.111812400, polar: 1.360000000 });
+    return this.view.options;
   }
 
   protected overlayOptions(): GroundTruthOptions {
@@ -143,7 +130,6 @@ class WillowSwingScene extends StageScene<WorldHandle> {
       this.petalAt = -Infinity;
       this.flashAt = -Infinity;
       arm.clearTrail();
-      rig.snap();
     }
 
     let teleported = false;
@@ -207,7 +193,7 @@ class WillowSwingScene extends StageScene<WorldHandle> {
     world.setTime(time);
     arm.setTime(time);
 
-    rig.update(frame.dtReal);
+    if (this.view) world.setView(this.view.update(rig, frame.dtReal), this.camera);
 
     this.celebrateAt.copy(arm.tipWorld);
   }

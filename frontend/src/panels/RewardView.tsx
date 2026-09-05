@@ -14,8 +14,6 @@ import { PEN_KEYS, penStore, type PenKey, type PenSource } from '../tape/penStor
 import { RewardStream } from '../tape/rewardStream';
 import { rewardUrl } from '../data/api';
 import { useTapeSnapshot, type DeriveSpec } from '../tape/store';
-import { scrubToStep } from '../theater/controller';
-import { navigate } from '../url/useUrlState';
 import {
   AXIS_WIDTH,
   CHART_MARGIN,
@@ -36,6 +34,7 @@ import {
   type XY,
 } from './charts';
 import { SeedList } from './SeedList';
+import { useStepScrub } from './useStepScrub';
 
 function summaryPoints(run: RunDetail | null, envId: string | null): XY[] | null {
   if (run === null || envId === null) return null;
@@ -466,14 +465,11 @@ export function RewardView({
   const stale = slicing ? [] : summaryLines.filter(({ pts }) => pts === null).map(({ label }) => label);
 
   const xMax = slicing ? axis.xMax : Math.max(1, horizon);
-  const dragging = useRef(false);
   const chartRef = useRef<HTMLDivElement | null>(null);
-  const stepAt = (event: React.PointerEvent<HTMLDivElement>): number => {
-    const rect = event.currentTarget.getBoundingClientRect();
-    const inner = Math.max(1, rect.width - CHART_MARGIN.left - CHART_MARGIN.right - AXIS_WIDTH);
-    const frac = Math.min(1, Math.max(0, (event.clientX - rect.left - CHART_MARGIN.left - AXIS_WIDTH) / inner));
-    return Math.round(frac * xMax);
-  };
+  const scrub = useStepScrub<HTMLDivElement>(
+    () => ({ min: slicing ? 0 : sparseOrigin(avgPts, horizon), max: xMax }),
+    { left: PLOT_BOX.left, right: PLOT_BOX.right },
+  );
   const waiting = slicing ? cumulative[sel.policy] === null : rates === null;
 
   return (
@@ -492,26 +488,7 @@ export function RewardView({
       <div
         ref={chartRef}
         className="relative cursor-ew-resize touch-none select-none rounded-md transition-colors hover:bg-white/5"
-        onPointerDown={(event) => {
-          dragging.current = true;
-          try {
-            event.currentTarget.setPointerCapture(event.pointerId);
-          } catch {}
-          scrubToStep(stepAt(event));
-        }}
-        onPointerMove={(event) => {
-          if (dragging.current) scrubToStep(stepAt(event));
-        }}
-        onPointerUp={(event) => {
-          if (!dragging.current) return;
-          dragging.current = false;
-          const step = stepAt(event);
-          scrubToStep(step);
-          navigate({ at: step });
-        }}
-        onPointerCancel={() => {
-          dragging.current = false;
-        }}
+        {...scrub}
       >
         {slicing ? (
           <>

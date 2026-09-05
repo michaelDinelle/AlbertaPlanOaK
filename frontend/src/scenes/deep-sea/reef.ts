@@ -3,7 +3,7 @@ import { blendTokens, clamp01, shade } from '@kit/mix';
 import { TOKENS, type Palette } from '@kit/tokens';
 import type { FrameState } from '@kit/types';
 import * as THREE from 'three';
-import { DEEPSEA_ACTION, DEEPSEA_COL, DEEPSEA_N, DEEPSEA_ROW, deepSeaDecoder, deepSeaNextCol, type DeepSeaStatic } from '@sim/envs/deepsea';
+import { DEEPSEA_ACTION, DEEPSEA_COL, DEEPSEA_N, DEEPSEA_ROW, deepSeaNextCol, type DeepSeaStatic } from '@sim/envs/deepsea';
 import type { EnvGeometry, GridGeometry } from '@sim/types';
 
 export {
@@ -22,25 +22,17 @@ export const SHELF_THICKNESS = 1.35;
 export const TREASURE_ROW = DEEPSEA_N - 1;
 export const TREASURE_COL = DEEPSEA_N - 1;
 
-export function resolveGrid(geometry: EnvGeometry, seed = 0): GridGeometry {
-  const g = geometry.grid;
-  if (g && g.w === DEEPSEA_N && g.h === DEEPSEA_N) return g;
-  const built = deepSeaDecoder.geometry(deepSeaDecoder.initStatic(seed), seed).grid;
-  if (built) return built;
-  return {
-    w: DEEPSEA_N,
-    h: DEEPSEA_N,
-    walls: new Uint8Array(DEEPSEA_N * DEEPSEA_N),
-    goal: { x: TREASURE_COL, y: TREASURE_ROW },
-    actionMask: new Uint8Array(DEEPSEA_N * DEEPSEA_N),
-  };
+export function resolveGrid(geometry: EnvGeometry): GridGeometry {
+  const grid = geometry.grid;
+  if (!grid || grid.w !== DEEPSEA_N || grid.h !== DEEPSEA_N) throw new Error('Deep Sea grid is missing or invalid');
+  return grid;
 }
 
 export function reefReachable(grid: GridGeometry): Uint8Array {
   const w = grid.w;
   const h = grid.h;
-  const mask =
-    grid.actionMask && grid.actionMask.length >= w * h ? grid.actionMask : new Uint8Array(w * h);
+  const mask = grid.actionMask;
+  if (!mask || mask.length !== w * h) throw new Error('Deep Sea action mask is missing or invalid');
   const st: DeepSeaStatic = { seed: 0, maskLo: 0, maskHi: 0, mask };
   const reach = new Uint8Array(w * h);
   reach[0] = 1;

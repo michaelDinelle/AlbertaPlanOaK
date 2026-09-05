@@ -173,7 +173,7 @@ export function PlaybackBar({
           if (governed) paceRef.current.textContent = STR.bar.livePace(frame.rate < 10 ? frame.rate.toFixed(1) : frame.rate.toFixed(0));
         }
       }),
-    [],
+    [subscribeStageFrame],
   );
 
   useEffect(() => {

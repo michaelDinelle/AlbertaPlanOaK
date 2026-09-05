@@ -1,3 +1,4 @@
+import { sculptureMaterial, gradedGeometry } from '../key-corridor/world';
 import { GoalBeacon } from '@kit/grid';
 import {
   emissiveMaterial,
@@ -8,7 +9,7 @@ import {
   type OakMaterial,
 } from '@kit/materials';
 import { blendTokens, clamp01 } from '@kit/mix';
-import type { ColoredPart } from '@kit/parts';
+import { mergeColoredParts, type ColoredPart } from '@kit/parts';
 import type { Palette } from '@kit/tokens';
 import * as THREE from 'three';
 
@@ -40,7 +41,6 @@ export interface LanternHandle {
 
 export function buildLantern(opts: LanternOptions): LanternHandle {
   const { palette, blossom, flame, stem } = opts;
-  const detail = 1;
   const group = new THREE.Group();
   group.name = opts.name ?? 'lanternFlower';
 
@@ -63,11 +63,11 @@ export function buildLantern(opts: LanternOptions): LanternHandle {
 
   const stemParts: ColoredPart[] = [];
   {
-    const shaft = new THREE.CylinderGeometry(0.019, 0.038, BUD_Y, Math.max(4, Math.round(6 * detail)));
+    const shaft = new THREE.CylinderGeometry(0.019, 0.038, BUD_Y, 6);
     shaft.translate(0, BUD_Y * 0.5, 0);
     stemParts.push({ geometry: shaft, color: stem });
     for (const side of [-1, 1]) {
-      const leaf = new THREE.CircleGeometry(0.11, Math.max(4, Math.round(6 * detail)));
+      const leaf = new THREE.CircleGeometry(0.11, 6);
       leaf.scale(1, 0.5, 1);
       leaf.rotateX(-Math.PI / 2.3);
       leaf.rotateY(side > 0 ? 0.6 : Math.PI - 0.6);
@@ -75,10 +75,8 @@ export function buildLantern(opts: LanternOptions): LanternHandle {
       stemParts.push({ geometry: leaf, color: blendTokens(stem, palette.groundB, 0.3) });
     }
   }
-  const stemGeometry = mergeStem(stemParts);
-  const stemMaterial: OakMaterial = oakMaterial({
-    vertexColors: true,
-    flatShading: true,
+  const stemGeometry = mergeColoredParts(stemParts, 'lanternStem');
+  const stemMaterial: OakMaterial = sculptureMaterial({
     side: THREE.DoubleSide,
     roughness: 0.82,
     rimColor: palette.skyHorizon,
@@ -94,10 +92,8 @@ export function buildLantern(opts: LanternOptions): LanternHandle {
   bud.add(stemMesh);
 
   const petalGeometry = makePetalGeometry();
-  const petalMaterial: OakMaterial = oakMaterial({
+  const petalMaterial: OakMaterial = sculptureMaterial({
     color: blossom,
-    vertexColors: true,
-    flatShading: true,
     side: THREE.DoubleSide,
     roughness: 0.72,
     rimColor: flame,
@@ -210,69 +206,26 @@ function makePetalGeometry(): THREE.BufferGeometry {
     [m0, m1, tip],
   ];
   const grade: readonly number[] = [0.5, 0.5, 0.86, 0.5, 0.86, 0.86, 0.86, 0.86, 1.12];
-  const positions = new Float32Array(9 * 3);
-  const colors = new Float32Array(9 * 3);
-  let o = 0;
-  for (const tri of tris) {
-    for (const v of tri) {
-      positions[o * 3] = v[0];
-      positions[o * 3 + 1] = v[1];
-      positions[o * 3 + 2] = v[2];
-      const k = grade[o] ?? 1;
-      colors[o * 3] = k;
-      colors[o * 3 + 1] = k;
-      colors[o * 3 + 2] = k;
-      o++;
-    }
-  }
-  const g = new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  g.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-  g.computeVertexNormals();
-  g.computeBoundingSphere();
-  g.name = 'lanternPetal';
-  return g;
+  return gradedGeometry('lanternPetal', tris.flat().map((point, i) => [...point, grade[i]!]));
 }
 
-function mergeStem(parts: readonly ColoredPart[]): THREE.BufferGeometry {
-  let total = 0;
-  for (const p of parts) {
-    total += p.geometry.index ? p.geometry.index.count : p.geometry.getAttribute('position').count;
+
+export function buildTravelerLantern(color: THREE.ColorRepresentation) {
+  const parts: ColoredPart[] = [];
+  for (const y of [-0.19, 0.19]) {
+    const cap = new THREE.CylinderGeometry(0.18, 0.2, 0.06, 8);
+    cap.translate(0, y, 0);
+    parts.push({ geometry: cap, color: 0x684b31 });
   }
-  const positions = new Float32Array(total * 3);
-  const normals = new Float32Array(total * 3);
-  const colors = new Float32Array(total * 3);
-  const c = new THREE.Color();
-  let o = 0;
-  for (const part of parts) {
-    const geo = part.geometry;
-    const pos = geo.getAttribute('position');
-    const nor = geo.getAttribute('normal');
-    const index = geo.index;
-    const n = index ? index.count : pos.count;
-    c.set(part.color);
-    for (let i = 0; i < n; i++) {
-      const vi = index ? index.getX(i) : i;
-      positions[o * 3] = pos.getX(vi);
-      positions[o * 3 + 1] = pos.getY(vi);
-      positions[o * 3 + 2] = pos.getZ(vi);
-      if (nor) {
-        normals[o * 3] = nor.getX(vi);
-        normals[o * 3 + 1] = nor.getY(vi);
-        normals[o * 3 + 2] = nor.getZ(vi);
-      }
-      colors[o * 3] = c.r;
-      colors[o * 3 + 1] = c.g;
-      colors[o * 3 + 2] = c.b;
-      o++;
-    }
+  for (let i = 0; i < 6; i++) {
+    const angle = i * Math.PI / 3;
+    const rib = new THREE.CylinderGeometry(0.012, 0.014, 0.38, 4);
+    rib.translate(Math.cos(angle) * 0.17, 0, Math.sin(angle) * 0.17);
+    parts.push({ geometry: rib, color: 0x937446 });
   }
-  const g = new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  g.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
-  g.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-  g.computeBoundingSphere();
-  g.name = 'lanternStem';
-  for (const p of parts) p.geometry.dispose();
-  return g;
+  const geometry = mergeColoredParts(parts, 'travelerLanternCage');
+  const material = new THREE.MeshStandardMaterial({ vertexColors: true, color, roughness: 0.7, metalness: 0.15 });
+  const mesh = new THREE.Mesh(geometry, material);
+  mesh.position.y = 0.4;
+  return { mesh, dispose() { geometry.dispose(); material.dispose(); mesh.removeFromParent(); } };
 }

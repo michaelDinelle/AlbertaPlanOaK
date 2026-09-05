@@ -1,52 +1,22 @@
 import * as THREE from 'three';
-import {
-  CELL,
-  buildCellField,
-  cellToWorld,
-  type CellFieldHandle,
-  type GridSize,
-  type Vec3Tuple,
-} from '@kit/grid';
-import { applyFog, makeLightRig, type LightRig } from '@kit/lighting';
-import { oakMaterial, type OakMaterial } from '@kit/materials';
+import { CELL, cellToWorld, type GridSize, type Vec3Tuple } from '@kit/grid';
+import { makeLightRig, type LightRig } from '@kit/lighting';
+import { oakMaterial, oakUniforms, type OakMaterial } from '@kit/materials';
 import { blendTokens, shade, smoothstep01 } from '@kit/mix';
-import { makeAmbientParticles, makeMistPlanes, type AmbientParticlesHandle } from '@kit/particles';
-import { mergeColoredParts, type ColoredPart } from '@kit/parts';
+import { makeAmbientParticles, type AmbientParticlesHandle } from '@kit/particles';
 import { hash2f } from '@kit/rng';
 import { skyFromPalette, type SkyHandle } from '@kit/sky';
-import { makeTerrain, type TerrainHandle } from '@kit/terrain';
-import { valueNoise2 } from '@kit/textures';
 import { TOKENS, type Palette } from '@kit/tokens';
 import type { SceneContext } from '@kit/types';
-import {
-  excludeAny,
-  scatterFlowers,
-  scatterGrass,
-  scatterRocks,
-  scatterTrees,
-  type ExcludeFn,
-  type VegetationHandle,
-} from '@kit/vegetation';
-import { makeWater, type WaterHandle } from '@kit/water';
+import { broadleafTreeGeometry, coniferTreeGeometry, flowerGeometry, grassClumpGeometry } from '@kit/vegetation';
+import { makeWater } from '@kit/water';
 import { makeWorld, type WorldCore } from '@kit/world';
-import { CHAIN_END, CHAIN_L, chainDecoder } from '@sim/envs/chain';
+import { CHAIN_L } from '@sim/envs/chain';
 import type { EnvGeometry, GridGeometry } from '@sim/types';
+import { makeContinuousSurface, makeSceneryBank, type ViewCoverage } from '../jelly-bean-world/view';
+import { extendWater } from '../half-cheetah/world';
 
 export const WATER_LEVEL = -0.17;
-export const BED_Y = -1.05;
-export const BANK_Y = 0.62;
-export const CREEK_HALF = 8.0;
-export const BANK_RISE = 2.2;
-export const MEANDER = 0.55;
-
-export const TERRAIN_SIZE: readonly [number, number] = [52, 80];
-export const TERRAIN_SEGMENTS: readonly [number, number] = [120, 176];
-export const FOG_EXTENT = 300;
-export const SUN_DIR: readonly [number, number, number] = [-0.46, 0.62, -0.64];
-export const SHADOW_RADIUS = 12.5;
-
-export const CAMERA_AZIMUTH = 0.35;
-export const CAMERA_STANDOFF = 13.5;
 
 export function tubeGeometry(
   a: readonly [number, number, number],
@@ -71,11 +41,9 @@ export function tubeGeometry(
 }
 
 export function resolveGrid(geometry: EnvGeometry): GridGeometry {
-  const g = geometry.grid;
-  if (g && g.w === CHAIN_L && g.h === 1) return g;
-  const fallback = chainDecoder.geometry(chainDecoder.initStatic(0), 0).grid;
-  if (fallback) return fallback;
-  return { w: CHAIN_L, h: 1, walls: new Uint8Array(CHAIN_L), goal: { x: CHAIN_END, y: 0 } };
+  const grid = geometry.grid;
+  if (!grid || grid.w !== CHAIN_L || grid.h !== 1) throw new Error('Chain grid is missing or invalid');
+  return grid;
 }
 
 export function stoneX(index: number, grid: GridSize): number {
@@ -86,15 +54,10 @@ export function stoneX(index: number, grid: GridSize): number {
 export interface CreekSkin {
   stoneDry: THREE.Color;
   stoneWet: THREE.Color;
-  stoneDeep: THREE.Color;
   stoneGlow: THREE.Color;
-  bed: THREE.Color;
-  bank: THREE.Color;
-  bankHigh: THREE.Color;
   reed: THREE.Color;
   meadow: THREE.Color;
   flower: THREE.Color;
-  bankTree: THREE.Color;
   bark: THREE.Color;
   moss: THREE.Color;
   blossom: THREE.Color;
@@ -103,8 +66,6 @@ export interface CreekSkin {
   waterSky: THREE.Color;
   waterCaustic: THREE.Color;
   motes: THREE.Color;
-  dragonfly: THREE.Color;
-  wing: THREE.Color;
 }
 
 export function creekSkin(palette: Palette, tokens: typeof TOKENS): CreekSkin {
@@ -118,15 +79,10 @@ export function creekSkin(palette: Palette, tokens: typeof TOKENS): CreekSkin {
   return {
     stoneDry: shade(blendTokens(palette.groundB, silver, 0.28), 0.46),
     stoneWet: shade(blendTokens(silver, palette.hemiGround, 0.52), 0.64),
-    stoneDeep: shade(blendTokens(palette.hemiGround, silver, 0.2), 0.72),
     stoneGlow: blendTokens(blossom, tokens.celebrationGold, 0.42),
-    bed: shade(blendTokens(palette.groundB, palette.groundA, 0.42), 0.56),
-    bank: shade(blendTokens(palette.groundA, palette.groundB, 0.38), 0.48),
-    bankHigh: shade(blendTokens(palette.groundB, leaf, 0.3), 0.44),
     reed: shade(blendTokens(leaf, palette.groundA, 0.34), 0.44),
     meadow: shade(blendTokens(palette.groundA, leaf, 0.3), 0.4),
     flower: shade(blendTokens(petalPink, white, 0.2), 0.3),
-    bankTree: shade(blendTokens(palette.groundA, leaf, 0.34), 0.46),
     bark: shade(blendTokens(palette.hemiGround, TOKENS.palettes.dusk.groundA, 0.4), 0.5),
     moss: shade(blendTokens(leaf, palette.groundA, 0.5), 0.52),
     blossom: shade(blendTokens(blossom, white, 0.1), 0.2),
@@ -135,25 +91,14 @@ export function creekSkin(palette: Palette, tokens: typeof TOKENS): CreekSkin {
     waterSky: shade(palette.skyTop, 0.46),
     waterCaustic: shade(blendTokens(palette.sun, teal, 0.34), 0.46),
     motes: blendTokens(blossom, white, 0.42),
-    dragonfly: shade(blendTokens(teal, palette.skyTop, 0.3), 0.62),
-    wing: shade(blendTokens(silver, white, 0.4), 0.24),
   };
 }
 
-export function makeCreekHeight(seed: number): (x: number, z: number) => number {
-  const span = BANK_Y - BED_Y;
+export function makeCreekHeight(_seed: number): (x: number, z: number) => number {
   return (x, z) => {
-    const wander = (valueNoise2(z * 0.075 + 3.1, 7.7, 64, seed) - 0.5) * 2 * MEANDER;
-    const s = smoothstep01((Math.abs(x) + wander - CREEK_HALF) / BANK_RISE);
-    const bend = smoothstep01((-z - 19) / 11);
-    const land = s > bend ? s : bend;
-    const far = smoothstep01((Math.abs(z) - 13) / 20) * 1.9 * land;
-    const base = BED_Y + span * land + far;
-    const w = smoothstep01(Math.abs(z) / 2.4) * 0.55 + land * 0.85;
-    if (w <= 0) return base;
-    const n1 = valueNoise2(x * 0.12 + 5.3, z * 0.12 + 11.7, 64, seed) - 0.5;
-    const n2 = valueNoise2(x * 0.3 + 2.1, z * 0.3 + 7.3, 64, seed ^ 0x51ed270b) - 0.5;
-    return base + w * (n1 * 0.9 + n2 * 0.34);
+    const shore = Math.abs(x - Math.sin(z * 0.018) * 10 - Math.sin(z * 0.043) * 2) + 1.8 * Math.exp(-z * z * 0.03);
+    const bank = smoothstep01((shore - 7.8) / 3.2);
+    return -1.05 + bank * (2.3 + Math.sin(x * 0.025) * Math.sin(z * 0.033) * 0.55 + Math.sin(x * 0.013 + z * 0.017) * 0.35);
   };
 }
 
@@ -170,17 +115,9 @@ export const CAP_R_TOP = 0.37;
 export const CAP_R_WAIST = 0.42;
 export const CAP_R_FOOT = 0.4;
 export const CAP_WAIST_FRAC = 0.42;
-export const CAP_HEIGHT = 0.5;
+export const CAP_HEIGHT = 1.1;
 export const CAP_SCALE_MIN = 0.9;
 export const CAP_SCALE_MAX = 1.08;
-
-export function capApothem(sides: number, xzScale: number): number {
-  return CAP_R_TOP * xzScale * Math.cos(Math.PI / Math.max(3, sides));
-}
-
-export const PLINTH_DROP = 0.06;
-export const PLINTH_HALF = (capApothem(5, CAP_SCALE_MIN) * 0.94) / Math.SQRT2;
-export const PLINTH_INSET = CELL / 2 - PLINTH_HALF;
 
 export function stoneCapGeometry(sides: number, height: number): THREE.BufferGeometry {
   const n = Math.max(5, sides);
@@ -336,444 +273,116 @@ function buildStoneCaps(
   };
 }
 
-export interface DragonfliesHandle {
-  mesh: THREE.InstancedMesh;
-  count: number;
-  setTime(t: number): void;
-  dispose(): void;
-}
-
-function dragonflyGeometry(skin: CreekSkin): THREE.BufferGeometry {
-  const parts: ColoredPart[] = [];
-  const body = new THREE.CylinderGeometry(0.012, 0.02, 0.24, 5, 1);
-  body.rotateX(Math.PI / 2);
-  parts.push({ geometry: body, color: skin.dragonfly });
-  const head = new THREE.IcosahedronGeometry(0.032, 0);
-  head.translate(0, 0, 0.13);
-  parts.push({ geometry: head, color: skin.dragonfly });
-  for (const sx of [-1, 1]) {
-    for (const oz of [0.05, -0.03]) {
-      const wing = new THREE.PlaneGeometry(0.19, 0.055);
-      wing.rotateY(Math.PI / 2);
-      wing.rotateZ(sx > 0 ? -0.22 : 0.22);
-      wing.translate(sx * 0.105, 0.018, oz);
-      parts.push({ geometry: wing, color: skin.wing });
-    }
-  }
-  return mergeColoredParts(parts, 'chainDragonfly');
-}
-
-function buildDragonflies(
-  skin: CreekSkin,
-  palette: Palette,
-  seed: number,
-): DragonfliesHandle {
-  const count = 3;
-  const geometry = dragonflyGeometry(skin);
-  const material = oakMaterial({
-    vertexColors: true,
-    flatShading: true,
-    side: THREE.DoubleSide,
-    roughness: 0.5,
-    metalness: 0.1,
-    rimColor: palette.skyHorizon,
-    rimStrength: 0.55,
-    toonSteps: 2,
-    toonSoftness: 0.4,
-    toonFloor: 0.4,
-    name: 'chainDragonflyMaterial',
-  });
-  const mesh = new THREE.InstancedMesh(geometry, material, Math.max(1, count));
-  mesh.name = 'chainDragonflies';
-  mesh.castShadow = false;
-  mesh.receiveShadow = false;
-  mesh.count = count;
-  mesh.visible = count > 0;
-  mesh.frustumCulled = false;
-
-  const phase = new Float32Array(Math.max(1, count) * 4);
-  for (let i = 0; i < count; i++) {
-    phase[i * 4] = hash2f(i, 11, seed) * Math.PI * 2;
-    phase[i * 4 + 1] = 0.42 + hash2f(i, 12, seed) * 0.36;
-    phase[i * 4 + 2] = (hash2f(i, 13, seed) - 0.5) * 2;
-    phase[i * 4 + 3] = 0.72 + hash2f(i, 14, seed) * 0.5;
-  }
-
-  const matrix = new THREE.Matrix4();
-  const position = new THREE.Vector3();
-  const quaternion = new THREE.Quaternion();
-  const euler = new THREE.Euler(0, 0, 0, 'YXZ');
-  const scale = new THREE.Vector3(1, 1, 1);
-
-  return {
-    mesh,
-    count,
-    setTime(t) {
-      for (let i = 0; i < count; i++) {
-        const p0 = phase[i * 4] ?? 0;
-        const rate = phase[i * 4 + 1] ?? 0.5;
-        const lane = phase[i * 4 + 2] ?? 0;
-        const size = phase[i * 4 + 3] ?? 1;
-        const a = t * rate + p0;
-        const x = Math.sin(a) * 6.4 + Math.sin(a * 2.3 + p0) * 1.1;
-        const z = lane * 2.1 + Math.cos(a * 1.7 + p0) * 1.35;
-        const y = 0.62 + Math.sin(a * 2.9 + p0) * 0.22;
-        const dx = Math.cos(a) * 6.4 * rate + Math.cos(a * 2.3 + p0) * 2.53 * rate;
-        const dz = -Math.sin(a * 1.7 + p0) * 2.295 * rate;
-        position.set(x, y, z);
-        euler.set(Math.sin(a * 4.1) * 0.12, Math.atan2(dx, dz), Math.sin(a * 5.3 + p0) * 0.25);
-        quaternion.setFromEuler(euler);
-        scale.setScalar(size);
-        matrix.compose(position, quaternion, scale);
-        mesh.setMatrixAt(i, matrix);
-      }
-      mesh.instanceMatrix.needsUpdate = true;
-    },
-    dispose() {
-      mesh.dispose();
-      geometry.dispose();
-      material.dispose();
-      mesh.removeFromParent();
-    },
-  };
-}
-
-export function excludeCrossing(grid: GridSize, halfZ: number, margin: number): ExcludeFn {
-  const halfX = ((grid.w - 1) / 2) * CELL + 0.5 + margin;
-  return (x, z) => Math.abs(z) <= halfZ && Math.abs(x) <= halfX;
-}
-
-export function excludeStones(grid: GridSize, radius: number): ExcludeFn {
-  const r2 = radius * radius;
-  const ox = (grid.w - 1) / 2;
-  return (x, z) => {
-    const i = Math.round(x / CELL + ox);
-    if (i < 0 || i > grid.w - 1) return false;
-    const dx = x - (i - ox) * CELL;
-    return dx * dx + z * z < r2;
-  };
-}
-
-export function excludeCameraWedge(halfX: number, halfZ: number): ExcludeFn {
-  const cx = Math.sin(CAMERA_AZIMUTH) * CAMERA_STANDOFF;
-  const cz = Math.cos(CAMERA_AZIMUTH) * CAMERA_STANDOFF;
-  return (x, z) => Math.abs(x - cx) <= halfX && Math.abs(z - cz) <= halfZ;
-}
-
 export interface WorldHandle extends WorldCore {
   sky: SkyHandle;
   rig: LightRig;
-  terrain: TerrainHandle;
-  water: WaterHandle;
-  field: CellFieldHandle;
+  terrain: { sampleHeight(x: number, z: number): number };
   caps: StoneCapsHandle;
   petalMotes: AmbientParticlesHandle;
+  setView(coverage: ViewCoverage, camera: THREE.PerspectiveCamera): void;
 }
 
 export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeometry): WorldHandle {
-  const palette: Palette = ctx.tokens.palettes.afternoon;
+  const palette = ctx.tokens.palettes.afternoon;
   const skin = creekSkin(palette, ctx.tokens);
-  const w = makeWorld('sixteenStonesWorld');
-
-  const sky = skyFromPalette(palette, 'afternoon', {
-    sunDir: SUN_DIR,
-    sunSize: 0.04,
-    sunHdr: 5.2,
-    sunGlow: 0.26,
-    sunGlowPower: 26,
-    topSpread: 0.68,
-    bottomSpread: 0.46,
-    radius: 340,
-  });
+  const w = makeWorld('riverValley');
+  const sky = w.time(w.own(skyFromPalette(palette, 'afternoon', { sunDir: [-0.46, 0.62, -0.64], sunGlowPower: 24, topSpread: 0.75 })));
   w.add(sky.mesh);
-  w.own(sky);
-  w.time({ setTime: (t) => sky.setTime(t) });
-
-  const rig = makeLightRig(palette, {
-    sunDir: sky.sunDirection,
-    pointCount: 3,
-    pointDistance: 7.5,
-    sunDistanceScale: 2.1,
-  });
+  const rig = w.own(makeLightRig(palette, { sunDir: sky.sunDirection, pointCount: 3, pointDistance: 8 }));
+  rig.setShadowFocus({ x: 0, y: 0.5, z: 0 }, 15);
   w.add(rig.group);
-  w.own(rig);
-  rig.setShadowFocus({ x: 0, y: 0.1, z: 0 }, SHADOW_RADIUS);
-
-  applyFog(scene, palette, FOG_EXTENT);
-
-  const terrain = makeTerrain({
-    size: TERRAIN_SIZE,
-    segments: TERRAIN_SEGMENTS,
-    seed: ctx.seed,
-    heightFn: makeCreekHeight(ctx.seed),
-    jitter: 0,
-    colorNoise: 0.05,
-    slopeColor: skin.bank,
-    slopeStrength: 0.55,
-    slopeSharpness: 2.2,
-    colorRamp: [
-      { t: 0, color: skin.bed },
-      { t: 0.22, color: blendTokens(skin.bed, skin.bank, 0.55) },
-      { t: 0.34, color: skin.bank },
-      { t: 0.52, color: skin.bankHigh },
-      { t: 1, color: blendTokens(skin.bankHigh, palette.hemiSky, 0.28) },
-    ],
-    materialOptions: {
-      rimColor: palette.skyHorizon,
-      rimStrength: 0.16,
-      toonSteps: 3,
-      toonSoftness: 0.3,
-      toonFloor: 0.24,
-    },
-    receiveShadow: true,
-    castShadow: false,
-    name: 'creekBed',
-  });
-  w.add(terrain.mesh);
-  w.own(terrain);
-
-  const water = makeWater({
-    size: [TERRAIN_SIZE[0] + 8, TERRAIN_SIZE[1] + 10],
-    palette,
-    segments: 128,
-    level: WATER_LEVEL,
-    shallow: skin.waterShallow,
-    deep: skin.waterDeep,
-    sky: skin.waterSky,
-    caustic: skin.waterCaustic,
-    amplitude: 0.024,
-    waveScale: 1.45,
-    speed: 0.8,
-    fresnel: 0.24,
-    caustics: 0.14,
-    depthFalloff: 9,
-    opacity: 0.8,
-    sunDir: sky.sunDirection,
-    name: 'creekWater',
-  });
+  const fog = new THREE.FogExp2(palette.fog, 0.005);
+  scene.fog = fog;
+  const heightAt = makeCreekHeight(ctx.seed);
+  const groundHeight = 'float shore = abs(p.x-sin(p.y*.018)*10.-sin(p.y*.043)*2.) + 1.8*exp(-p.y*p.y*.03); float bank = smoothstep(7.8,11.,shore); return -1.05 + bank*(2.3 + sin(p.x*.025)*sin(p.y*.033)*.55 + sin(p.x*.013+p.y*.017)*.35);';
+  const floor = w.time(w.own(makeContinuousSurface({
+    name: 'floweringValley', colorA: 0x7b965f, colorB: 0x385e4d, segments: 128,
+    height: groundHeight,
+    detail: 'color = mix(color,vec3(.58,.59,.3),.18*landNoise(p.xz*.08));',
+  })));
+  w.add(floor.mesh);
+  const water = w.time(w.own(makeWater({
+    size: 2, segments: 2, palette, level: WATER_LEVEL,
+    shallow: skin.waterShallow, deep: skin.waterDeep, sky: skin.waterSky, caustic: skin.waterCaustic,
+    amplitude: 0.018, waveScale: 1.15, speed: 0.6, fresnel: 0.24, caustics: 0.07,
+    depthFalloff: 1.1, opacity: 0.92, sunDir: rig.sunDirection, name: 'creekWater',
+  })));
   water.setColors(skin.waterShallow, skin.waterDeep);
   w.add(water.mesh);
-  w.own(water);
-  w.time({ setTime: (t) => water.setTime(t) });
-
-  const field = buildCellField(
-    grid,
-    {
-      floorColor: skin.stoneDeep,
-      wallColor: skin.stoneDeep,
-      floorInset: PLINTH_INSET,
-      floorThickness: 0.9,
-      jitter: 0.12,
-      rimColor: palette.skyHorizon,
-      rimStrength: 0.12,
-      seed: ctx.seed,
-      name: 'stonePlinths',
-    },
-  );
-  field.group.position.y = -PLINTH_DROP;
-  w.add(field.group);
-  w.own(field);
-  w.time({ setTime: (t) => field.setTime(t) });
-
-  const caps = buildStoneCaps(grid, skin, palette, ctx.seed);
+  water.material.fragmentShader = `float creekBed(vec2 p) {${groundHeight}}\n${water.material.fragmentShader}`;
+  const caps = w.own(buildStoneCaps(grid, skin, palette, ctx.seed));
   w.add(caps.mesh);
-  w.own(caps);
-
-  const offCrossing = excludeAny(
-    excludeCrossing(grid, 1.15, 0.6),
-    excludeStones(grid, 0.78),
-    excludeCameraWedge(4.6, 4.6),
-  );
-  const heightAt = (x: number, z: number): number => terrain.sampleHeight(x, z);
-
-  const reeds: VegetationHandle[] = [];
-  for (const side of [-1, 1] as const) {
-    const handle = scatterGrass({
-      count: 900,
-      area: { x: side * 9.4, z: 0, halfX: 2.1, halfZ: 26 },
-      seed: (ctx.seed ^ 0x4ee1) + (side > 0 ? 977 : 0),
-      exclude: offCrossing,
-      heightAt,
-      color: skin.reed,
-      scale: [0.85, 1.6],
-      stretch: [1.2, 2.2],
-      hueJitter: 0.26,
-      wind: 0.05,
-      windFrequency: 1.15,
-      rimColor: palette.skyHorizon,
-      rimStrength: 0.4,
-      name: `creekReeds${side > 0 ? 'Far' : 'Near'}`,
-    });
-    w.add(handle.group);
-    w.time(w.own(handle));
-    reeds.push(handle);
-  }
-
-  const shallowTufts = scatterGrass({
-    count: 220,
-    area: { x: -5.6, z: 6.8, halfX: 4.2, halfZ: 4.2 },
-    seed: ctx.seed ^ 0x1c93,
-    exclude: excludeAny(excludeCrossing(grid, 2.2, 0.6), excludeCameraWedge(3.4, 3.4)),
-    heightAt,
-    color: skin.reed,
-    scale: [0.85, 1.35],
-    stretch: [1.9, 2.5],
-    hueJitter: 0.28,
-    wind: 0.055,
-    windFrequency: 1.25,
-    rimColor: palette.skyHorizon,
-    rimStrength: 0.42,
-    name: 'shallowReeds',
+  const vegetationMaterials: OakMaterial[] = [];
+  const trees = [
+    { geometry: broadleafTreeGeometry(0), trunkVertices: 48, scale: 1.4, leaf: 0x8fad79, name: 'riverBroadleaves' },
+    { geometry: coniferTreeGeometry(0), trunkVertices: 60, scale: 1.6, leaf: 0x6c9780, name: 'riverConifers' },
+  ].map((spec, index) => {
+    const geometry = w.own(spec.geometry);
+    const colors = geometry.getAttribute('color');
+    const bark = new THREE.Color(0x87644c);
+    const leaf = new THREE.Color(spec.leaf);
+    for (let i = 0; i < colors.count; i++) {
+      const tint = i < spec.trunkVertices ? bark : leaf;
+      const shade = colors.getX(i);
+      colors.setXYZ(i, tint.r * shade, tint.g * shade, tint.b * shade);
+    }
+    const material = w.own(oakMaterial({ color: 0xffffff, vertexColors: true, roughness: 0.85, flatShading: true, wind: { amplitude: 0.025, frequency: 0.85, height: 2 }, rimStrength: 0.2 }));
+    vegetationMaterials.push(material);
+    const bank = w.own(makeSceneryBank({
+      name: spec.name, seed: ctx.seed + index * 731, tileSize: 32, perTile: 16,
+      geometry, material, colorA: 0xd6dfcf, colorB: 0xffffff,
+      fill(tx, tz, rng, write) {
+        for (let i = 0; i < 16; i++) {
+          const x = (tx + rng()) * 32;
+          const z = (tz + rng()) * 32;
+          const y = heightAt(x, z);
+          if (y < 0.6 || x * x / 289 + z * z / 196 < 1) continue;
+          write(x, y, z, rng() * 6.28, spec.scale * (0.8 + rng() * 0.6), 0.9 + rng() * 0.4, rng());
+        }
+      },
+    }));
+    w.add(bank.mesh);
+    return bank;
   });
-  w.add(shallowTufts.group);
-  w.time(w.own(shallowTufts));
-  reeds.push(shallowTufts);
-
-  const meadow = scatterGrass({
-    count: 1100,
-    area: { x: 0, z: 0, halfX: 24, halfZ: 30 },
-    seed: ctx.seed ^ 0x27a1,
-    exclude: excludeAny(offCrossing, (x) => Math.abs(x) < 10.4),
-    heightAt,
-    color: skin.meadow,
-    scale: [0.32, 0.72],
-    stretch: [0.8, 1.5],
-    hueJitter: 0.24,
-    wind: 0.045,
-    windFrequency: 1.5,
-    rimColor: palette.skyHorizon,
-    rimStrength: 0.32,
-    name: 'bankMeadow',
+  const groundCover = [
+    { geometry: grassClumpGeometry(3), tile: 6, count: 36, scale: 0.9, colorA: skin.reed, colorB: skin.meadow, name: 'riverReeds' },
+    { geometry: flowerGeometry(5), tile: 8, count: 18, scale: 0.8, colorA: skin.flower, colorB: 0xe6dbae, name: 'riverbankFlowers' },
+  ].map((spec, index) => {
+    const geometry = w.own(spec.geometry);
+    const material = w.own(oakMaterial({ color: 0xffffff, vertexColors: true, side: THREE.DoubleSide, roughness: 0.8, wind: { amplitude: 0.045, frequency: 1.3, height: 0.5 }, rimStrength: 0.24 }));
+    vegetationMaterials.push(material);
+    const bank = w.own(makeSceneryBank({
+      name: spec.name, seed: ctx.seed ^ (0x725a + index), tileSize: spec.tile, perTile: spec.count,
+      geometry, material, colorA: spec.colorA, colorB: spec.colorB,
+      fill(tx, tz, rng, write) {
+        for (let i = 0; i < spec.count; i++) {
+          const x = (tx + rng()) * spec.tile;
+          const z = (tz + rng()) * spec.tile;
+          const y = heightAt(x, z);
+          if (y < (index === 0 ? -0.3 : 0) || (Math.abs(x) < 12 && Math.abs(z) < 2)) continue;
+          write(x, y, z, rng() * 6.28, spec.scale * (0.65 + rng() * 0.65), index === 0 && Math.abs(x) < 11 ? 1.8 : 1, rng());
+        }
+      },
+    }));
+    w.add(bank.mesh);
+    return bank;
   });
-  w.add(meadow.group);
-  w.time(w.own(meadow));
-
-  const flowers = scatterFlowers({
-    count: 420,
-    area: { x: 0, z: 0, halfX: 22, halfZ: 22 },
-    seed: ctx.seed ^ 0x5b10,
-    exclude: excludeAny(offCrossing, (x) => Math.abs(x) < 10.0),
-    heightAt,
-    color: skin.flower,
-    scale: [0.6, 1.15],
-    stretch: [0.9, 1.5],
-    hueJitter: 0.26,
-    wind: 0.035,
-    windFrequency: 1.6,
-    rimColor: palette.skyHorizon,
-    rimStrength: 0.34,
-    name: 'bankFlowers',
-  });
-  w.add(flowers.group);
-  w.time(w.own(flowers));
-
-  const rocks = scatterRocks({
-    count: 260,
-    area: { x: 0, z: 0, halfX: 21, halfZ: 20 },
-    seed: ctx.seed ^ 0x3f77,
-    exclude: excludeAny(excludeStones(grid, 0.95), excludeCameraWedge(2.6, 2.6)),
-    heightAt,
-    color: shade(blendTokens(skin.stoneWet, skin.bed, 0.3), 0.1),
-    scale: [0.14, 0.5],
-    stretch: [0.42, 0.86],
-    hueJitter: 0.3,
-    rimColor: palette.skyHorizon,
-    rimStrength: 0.26,
-    castShadow: false,
-    name: 'creekRocks',
-  });
-  w.add(rocks.group);
-  w.time(w.own(rocks));
-
-  const bankTrees = scatterTrees({
-    archetypes: ['broadleaf', 'conifer'],
-    count: 100,
-    area: { x: 0, z: 0, halfX: 24, halfZ: 34 },
-    seed: ctx.seed ^ 0x1a70,
-    exclude: excludeAny(
-      (x, z) => Math.abs(x) < 11.6 || (Math.abs(z) < 13 && Math.abs(x) < 16),
-      excludeCameraWedge(7.5, 7.5),
-    ),
-    heightAt,
-    maxSlope: 0.62,
-    color: skin.bankTree,
-    scale: [1.25, 2.4],
-    stretch: [1.0, 1.6],
-    hueJitter: 0.24,
-    wind: 0.028,
-    windFrequency: 0.85,
-    rimColor: palette.skyHorizon,
-    rimStrength: 0.3,
-    castShadow: true,
-    name: 'bankTrees',
-  });
-  w.add(bankTrees.group);
-  w.time(w.own(bankTrees));
-
-  const pollen = makeAmbientParticles({
-    preset: 'pollen',
-    count: 240,
-    bounds: { x: 0, y: 0.95, z: 0, halfX: 11, halfY: 1.0, halfZ: 7 },
-    seed: ctx.seed ^ 0x7d21,
-    color: blendTokens(palette.sun, skin.motes, 0.3),
-    size: 0.8,
-    intensity: 1.15,
-    opacity: 0.36,
-    rise: 0.06,
-    swirl: 0.3,
-    name: 'creekPollen',
-  });
-  w.add(pollen.points);
-  w.size(w.time(w.own(pollen)));
-
-  const petalMotes = makeAmbientParticles({
-    preset: 'snow',
-    count: 220,
-    bounds: { x: stoneX(CHAIN_END, grid) - 0.4, y: 1.5, z: 0, halfX: 2.4, halfY: 1.5, halfZ: 2.1 },
-    seed: ctx.seed ^ 0x6c31,
-    color: skin.blossom,
-    size: 1.25,
-    intensity: 1.5,
-    opacity: 0.78,
-    rise: -0.22,
-    swirl: 0.4,
-    name: 'blossomPetalMotes',
-  });
+  const petalMotes = w.size(w.time(w.own(makeAmbientParticles({
+    preset: 'pollen', count: 120, bounds: { x: stoneX(grid.w - 1, grid), y: 2, halfX: 3.2, halfY: 2, halfZ: 3.2 },
+    seed: ctx.seed ^ 0x1aa9, color: skin.motes, size: 1.8, intensity: 1.2, rise: -0.08, name: 'blossomPetals',
+  }))));
   petalMotes.setDensity(0);
   w.add(petalMotes.points);
-  w.size(w.time(w.own(petalMotes)));
-
-  const haze = makeMistPlanes({
-    size: [50, 70],
-    color: blendTokens(palette.fog, palette.sun, 0.25),
-    seed: ctx.seed ^ 0x2c1b,
-    layers: 2,
-    baseY: 0.02,
-    spread: 0.7,
-    opacity: 0.06,
-    speed: 0.008,
-    scale: 3.2,
-    nearFade: 11,
-    name: 'creekHaze',
-  });
-  w.add(haze.group);
-  w.time(w.own(haze));
-
-  const dragonflies = buildDragonflies(skin, palette, ctx.seed);
-  w.add(dragonflies.mesh);
-  w.time(w.own(dragonflies));
-
   return w.seal({
-    sky,
-    rig,
-    terrain,
-    water,
-    field,
-    caps,
-    petalMotes,
-  }, {
-    drop: () => {
-      reeds.length = 0;
+    sky, rig, terrain: { sampleHeight: heightAt }, caps, petalMotes,
+    setView(coverage: ViewCoverage, camera: THREE.PerspectiveCamera) {
+      floor.setView(coverage);
+      extendWater(water.mesh, coverage, 2, 2, '-0.17 - creekBed(vWorld.xz)');
+      for (const bank of trees) bank.setView(coverage);
+      for (const bank of groundCover) bank.setView(coverage);
+      fog.density = 2.8 / coverage.far;
+      sky.mesh.position.copy(camera.position);
+      sky.mesh.scale.setScalar(coverage.far * 0.85);
     },
-  });
+  }, { time(t) { for (const material of vegetationMaterials) oakUniforms(material)?.setTime(t); } });
 }

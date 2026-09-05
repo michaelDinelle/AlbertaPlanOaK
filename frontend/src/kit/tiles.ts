@@ -9,6 +9,7 @@ export type TileWriter = (
   scale: number,
   stretch: number,
   mix01: number,
+  normal?: THREE.Vector3,
 ) => void;
 
 export type TileFill = (tileX: number, tileZ: number, rng: Rng, write: TileWriter) => void;
@@ -57,6 +58,8 @@ export function makeTileBank(opts: TileBankOptions): TileBankHandle {
   const matrix = new THREE.Matrix4();
   const position = new THREE.Vector3();
   const quaternion = new THREE.Quaternion();
+  const groundRotation = new THREE.Quaternion();
+  const up = new THREE.Vector3(0, 1, 0);
   const euler = new THREE.Euler();
   const scaleVec = new THREE.Vector3();
   const colorA = new THREE.Color(opts.colorA);
@@ -69,11 +72,12 @@ export function makeTileBank(opts: TileBankOptions): TileBankHandle {
   let cursor = 0;
   let limit = 0;
 
-  const write: TileWriter = (x, y, z, yaw, scale, stretch, mix01) => {
+  const write: TileWriter = (x, y, z, yaw, scale, stretch, mix01, normal) => {
     if (cursor >= limit) return;
     position.set(x, y, z);
     euler.set(0, yaw, 0);
     quaternion.setFromEuler(euler);
+    if (normal) quaternion.premultiply(groundRotation.setFromUnitVectors(up, normal));
     scaleVec.set(scale, scale * stretch, scale);
     matrix.compose(position, quaternion, scaleVec);
     mesh.setMatrixAt(cursor, matrix);

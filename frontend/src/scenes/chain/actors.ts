@@ -1,6 +1,6 @@
 import { emissiveMaterial, oakMaterial, oakUniforms, setEmissiveIntensity } from '@kit/materials';
 import type { EmissiveMaterial, OakMaterial } from '@kit/materials';
-import { blendTokens, clamp01, smoothstep01 } from '@kit/mix';
+import { blendTokens, clamp01 } from '@kit/mix';
 import { mergeColoredParts, type ColoredPart } from '@kit/parts';
 import { hash2f } from '@kit/rng';
 import type { Palette } from '@kit/tokens';
@@ -157,12 +157,12 @@ export function buildBlossomTree(opts: BlossomTreeOptions): BlossomTreeHandle {
   barkMesh.receiveShadow = true;
   crown.add(barkMesh);
 
-  const perTwig = 6;
+  const perTwig = 16;
   const twigs = limbs.filter((l) => l.twig);
   const blossomCount = twigs.length * perTwig;
   const blossomGeometry = blossomClusterGeometry();
   const blossomMaterial: OakMaterial = oakMaterial({
-    color: blossom,
+    color: new THREE.Color(blossom).lerp(new THREE.Color(0xffc7d8), 0.36),
     vertexColors: true,
     flatShading: true,
     side: THREE.DoubleSide,
@@ -184,14 +184,26 @@ export function buildBlossomTree(opts: BlossomTreeOptions): BlossomTreeHandle {
   blossoms.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(Math.max(1, blossomCount) * 3), 3);
   crown.add(blossoms);
 
-  const anchors = new Float32Array(Math.max(1, blossomCount) * 3);
-  const quats = new Float32Array(Math.max(1, blossomCount) * 4);
-  const sizes = new Float32Array(Math.max(1, blossomCount));
-  const phases = new Float32Array(Math.max(1, blossomCount));
+  const bloomUniform = { value: 0 };
+  const timeUniform = { value: 0 };
+  const compile = blossomMaterial.onBeforeCompile;
+  const cache = blossomMaterial.customProgramCacheKey();
+  blossomMaterial.onBeforeCompile = (shader, renderer) => {
+    compile.call(blossomMaterial, shader, renderer);
+    shader.uniforms.uBlossomBloom = bloomUniform;
+    shader.uniforms.uBlossomTime = timeUniform;
+    shader.vertexShader = `uniform float uBlossomBloom;\nuniform float uBlossomTime;\n${shader.vertexShader}`.replace('#include <begin_vertex>', `#include <begin_vertex>
+float phase = dot(instanceMatrix[3].xyz, vec3(1.7,3.1,2.3));
+transformed *= .88 + .3*uBlossomBloom + .045*sin(uBlossomTime*1.35+phase);`);
+  };
+  blossomMaterial.customProgramCacheKey = () => `${cache}:blossomBloom`;
   {
-    const q = new THREE.Quaternion();
-    const e = new THREE.Euler(0, 0, 0, 'YXZ');
-    const c = new THREE.Color();
+    const matrix = new THREE.Matrix4();
+    const quaternion = new THREE.Quaternion();
+    const euler = new THREE.Euler();
+    const position = new THREE.Vector3();
+    const scale = new THREE.Vector3();
+    const color = new THREE.Color();
     let k = 0;
     for (let t = 0; t < twigs.length; t++) {
       const twig = twigs[t] as Limb;
@@ -199,24 +211,18 @@ export function buildBlossomTree(opts: BlossomTreeOptions): BlossomTreeHandle {
         const h0 = hash2f(t, j, 0x1f83d9ab);
         const h1 = hash2f(t, j + 64, 0x5bd1e995);
         const h2 = hash2f(t, j + 128, 0x27d4eb2f);
-        const u = 0.28 + ((j + h0) / perTwig) * 0.72;
-        const p = lerp3(twig.a, twig.b, u);
-        anchors[k * 3] = p[0] + (h1 - 0.5) * 0.1;
-        anchors[k * 3 + 1] = p[1] + (h2 - 0.5) * 0.09;
-        anchors[k * 3 + 2] = p[2] + (h0 - 0.5) * 0.1;
-        e.set((h1 - 0.5) * 1.5, h0 * Math.PI * 2, (h2 - 0.5) * 1.5);
-        q.setFromEuler(e);
-        quats[k * 4] = q.x;
-        quats[k * 4 + 1] = q.y;
-        quats[k * 4 + 2] = q.z;
-        quats[k * 4 + 3] = q.w;
-        sizes[k] = 0.9 + h2 * 0.7;
-        phases[k] = clamp01(u * 0.72 + h0 * 0.28);
-        c.setRGB(0.9 + h0 * 0.2, 0.9 + h1 * 0.16, 0.92 + h2 * 0.16);
-        blossoms.setColorAt(k, c);
-        k++;
+        const point = lerp3(twig.a, twig.b, 0.28 + ((j + h0) / perTwig) * 0.72);
+        position.set(point[0] + (h0 - 0.5) * 0.65, point[1] + (h1 - 0.5) * 0.3, point[2] + (h2 - 0.5) * 0.65);
+        euler.set((h1 - 0.5) * 1.5, h0 * Math.PI * 2, (h2 - 0.5) * 1.5);
+        quaternion.setFromEuler(euler);
+        scale.setScalar(1.45 + h2 * 0.9);
+        matrix.compose(position, quaternion, scale);
+        blossoms.setMatrixAt(k, matrix);
+        color.setRGB(0.9 + h0 * 0.2, 0.9 + h1 * 0.16, 0.92 + h2 * 0.16);
+        blossoms.setColorAt(k++, color);
       }
     }
+    blossoms.instanceMatrix.needsUpdate = true;
     if (blossoms.instanceColor) blossoms.instanceColor.needsUpdate = true;
   }
 
@@ -227,10 +233,6 @@ export function buildBlossomTree(opts: BlossomTreeOptions): BlossomTreeHandle {
   emberMesh.position.set(FORK[0], FORK[1] + 0.08, FORK[2]);
   crown.add(emberMesh);
 
-  const matrix = new THREE.Matrix4();
-  const position = new THREE.Vector3();
-  const quaternion = new THREE.Quaternion();
-  const scale = new THREE.Vector3(1, 1, 1);
   const crownHeight = blossomTreeCrownHeight();
   let bloom = 0;
 
@@ -242,20 +244,8 @@ export function buildBlossomTree(opts: BlossomTreeOptions): BlossomTreeHandle {
 
     setState(bloom01, time) {
       bloom = clamp01(bloom01);
-      if (blossomCount > 0) {
-        for (let i = 0; i < blossomCount; i++) {
-          const phase = phases[i] ?? 0;
-          const open = clamp01((bloom - phase * 0.42) / 0.58);
-          const eased = open * open * (3 - 2 * open);
-          const breath = 1 + 0.07 * Math.sin(time * 1.35 + phase * 9.4);
-          position.set(anchors[i * 3] ?? 0, anchors[i * 3 + 1] ?? 0, anchors[i * 3 + 2] ?? 0);
-          quaternion.set(quats[i * 4] ?? 0, quats[i * 4 + 1] ?? 0, quats[i * 4 + 2] ?? 0, quats[i * 4 + 3] ?? 1);
-          scale.setScalar((sizes[i] ?? 1) * eased * breath);
-          matrix.compose(position, quaternion, scale);
-          blossoms.setMatrixAt(i, matrix);
-        }
-        blossoms.instanceMatrix.needsUpdate = true;
-      }
+      bloomUniform.value = bloom;
+      timeUniform.value = time;
       setEmissiveIntensity(emberMaterial, 0.72 * bloom * bloom);
       emberMesh.scale.setScalar(0.42 + 0.44 * bloom);
     },
@@ -284,9 +274,7 @@ export function buildBlossomTree(opts: BlossomTreeOptions): BlossomTreeHandle {
 export function blossomClusterGeometry(): THREE.BufferGeometry {
   const petals = 5;
   const heads: readonly { at: Vec3; tilt: number; yaw: number; scale: number }[] =
-    false
-      ? [{ at: [0, 0, 0], tilt: 0, yaw: 0, scale: 1.15 }]
-      : [
+    [
           { at: [0, 0, 0], tilt: 0, yaw: 0, scale: 1 },
           { at: [0.072, 0.026, -0.03], tilt: 0.5, yaw: 1.1, scale: 0.86 },
           { at: [-0.052, 0.016, 0.062], tilt: -0.42, yaw: 2.4, scale: 0.78 },
@@ -368,91 +356,53 @@ export interface PetalFerryHandle {
 }
 
 export function buildPetalFerry(opts: PetalFerryOptions): PetalFerryHandle {
-  const { palette, blossom, from, to } = opts;
   const count = 38;
   const geometry = petalGeometry();
-  const material: OakMaterial = oakMaterial({
-    color: blossom,
-    vertexColors: true,
-    flatShading: true,
-    side: THREE.DoubleSide,
-    roughness: 0.66,
-    rimColor: blendTokens(blossom, palette.sun, 0.55),
-    rimStrength: 0.6,
-    toonSteps: 2,
-    toonSoftness: 0.4,
-    toonFloor: 0.45,
-    name: 'petalFerryMaterial',
-  });
-  const mesh = new THREE.InstancedMesh(geometry, material, Math.max(1, count));
-  mesh.name = opts.name ?? 'petalFerry';
-  mesh.castShadow = false;
-  mesh.receiveShadow = false;
-  mesh.frustumCulled = false;
-  mesh.count = count;
-  mesh.visible = count > 0;
-
-  const matrix = new THREE.Matrix4();
-  const position = new THREE.Vector3();
-  const quaternion = new THREE.Quaternion();
-  const euler = new THREE.Euler(0, 0, 0, 'YXZ');
-  const scale = new THREE.Vector3(0, 0, 0);
-  const span = Math.max(0.05, FERRY_SECONDS - FERRY_STAGGER);
-  let firedAt = -Infinity;
-
-  const hideAll = (): void => {
-    scale.set(0, 0, 0);
-    quaternion.set(0, 0, 0, 1);
-    position.set(from[0], from[1], from[2]);
-    matrix.compose(position, quaternion, scale);
-    for (let i = 0; i < count; i++) mesh.setMatrixAt(i, matrix);
-    mesh.instanceMatrix.needsUpdate = true;
+  geometry.setAttribute('aPetal', new THREE.InstancedBufferAttribute(Float32Array.from({ length: count }, (_, i) => i), 1));
+  const material = oakMaterial({ color: opts.blossom, vertexColors: true, side: THREE.DoubleSide, roughness: 0.66, rimStrength: 0.35 });
+  const ageUniform = { value: -1 };
+  const compile = material.onBeforeCompile;
+  const cache = material.customProgramCacheKey();
+  material.onBeforeCompile = (shader, renderer) => {
+    compile.call(material, shader, renderer);
+    shader.uniforms.uPetalAge = ageUniform;
+    shader.uniforms.uPetalFrom = { value: new THREE.Vector3(...opts.from) };
+    shader.uniforms.uPetalTo = { value: new THREE.Vector3(...opts.to) };
+    shader.vertexShader = `attribute float aPetal;\nuniform float uPetalAge;\nuniform vec3 uPetalFrom;\nuniform vec3 uPetalTo;\n${shader.vertexShader}`.replace('#include <begin_vertex>', `#include <begin_vertex>
+float u = aPetal/37.;
+float h = fract(sin(aPetal*12.9898)*43758.5453);
+float t = clamp((uPetalAge-u*.42)/1.13,0.,1.);
+float live = smoothstep(0.,.14,t)*(1.-smoothstep(.74,1.,t));
+float a = t*(5.5+h*4.);
+transformed = mat3(cos(a),sin(a),0.,-sin(a),cos(a),0.,0.,0.,1.)*transformed*live*(.75+h*.6);
+vec3 point = mix(uPetalFrom,uPetalTo,t);
+point.x = mix(uPetalFrom.x,uPetalTo.x,pow(t,.82));
+point.y += sin(t*3.14159)*(.42+h*.5);
+point.z += sin(t*4.4+u*6.28)*(.3+.7*h)*(.25+.75*t);
+transformed += point;`);
   };
-  hideAll();
-
+  material.customProgramCacheKey = () => `${cache}:returningPetals`;
+  const mesh = new THREE.InstancedMesh(geometry, material, count);
+  mesh.name = opts.name ?? 'petalFerry';
+  mesh.frustumCulled = false;
+  mesh.visible = false;
+  const matrix = new THREE.Matrix4();
+  for (let i = 0; i < count; i++) mesh.setMatrixAt(i, matrix);
+  mesh.instanceMatrix.needsUpdate = true;
+  let firedAt = -Infinity;
   return {
     mesh,
     count,
-    fire(now) {
-      firedAt = now;
-    },
-    clear() {
-      firedAt = -Infinity;
-      hideAll();
-    },
+    fire(now) { firedAt = now; },
+    clear() { firedAt = -Infinity; mesh.visible = false; },
     progress(time) {
       const age = time - firedAt;
-      if (!(age >= 0) || age > FERRY_SECONDS) return 0;
-      return 1 - age / FERRY_SECONDS;
+      return age >= 0 && age <= FERRY_SECONDS ? 1 - age / FERRY_SECONDS : 0;
     },
     setTime(time) {
       const age = time - firedAt;
-      if (!(age >= 0) || age > FERRY_SECONDS + 0.001) {
-        hideAll();
-        return;
-      }
-      for (let i = 0; i < count; i++) {
-        const u = count > 1 ? i / (count - 1) : 0;
-        const h = hash2f(i, 7, 0x9e3779b9);
-        const start = u * FERRY_STAGGER;
-        const raw = (age - start) / span;
-        const t = raw <= 0 ? 0 : raw >= 1 ? 1 : raw;
-        const live = raw > 0 && raw < 1 ? 1 : 0;
-        const e = Math.pow(t, 0.82);
-        const arc = Math.sin(Math.PI * t);
-        const px = from[0] + (to[0] - from[0]) * e;
-        const py = from[1] + (to[1] - from[1]) * t + arc * (0.42 + h * 0.5) + Math.sin(t * 9 + h * 6.28) * 0.05;
-        const pz = from[2] + (to[2] - from[2]) * t + Math.sin(t * 4.4 + u * 6.28) * (0.3 + 0.7 * h) * (0.25 + 0.75 * t);
-        const fadeIn = smoothstep01(t / 0.14);
-        const fadeOut = 1 - smoothstep01((t - 0.74) / 0.26);
-        position.set(px, py, pz);
-        euler.set(t * (5.5 + h * 4), t * (4.2 + h * 3), t * (6.1 + h * 2));
-        quaternion.setFromEuler(euler);
-        scale.setScalar(live * (0.75 + h * 0.6) * fadeIn * fadeOut);
-        matrix.compose(position, quaternion, scale);
-        mesh.setMatrixAt(i, matrix);
-      }
-      mesh.instanceMatrix.needsUpdate = true;
+      mesh.visible = age >= 0 && age <= FERRY_SECONDS;
+      ageUniform.value = age;
     },
     dispose() {
       mesh.dispose();

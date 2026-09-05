@@ -1,21 +1,21 @@
+import { PULSE_SECONDS } from '@kit/celebrate';
+import { CELL } from '@kit/grid';
+import { makeSceneView, type SceneView } from '../jelly-bean-world/view';
 import { LARGE_DEEPSEA_ACTION, LARGE_DEEPSEA_COL, LARGE_DEEPSEA_GX, LARGE_DEEPSEA_GY, LARGE_DEEPSEA_ROW } from '@sim/envs/largedeepsea';
 import type { GroundTruthOptions } from '@kit/debug';
 import { clampCell, type GridSize } from '@kit/grid';
 import { blendTokens, clamp01, envelope } from '@kit/mix';
-import { cellToTerraceVec as cellToWorldVec, terraceDepthAt } from '@kit/terrace';
+import { cellToTerraceVec as cellToWorldVec, terraceDepthAt, terraceShear } from '@kit/terrace';
 import type { OrbitRigOptions } from '@kit/rigs';
 import { StageScene, type Stage } from '@kit/stage';
 import { TOKENS } from '@kit/tokens';
-import type { FrameState, FrameUpdate, SceneContext, SceneFactory } from '@kit/types';
+import type { FrameState, FrameUpdate, SceneContext, SceneFactory, SceneSize } from '@kit/types';
 import { Wisp } from '@kit/wisp';
 import * as THREE from 'three';
 import type { GridCell, GridGeometry } from '@sim/types';
-import { HEART_Y, buildAngler, buildDiveBubble, buildWreck, type AnglerHandle, type DiveBubbleHandle, type WreckHandle } from './actors';
-import { CAMERA_AZIMUTH, anglerSites, buildWorld, resolveGrid, resolveMask, type WorldHandle } from './world';
+import { HEART_Y, buildDiveBubble, buildWreck, type DiveBubbleHandle, type WreckHandle } from './actors';
+import { buildWorld, resolveGrid, resolveMask, type WorldHandle } from './world';
 
-const CAM_POLAR = 0.74;
-const CAM_DISTANCE = 24;
-const CAM_TARGET: readonly [number, number, number] = [-1.2, -1.75, 1.1];
 
 const BURST_SCALE = 0.8;
 const RIPPLE_SCALE = 0.55;
@@ -59,13 +59,13 @@ export function isDiveStep(fromX: number, fromY: number, toX: number, toY: numbe
 
 class TheAbyssScene extends StageScene<WorldHandle> {
   protected readonly stageName = 'theAbyss';
+  private view: SceneView | null = null;
 
   private wisp: Wisp | null = null;
   private readonly diver = new THREE.Group();
   private bubble: DiveBubbleHandle | null = null;
   private wreck: WreckHandle | null = null;
-  private anglers: AnglerHandle[] = [];
-  private grid: GridGeometry = resolveGrid({});
+  private grid!: GridGeometry;
 
   private treasureAt = -Infinity;
   private rushAt = -Infinity;
@@ -78,7 +78,6 @@ class TheAbyssScene extends StageScene<WorldHandle> {
   private readonly bubblePos = new THREE.Vector3();
   private readonly siltPos = new THREE.Vector3();
   private readonly lightPos = new THREE.Vector3();
-  private readonly lureWorld = new THREE.Vector3();
   private readonly rushFrom = new THREE.Vector3();
   private readonly rushTo = new THREE.Vector3();
   private accent = 0x7fd4e8;
@@ -87,7 +86,9 @@ class TheAbyssScene extends StageScene<WorldHandle> {
   protected buildWorld(ctx: SceneContext): WorldHandle {
     const grid = resolveGrid(ctx.geometry);
     this.grid = grid;
-    const mask = resolveMask(grid, ctx.seed);
+    const half = Math.max(grid.w, grid.h) * CELL * 0.5 + 0.8;
+    this.view = makeSceneView(ctx, { min: [-half, -4.8, -half], max: [half, 2, half] }, [-2, -1.75, 2.3], { distance: 26.4, azimuth: -2.52, polar: 0.74 });
+    const mask = resolveMask(grid);
     return buildWorld(ctx, this.scene, grid, mask);
   }
 
@@ -129,34 +130,11 @@ class TheAbyssScene extends StageScene<WorldHandle> {
     this.wreck = wreck;
     this.scene.add(wreck.group);
 
-    const sites = anglerSites(grid, ctx.seed);
-    const lureColors = [accent, blendTokens(ctx.tokens.cueMagenta, accent, 0.42).getHex()];
-    for (let i = 0; i < sites.length; i++) {
-      const site = sites[i];
-      if (!site) continue;
-      const angler = buildAngler({
-        skin,
-        lure: lureColors[i] ?? accent,
-        hover: site.hover,
-        phase: site.phase,
-        scale: site.scale,
-        name: `angler${i}`,
-      });
-      cellToWorldVec(site.x, site.y, grid, angler.root.position);
-      this.scene.add(angler.group);
-      this.anglers.push(angler);
-      const light = world.rig.points[2 + i];
-      if (light) light.color.set(lureColors[i] ?? accent);
-    }
   }
 
-  protected rigOptions(ctx: SceneContext): OrbitRigOptions {
-    return {
-      target: [CAM_TARGET[0], CAM_TARGET[1], CAM_TARGET[2]],
-      distance: CAM_DISTANCE,
-      azimuth: CAMERA_AZIMUTH,
-      polar: CAM_POLAR,
-    };
+  protected rigOptions(_ctx: SceneContext): OrbitRigOptions {
+    if (!this.view) throw new Error('Scene view is missing');
+    return this.view.options;
   }
 
   protected overlayOptions(): GroundTruthOptions {
@@ -181,7 +159,13 @@ class TheAbyssScene extends StageScene<WorldHandle> {
     const wreck = this.wreck;
     const bubble = this.bubble;
     if (!wisp || !wreck || !bubble) return;
+    if (this.overlay) {
+      terraceShear(grid, this.overlay.group.matrix);
+      this.overlay.group.matrixAutoUpdate = false;
+      this.overlay.group.matrixWorldNeedsUpdate = true;
+    }
     world.setTime(0);
+    if (this.view && this.rig) world.setView(this.view.update(this.rig, 0), this.camera);
     wisp.setCell(0, 0, grid);
     cellToWorldVec(grid.goal?.x ?? grid.w - 1, grid.goal?.y ?? grid.h - 1, grid, wreck.root.position);
     cellToWorldVec(0, 0, grid, this.rushTo);
@@ -194,7 +178,6 @@ class TheAbyssScene extends StageScene<WorldHandle> {
     cellToWorldVec(0, 0, grid, world.silt.points.position);
     world.silt.points.position.y += siltLift(ctx.tokens.wispHeight);
     world.silt.setDensity(0);
-    for (const angler of this.anglers) angler.setTime(0);
   }
 
   protected tick(frame: FrameUpdate, { ctx, world, pool, rig, time }: Stage<WorldHandle>): void {
@@ -220,7 +203,7 @@ class TheAbyssScene extends StageScene<WorldHandle> {
     cellToWorldVec(goal.x, goal.y, grid, wreck.root.position);
     this.groundPos.copy(wreck.root.position);
     this.heartPos.copy(wreck.root.position);
-    this.heartPos.y = HEART_Y;
+    this.heartPos.y += HEART_Y;
 
     if (frame.scrubbed) {
       pool.clear();
@@ -229,7 +212,28 @@ class TheAbyssScene extends StageScene<WorldHandle> {
       this.stir = charged;
       wisp.setCell(agent.x, agent.y, grid);
       wisp.snap();
-      rig.snap();
+      const log = frame.eventLog;
+      let low = 0;
+      let high = log.count;
+      while (low < high) {
+        const mid = (low + high) >>> 1;
+        if ((log.steps[mid] ?? Infinity) <= state.step) low = mid + 1;
+        else high = mid;
+      }
+      const seconds = state.step > 0 ? state.simTime / state.step : 0;
+      for (let i = low - 1; i >= 0; i--) {
+        const at = ((log.steps[i] ?? -1) + 1) * seconds;
+        if (time - at > TREASURE_SECONDS) break;
+        if (log.types[log.kinds[i] ?? 0] === 'goal') {
+          this.treasureAt = at;
+          pool.burst(this.heartPos, this.accent, BURST_SCALE, at);
+          pool.ripple(this.groundPos, this.gold, RIPPLE_SCALE, at);
+          pool.pulse.reset();
+          pool.pulse.fire(Math.max(0, PULSE_STRENGTH - (time - at) / PULSE_SECONDS));
+          pool.update(0, time);
+          break;
+        }
+      }
     }
 
     for (let i = 0; i < frame.events.length; i++) {
@@ -269,14 +273,14 @@ class TheAbyssScene extends StageScene<WorldHandle> {
     this.diver.position.y = terraceDepthAt(wisp.position.z, grid);
 
     this.bubblePos.copy(wisp.position);
-    this.bubblePos.y += TOKENS.wispHeight;
+    this.bubblePos.y += TOKENS.wispHeight + this.diver.position.y;
     bubble.group.position.copy(this.bubblePos);
     bubble.setGain(depth);
     bubble.setTime(time);
 
     this.stir += (charged - this.stir) * (1 - Math.exp(-SILT_RATE * Math.max(0, frame.dtReal)));
     this.siltPos.copy(wisp.position);
-    this.siltPos.y += siltLift(ctx.tokens.wispHeight);
+    this.siltPos.y += siltLift(ctx.tokens.wispHeight) + this.diver.position.y;
     world.silt.points.position.copy(this.siltPos);
     world.silt.setDensity(SILT_IDLE + SILT_KICK * this.stir);
     world.silt.setIntensity(0.45 + 0.85 * depth);
@@ -291,7 +295,6 @@ class TheAbyssScene extends StageScene<WorldHandle> {
 
     wreck.setFlare(treasure);
     wreck.setTime(time);
-    for (let i = 0; i < this.anglers.length; i++) this.anglers[i]?.setTime(time);
 
     const wispLight = world.rig.points[0];
     if (wispLight) {
@@ -306,29 +309,29 @@ class TheAbyssScene extends StageScene<WorldHandle> {
       heartLight.position.copy(this.heartPos);
       heartLight.intensity = 1.05 + 0.35 * Math.sin(time * 1.35) + 8 * treasure;
     }
-    for (let i = 0; i < this.anglers.length; i++) {
-      const light = world.rig.points[2 + i];
-      const angler = this.anglers[i];
-      if (!light || !angler) continue;
-      angler.lureAnchor.getWorldPosition(this.lureWorld);
-      light.position.copy(this.lureWorld);
-      light.intensity = 1.6 + 0.55 * Math.sin(time * 1.9 + i * 3.1);
-    }
 
     world.setTime(time);
 
-    rig.update(frame.dtReal);
+    if (this.view) world.setView(this.view.update(rig, frame.dtReal), this.camera);
+  }
+
+  override resize(size: SceneSize): void {
+    super.resize(size);
+    if (this.view && this.rig && this.world) {
+      this.view.resize(size, this.rig);
+      this.world.setView(this.view.update(this.rig, 0), this.camera);
+    }
   }
 
   protected drop(): void {
-    for (const angler of this.anglers) angler.dispose();
-    this.anglers.length = 0;
     this.wreck?.dispose();
     this.wreck = null;
     this.bubble?.dispose();
     this.bubble = null;
     this.wisp?.dispose();
     this.wisp = null;
+    this.diver.removeFromParent();
+    this.diver.clear();
     this.treasureAt = -Infinity;
     this.rushAt = -Infinity;
     this.stir = 0;

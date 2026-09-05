@@ -1,14 +1,13 @@
 import type { GroundTruthOptions } from '@kit/debug';
 import { envelope } from '@kit/mix';
-import { orbitFromPose, type OrbitRigOptions } from '@kit/rigs';
+import { type OrbitRigOptions } from '@kit/rigs';
+import { makeSceneView, type SceneView } from '../jelly-bean-world/view';
 import { StageScene, type Stage } from '@kit/stage';
 import type { FrameState, FrameUpdate, SceneContext, SceneFactory, SceneSize } from '@kit/types';
 import { MC_GOAL_POS, MC_START_POS, MOUNTAINCAR_ACTION, MOUNTAINCAR_POS, MOUNTAINCAR_VEL, mountainCarForce, mountainCarSlope } from '@sim/envs/mountaincar';
 import { buildCart, type CartHandle } from './actors';
 import { buildWorld, heightResolver, type WorldHandle } from './world';
 
-const CAM_BASE: readonly [number, number, number] = [-0.16, 1.06, 2.56];
-const CAM_LOOK: readonly [number, number, number] = [-0.31, 0.75, -0.05];
 
 const GUST_SECONDS = 3.2;
 const EAGLE_SECONDS = 6.5;
@@ -24,6 +23,7 @@ function forceOf(state: FrameState): number {
 }
 
 class AlpineValleyScene extends StageScene<WorldHandle> {
+  private view: SceneView | null = null;
   protected readonly stageName = 'alpineValley';
 
   private cart: CartHandle | null = null;
@@ -71,21 +71,8 @@ class AlpineValleyScene extends StageScene<WorldHandle> {
   }
 
   protected rigOptions(ctx: SceneContext): OrbitRigOptions {
-    const home = orbitFromPose(
-      CAM_BASE,
-      CAM_LOOK,
-    );
-    return {
-      target: CAM_LOOK,
-      azimuth: home.azimuth,
-      polar: home.polar,
-      distance: home.distance,
-      near: 0.05,
-      far: 420,
-      rotateSpeed: 0.006,
-      zoomSpeed: 0.0016,
-      damping: 2.6,
-    };
+    this.view = makeSceneView(ctx, { min: [-1.35, 0, -0.4], max: [0.75, 1.55, 0.4] }, [-0.31, 0.75, -0.05], { distance: 2.632622267, azimuth: 0.057408115, polar: 1.360000000 });
+    return this.view.options;
   }
 
   protected overlayOptions(): GroundTruthOptions {
@@ -129,7 +116,6 @@ class AlpineValleyScene extends StageScene<WorldHandle> {
       this.flareAt = -Infinity;
       this.screeAt = -Infinity;
       this.screeStep = Number.NaN;
-      rig.snap();
     }
 
     let teleported = false;
@@ -188,7 +174,7 @@ class AlpineValleyScene extends StageScene<WorldHandle> {
     world.setTime(time);
     cart.setTime(time);
 
-    rig.update(frame.dtReal);
+    if (this.view) world.setView(this.view.update(rig, frame.dtReal), this.camera);
   }
 
   resize(size: SceneSize): void {

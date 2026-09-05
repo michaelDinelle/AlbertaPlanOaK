@@ -182,7 +182,6 @@ export function buildLanternRig(opts: LanternRigOptions): LanternRigHandle {
   );
   curlMaterial.vertexColors = true;
   curlMaterial.opacity = 0;
-  const curlTier = true;
   const curlPos = new THREE.Mesh(curlGeometry, curlMaterial);
   curlPos.name = 'torqueCurlPositive';
   curlPos.renderOrder = 4;
@@ -223,7 +222,7 @@ export function buildLanternRig(opts: LanternRigOptions): LanternRigHandle {
       bobTilt.rotation.z = theta + lag * 0.22;
 
       const effort = clampRange(Math.abs(torque) / maxTorque, 0, 1);
-      const live = curlTier && effort > 0.02;
+      const live = effort > 0.02;
       curlPos.visible = live && torque > 0;
       curlNeg.visible = live && torque < 0;
       curlMaterial.opacity = live ? 0.08 + 0.76 * effort : 0;

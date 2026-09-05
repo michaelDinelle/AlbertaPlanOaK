@@ -1,5 +1,6 @@
+import { makeSceneView, type SceneView } from '../jelly-bean-world/view';
 import { FOURROOMS_GX, FOURROOMS_GY, FOURROOMS_X, FOURROOMS_Y } from '@sim/envs/fourrooms';
-import { cellToWorldVec, clampCell, type GridSize } from '@kit/grid';
+import { CELL, cellToWorldVec, clampCell, type GridSize } from '@kit/grid';
 import type { GroundTruthOptions } from '@kit/debug';
 import { blendTokens, envelope, shade } from '@kit/mix';
 import type { OrbitRigOptions } from '@kit/rigs';
@@ -9,12 +10,9 @@ import type { FrameState, FrameUpdate, SceneContext, SceneFactory } from '@kit/t
 import { Wisp } from '@kit/wisp';
 import * as THREE from 'three';
 import type { GridCell, GridGeometry } from '@sim/types';
-import { buildLantern, type LanternHandle } from './actors';
-import { CAMERA_AZIMUTH, buildWorld, courtyardSkin, resolveGrid, type WorldHandle } from './world';
+import { buildLantern, buildTravelerLantern, type LanternHandle } from './actors';
+import { buildWorld, courtyardSkin, resolveGrid, type WorldHandle } from './world';
 
-const CAM_POLAR = 0.75;
-const CAM_DISTANCE = 17.8;
-const CAM_TARGET_Y = 0.5;
 
 const BURST_SCALE = 0.85;
 const RIPPLE_SCALE = 0.5;
@@ -41,11 +39,14 @@ function readCells(state: FrameState, grid: GridSize, agent: GridCell, goal: Gri
 }
 
 class FourSeasonsCourtyardScene extends StageScene<WorldHandle> {
+  private sceneView: SceneView | null = null;
+
   protected readonly stageName = 'fourSeasonsCourtyard';
 
   private wisp: Wisp | null = null;
+  private traveler: ReturnType<typeof buildTravelerLantern> | null = null;
   private lantern: LanternHandle | null = null;
-  private grid: GridGeometry = resolveGrid({});
+  private grid!: GridGeometry;
 
   private growAt = -Infinity;
   private bloomAt = -Infinity;
@@ -82,13 +83,18 @@ class FourSeasonsCourtyardScene extends StageScene<WorldHandle> {
 
     const wisp = new Wisp(
       {
-        color: accent,
-        radius: 0.21,
+        color: flame,
+        radius: 0.14,
+        skirt: false,
+        ribbon: false,
+        silhouette: false,
         hop: { duration: HOP_SECONDS, height: HOP_HEIGHT },
         name: 'courtyardWisp',
       },
       grid,
     );
+    this.traveler = buildTravelerLantern(0xffffff);
+    wisp.avatar.add(this.traveler.mesh);
     this.wisp = wisp;
     this.scene.add(wisp.group);
 
@@ -104,12 +110,11 @@ class FourSeasonsCourtyardScene extends StageScene<WorldHandle> {
   }
 
   protected rigOptions(ctx: SceneContext): OrbitRigOptions {
-    return {
-      target: [0, CAM_TARGET_Y, 0],
-      distance: CAM_DISTANCE,
-      azimuth: CAMERA_AZIMUTH,
-      polar: CAM_POLAR,
-    };
+    const grid = this.grid;
+    const halfX = grid.w * CELL / 2;
+    const halfZ = grid.h * CELL / 2;
+    this.sceneView = makeSceneView(ctx, { min: [-halfX, 0, -halfZ], max: [halfX, 1.8, halfZ] }, [0, 0.5, 0], { distance: 17.8, azimuth: 0.55, polar: 0.75 });
+    return this.sceneView.options;
   }
 
   protected overlayOptions(): GroundTruthOptions {
@@ -155,7 +160,6 @@ class FourSeasonsCourtyardScene extends StageScene<WorldHandle> {
       this.growAt = -Infinity;
       wisp.setCell(agent.x, agent.y, grid);
       wisp.snap();
-      rig.snap();
     }
 
     let teleported = false;
@@ -180,7 +184,6 @@ class FourSeasonsCourtyardScene extends StageScene<WorldHandle> {
     if (teleported) {
       wisp.setCell(agent.x, agent.y, grid);
       wisp.snap();
-      rig.snap();
     }
 
     if (agent.x !== wisp.cellX || agent.y !== wisp.cellY) {
@@ -220,10 +223,12 @@ class FourSeasonsCourtyardScene extends StageScene<WorldHandle> {
 
     world.setTime(time);
 
-    rig.update(frame.dtReal);
+    if (this.sceneView) world.setView(this.sceneView.update(rig, frame.dtReal), this.camera);
   }
 
   protected drop(): void {
+    this.traveler?.dispose();
+    this.traveler = null;
     this.lantern?.dispose();
     this.lantern = null;
     this.wisp?.dispose();

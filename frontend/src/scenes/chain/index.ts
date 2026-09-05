@@ -1,10 +1,12 @@
+import { PULSE_SECONDS } from '@kit/celebrate';
+import { makeSceneView, type SceneView } from '../jelly-bean-world/view';
 import type { GroundTruthOptions } from '@kit/debug';
 import { cellToWorldVec, type GridSize } from '@kit/grid';
 import { blendTokens, shade } from '@kit/mix';
 import type { OrbitRigOptions } from '@kit/rigs';
 import { StageScene, type Stage } from '@kit/stage';
 import { TOKENS } from '@kit/tokens';
-import type { FrameState, FrameUpdate, SceneContext, SceneFactory } from '@kit/types';
+import type { FrameState, FrameUpdate, SceneContext, SceneFactory, SceneSize } from '@kit/types';
 import { Wisp } from '@kit/wisp';
 import * as THREE from 'three';
 import type { GridCell, GridGeometry } from '@sim/types';
@@ -20,7 +22,6 @@ import {
   type PetalFerryHandle,
 } from './actors';
 import {
-  CAMERA_AZIMUTH,
   WATER_LEVEL,
   buildWorld,
   creekSkin,
@@ -29,9 +30,6 @@ import {
   type WorldHandle,
 } from './world';
 
-const CAM_POLAR = 1.17;
-const CAM_DISTANCE = 17.2;
-const CAM_TARGET: readonly [number, number, number] = [1.6, 0.45, 0];
 
 const BURST_SCALE = 0.68;
 const RIPPLE_SCALE = 0.6;
@@ -93,12 +91,13 @@ export function readPos(state: FrameState, grid: GridSize): number {
 
 class SixteenStonesScene extends StageScene<WorldHandle> {
   protected readonly stageName = 'sixteenStones';
+  private view: SceneView | null = null;
 
   private wisp: Wisp | null = null;
   private tree: BlossomTreeHandle | null = null;
   private lantern: FordLanternHandle | null = null;
   private ferry: PetalFerryHandle | null = null;
-  private grid: GridGeometry = resolveGrid({});
+  private grid!: GridGeometry;
 
   private goalAt = -Infinity;
   private visitedAt = new Float32Array(0);
@@ -115,6 +114,7 @@ class SixteenStonesScene extends StageScene<WorldHandle> {
   protected buildWorld(ctx: SceneContext): WorldHandle {
     const grid = resolveGrid(ctx.geometry);
     this.grid = grid;
+    this.view = makeSceneView(ctx, { min: [stoneX(0, grid) - 3, -1, -3], max: [stoneX(grid.w - 1, grid) + 3, 4, 3] }, [1.6, 0.45, 0], { distance: 17.2, azimuth: 0.35, polar: 1.17 });
     this.visitedAt = new Float32Array(grid.w).fill(-Infinity);
     this.lastPos = -1;
     this.goalCell.x = grid.goal?.x ?? grid.w - 1;
@@ -184,13 +184,9 @@ class SixteenStonesScene extends StageScene<WorldHandle> {
     this.scene.add(ferry.mesh);
   }
 
-  protected rigOptions(ctx: SceneContext): OrbitRigOptions {
-    return {
-      target: [CAM_TARGET[0], CAM_TARGET[1], CAM_TARGET[2]],
-      distance: CAM_DISTANCE,
-      azimuth: CAMERA_AZIMUTH,
-      polar: CAM_POLAR,
-    };
+  protected rigOptions(_ctx: SceneContext): OrbitRigOptions {
+    if (!this.view) throw new Error('Scene view is missing');
+    return this.view.options;
   }
 
   protected overlayOptions(): GroundTruthOptions {
@@ -209,6 +205,7 @@ class SixteenStonesScene extends StageScene<WorldHandle> {
 
   protected start(_ctx: SceneContext, world: WorldHandle): void {
     world.setTime(0);
+    if (this.view && this.rig) world.setView(this.view.update(this.rig, 0), this.camera);
     world.caps.clearGlow();
     world.petalMotes.setDensity(0);
     this.wisp?.setCell(0, 0, this.grid);
@@ -240,8 +237,34 @@ class SixteenStonesScene extends StageScene<WorldHandle> {
       world.caps.clearGlow();
       wisp.setCell(pos, 0, grid);
       wisp.snap();
-      rig.snap();
       this.lastPos = pos;
+      const log = frame.eventLog;
+      let low = 0;
+      let high = log.count;
+      while (low < high) {
+        const mid = (low + high) >>> 1;
+        if ((log.steps[mid] ?? Infinity) <= state.step) low = mid + 1;
+        else high = mid;
+      }
+      const seconds = state.step > 0 ? state.simTime / state.step : 0;
+      for (let i = low - 1; i >= 0; i--) {
+        const at = ((log.steps[i] ?? -1) + 1) * seconds;
+        if (log.types[log.kinds[i] ?? 0] === 'goal') {
+          this.goalAt = at;
+          cellToWorldVec(this.goalCell.x, this.goalCell.y, grid, this.groundPos);
+          this.burstPos.copy(this.groundPos);
+          this.burstPos.x += 0.24;
+          this.burstPos.y = tree.crownHeight * 0.78;
+          this.groundPos.y = WATER_LEVEL;
+          pool.burst(this.burstPos, this.blossom, BURST_SCALE, at);
+          pool.ripple(this.groundPos, this.gold, RIPPLE_SCALE, at);
+          ferry.fire(at);
+          pool.pulse.reset();
+          pool.pulse.fire(Math.max(0, PULSE_STRENGTH - (time - at) / PULSE_SECONDS));
+          pool.update(0, time);
+          break;
+        }
+      }
     }
 
     let teleported = false;
@@ -268,7 +291,6 @@ class SixteenStonesScene extends StageScene<WorldHandle> {
     if (teleported) {
       wisp.setCell(pos, 0, grid);
       wisp.snap();
-      rig.snap();
     } else if (pos !== wisp.cellX) {
       wisp.hopTo(this.cellFor(pos), time);
     }
@@ -310,7 +332,15 @@ class SixteenStonesScene extends StageScene<WorldHandle> {
 
     world.setTime(time);
 
-    rig.update(frame.dtReal);
+    if (this.view) world.setView(this.view.update(rig, frame.dtReal), this.camera);
+  }
+
+  override resize(size: SceneSize): void {
+    super.resize(size);
+    if (this.view && this.rig && this.world) {
+      this.view.resize(size, this.rig);
+      this.world.setView(this.view.update(this.rig, 0), this.camera);
+    }
   }
 
   protected drop(): void {

@@ -248,6 +248,9 @@ export function AboutOaK({ onClose }: { onClose: () => void }) {
                   </div>
                 </div>
               </div>
+              <p className="mt-6 text-2xs text-ink-dim">
+                Rockies scenery adapted from Canadian elevation data via <a href="https://registry.opendata.aws/terrain-tiles/" target="_blank" rel="noreferrer" className="underline">Mapzen</a>. Contains information licensed under the <a href="https://open.canada.ca/en/open-government-licence-canada" target="_blank" rel="noreferrer" className="underline">Open Government Licence – Canada</a>.
+              </p>
             </div>
           </div>
         </Panel>

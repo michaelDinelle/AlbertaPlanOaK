@@ -13,7 +13,6 @@ import {
 } from '../state/selectionStore';
 import {
   loadHero,
-  makeInitialSource,
   recordingRef,
   seedsFor,
   seekTargetForTick,
@@ -64,7 +63,7 @@ const EMPTY_META: StageMeta = {
   ticks: [],
 };
 
-const meta = createStore<StageMeta>(EMPTY_META);
+const meta = createStore<StageMeta>('stage', EMPTY_META);
 
 export const stageMetaSnapshot = meta.get;
 export const useStageMeta = meta.use;
@@ -92,8 +91,6 @@ export function subscribeStageFrame(listener: (frame: StageFrame) => void): () =
 const frameScratch: StageFrame = { position: 0, frameCount: 1, step: 0, totalSteps: 0, simTime: 0, rate: 0 };
 
 let container: HTMLElement | null = null;
-let disposeQueued = false;
-let subscribed = false;
 let unsubscribeSelection: (() => void) | null = null;
 let unsubscribeTransport: (() => void) | null = null;
 let sceneHost: SceneHostHandle | null = null;
@@ -136,8 +133,9 @@ function frameCount(): number {
 }
 
 function queueStage(work: () => Promise<void>): void {
+  const gen = generation;
   stageQueue = stageQueue.then(work).catch((error: unknown) => {
-    if (container === null) return;
+    if (container === null || gen !== generation) return;
     setStageMeta({
       status: 'error',
       note: 'Could not play this seed',
@@ -188,6 +186,7 @@ function publishHeroMeta(handle: HeroHandle): void {
 }
 
 function onFrame(info: HostFrameInfo): void {
+  if (!attached) return;
   frameScratch.position = info.position;
   frameScratch.frameCount = frameCount();
   frameScratch.step = info.step;
@@ -346,18 +345,14 @@ function mountHero(): void {
 
   queueStage(async () => {
     if (container === null || gen !== generation) return;
-    const attachSource = heroHandle.source.frameCount > 1 ? heroHandle.source : makeInitialSource(entry, env, seed);
-    if (attachSource === heroHandle.source) {
-      attached = true;
-      liveStarted = heroHandle.fetched;
-    }
-    const at = resolvePendingFrame(heroHandle, attachSource);
+    const source = heroHandle.source;
+    const at = resolvePendingFrame(heroHandle, source);
     if (sceneHost === null) {
       const transport = transportSnapshot();
       appliedDebug = selectionSnapshot().debug;
       const host = await mountSceneHost(container, {
         envId: env,
-        source: attachSource,
+        source,
         at,
         speed: transport.speed,
         paused: !transport.playing,
@@ -370,43 +365,30 @@ function mountHero(): void {
       }
       sceneHost = host;
     } else if (sceneHost.envId !== env) {
-      await sceneHost.setEnv(env, attachSource, { at });
+      await sceneHost.setEnv(env, source, { at });
     } else {
-      await sceneHost.setSource(attachSource, { at });
+      await sceneHost.setSource(source, { at });
     }
+    if (container === null || gen !== generation || hero !== heroHandle) return;
+    attached = true;
+    liveStarted = heroHandle.fetched;
     applyTransport();
-    if (attached) publishHeroMeta(heroHandle);
+    applyPendingSeek();
+    publishHeroMeta(heroHandle);
   });
 
   heroHandle.setCallbacks(
     () => {
       if (container === null || gen !== generation || hero !== heroHandle) return;
-      queueStage(async () => {
-        if (container === null || gen !== generation || hero !== heroHandle || sceneHost === null) return;
-        if (!attached) {
-          attached = true;
-          liveStarted = heroHandle.fetched;
-          const at = resolvePendingFrame(heroHandle, heroHandle.source);
-          await sceneHost.setSource(heroHandle.source, { at });
-          applyTransport();
-        } else {
-          applyPendingSeek();
-        }
-        publishHeroMeta(heroHandle);
-      });
+      if (!attached) return;
+      applyPendingSeek();
+      publishHeroMeta(heroHandle);
     },
     (error) => {
       if (container === null || gen !== generation) return;
       setStageMeta({ status: 'error', note: 'Could not play this seed', noteDetail: error.message });
     },
   );
-}
-
-function ensureSubscribed(): void {
-  if (subscribed) return;
-  subscribed = true;
-  unsubscribeSelection = subscribeSelection(retarget);
-  unsubscribeTransport = subscribeTransport(applyTransport);
 }
 
 export function setTheaterInputs(next: TheaterInputs): void {
@@ -416,31 +398,26 @@ export function setTheaterInputs(next: TheaterInputs): void {
 }
 
 export function mountStage(node: HTMLElement): void {
-  disposeQueued = false;
   if (container === node) return;
   if (container !== null) hardDetach();
   container = node;
-  ensureSubscribed();
+  unsubscribeSelection = subscribeSelection(retarget);
+  unsubscribeTransport = subscribeTransport(applyTransport);
   targetKey = '';
   retarget();
 }
 
 export function unmountStage(): void {
-  disposeQueued = true;
-  queueMicrotask(() => {
-    if (!disposeQueued) return;
-    disposeQueued = false;
-    hardDetach();
-  });
+  hardDetach();
 }
 
 function hardDetach(): void {
+  if (container === null) return;
   generation++;
   unsubscribeSelection?.();
   unsubscribeTransport?.();
   unsubscribeSelection = null;
   unsubscribeTransport = null;
-  subscribed = false;
   if (hero !== null) {
     hero.setCallbacks(null, null);
     hero.setLive(false);
@@ -459,7 +436,7 @@ function hardDetach(): void {
 export function scrubToStep(step: number): void {
   const target = Math.max(0, Math.floor(step));
   if (sceneHost === null || hero === null || !attached) {
-    setPendingSeek(target > 0 ? target : null);
+    setPendingSeek(target);
     return;
   }
   const source = hero.source;

@@ -9,10 +9,9 @@ import { STR } from '../strings';
 import { useTapeSnapshot, type DeriveSpec } from '../tape/store';
 import { penStore } from '../tape/penStore';
 import type { SeedRow } from '../tape/derive';
-import { scrubToStep, stageMetaSnapshot } from '../theater/controller';
 import { seedsFor } from '../theater/loader';
-import { navigate } from '../url/useUrlState';
 import { Hotkey, Label, TXT, cssVar, withAlpha } from './charts';
+import { useStepScrub } from './useStepScrub';
 
 function drawSpark(
   canvas: HTMLCanvasElement,
@@ -57,6 +56,7 @@ function drawSpark(
   const yAt = (v: number): number => height - pad - ((v - min) / span) * (height - pad * 2);
   const zeroLine = min < 0 && max > 0;
 
+  const xMax = Math.max(1, xs[xs.length - 1] ?? 0);
   const line = new Path2D();
   const y0 = yAt(0);
   line.moveTo(0, y0);
@@ -64,7 +64,7 @@ function drawSpark(
   for (let i = 0; i < values.length; i++) {
     const v = values[i]!;
     if (!Number.isFinite(v)) continue;
-    const x = Math.min(Math.max(xs[i] ?? 0, 0), 1) * width;
+    const x = Math.min(Math.max((xs[i] ?? 0) / xMax, 0), 1) * width;
     lastY = yAt(v);
     line.lineTo(x, lastY);
   }
@@ -102,23 +102,21 @@ function Spark({
   values,
   xs,
   stroke,
-  draggedRef,
+  onStart,
   liveLane,
 }: {
   values: Float64Array;
   xs: Float64Array;
   stroke: string;
-  draggedRef: { current: boolean };
+  onStart: () => void;
   liveLane: number;
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const holderRef = useRef<HTMLSpanElement | null>(null);
-  const down = useRef(false);
-  const startX = useRef(0);
   const state = useRef({ width: 0, values, xs, stroke, schedule: () => {} });
-  Object.assign(state.current, { values, xs, stroke });
 
   useEffect(() => {
+    Object.assign(state.current, { values, xs, stroke });
     const canvas = canvasRef.current;
     const holder = holderRef.current;
     if (canvas === null || holder === null) return;
@@ -155,50 +153,27 @@ function Spark({
       observer.disconnect();
       unsubscribeLive();
     };
-  }, []);
+  }, [liveLane]);
 
   useEffect(() => {
+    state.current.stroke = stroke;
+    if (liveLane < 0) Object.assign(state.current, { values, xs });
     state.current.schedule();
-  }, [values, xs, stroke]);
+  }, [values, xs, stroke, liveLane]);
 
-  const fracStep = (event: React.PointerEvent): number => {
-    const holder = holderRef.current;
-    if (holder === null) return 0;
-    const rect = holder.getBoundingClientRect();
-    const frac = Math.min(Math.max((event.clientX - rect.left) / Math.max(1, rect.width), 0), 1);
-    return Math.round(frac * stageMetaSnapshot().totalSteps);
-  };
+  const scrub = useStepScrub<HTMLSpanElement>(
+    () => ({ min: 0, max: state.current.xs[state.current.xs.length - 1] ?? 0 }),
+    undefined,
+    onStart,
+  );
 
   return (
     <span
       ref={holderRef}
-      className="block min-w-0 flex-1 cursor-ew-resize"
+      className="block min-w-0 flex-1 cursor-ew-resize touch-none select-none"
       title={STR.bar.scrub}
-      onPointerDown={(event) => {
-        if (event.button !== 0) return;
-        down.current = true;
-        startX.current = event.clientX;
-        try {
-          event.currentTarget.setPointerCapture(event.pointerId);
-        } catch {}
-      }}
-      onPointerMove={(event) => {
-        if (!down.current) return;
-        if (Math.abs(event.clientX - startX.current) > 3) draggedRef.current = true;
-        if (draggedRef.current) scrubToStep(fracStep(event));
-      }}
-      onPointerUp={(event) => {
-        if (!down.current) return;
-        down.current = false;
-        if (draggedRef.current) {
-          const step = fracStep(event);
-          scrubToStep(step);
-          navigate({ at: step });
-        }
-      }}
-      onPointerCancel={() => {
-        down.current = false;
-      }}
+      {...scrub}
+      onClick={(event) => event.stopPropagation()}
     >
       <canvas ref={canvasRef} className="block" />
     </span>
@@ -222,7 +197,6 @@ const Row = memo(function Row({
   liveLane: number;
   tone: string;
 }) {
-  const draggedRef = useRef(false);
   const rateRef = useRef<HTMLSpanElement | null>(null);
   useEffect(() => {
     if (liveLane < 0) return;
@@ -258,10 +232,6 @@ const Row = memo(function Row({
       type="button"
       title={isPromoted ? STR.seeds.release(row.seed) : playable ? STR.seeds.promote(row.seed) : STR.seeds.unplayable(row.seed)}
       onClick={() => {
-        if (draggedRef.current) {
-          draggedRef.current = false;
-          return;
-        }
         if (isPromoted) unpromote();
         else promote(row.seed, () => playable);
       }}
@@ -281,7 +251,7 @@ const Row = memo(function Row({
       >
         {row.rate === null ? '—' : formatSigned(row.rate, 3)}
       </span>
-      <Spark values={row.spark} xs={row.sparkXs} stroke={stroke} draggedRef={draggedRef} liveLane={liveLane} />
+      <Spark values={row.spark} xs={row.sparkXs} stroke={stroke} onStart={() => promote(row.seed, () => playable)} liveLane={liveLane} />
       {dead && (
         <span
           className="rounded-sm border border-crit/40 bg-crit/10 px-1 font-mono text-2xs leading-4 text-crit"

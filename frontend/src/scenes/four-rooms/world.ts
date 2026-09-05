@@ -1,3 +1,6 @@
+import { sculptureMaterial } from '../key-corridor/world';
+import { makeLandscape } from '../key-corridor/world';
+import type { ViewCoverage } from '../jelly-bean-world/view';
 import * as THREE from 'three';
 import {
   buildCellField,
@@ -12,30 +15,24 @@ import {
 } from '@kit/grid';
 import { applyFog, makeLightRig, type LightRig } from '@kit/lighting';
 import { oakMaterial, type OakMaterial } from '@kit/materials';
-import { blendTokens, shade, smoothstep01 } from '@kit/mix';
+import { blendTokens, shade } from '@kit/mix';
 import { makeAmbientParticles } from '@kit/particles';
 import { mergeColoredParts, type ColoredPart } from '@kit/parts';
+import { hash2f } from '@kit/rng';
 import { skyFromPalette, type SkyHandle } from '@kit/sky';
-import { makeTerrain, type TerrainHandle } from '@kit/terrain';
-import { valueNoise2 } from '@kit/textures';
 import { TOKENS, type Palette } from '@kit/tokens';
 import type { SceneContext } from '@kit/types';
 import {
   excludeAny,
-  excludeRect,
   scatterFlowers,
   scatterGrass,
   scatterRocks,
-  scatterTrees,
-  type VegetationHandle,
 } from '@kit/vegetation';
 import { makeWorld, type WorldCore } from '@kit/world';
 import {
   FOURROOMS_H,
-  FOURROOMS_HALLWAYS,
   FOURROOMS_W,
   fourRoomsRoom,
-  fourRoomsWalls,
 } from '@sim/envs/fourrooms';
 import type { EnvGeometry, GridCell, GridGeometry } from '@sim/types';
 
@@ -51,19 +48,17 @@ export const CAMERA_AZIMUTH = 0.55;
 export const CAMERA_STANDOFF = 12.5;
 
 export function resolveGrid(geometry: EnvGeometry): GridGeometry {
-  const g = geometry.grid;
-  if (g && g.w === FOURROOMS_W && g.h === FOURROOMS_H) return g;
-  return {
-    w: FOURROOMS_W,
-    h: FOURROOMS_H,
-    walls: fourRoomsWalls(),
-    hallways: FOURROOMS_HALLWAYS.map((c) => ({ ...c })),
-  };
+  const grid = geometry.grid;
+  if (!grid || grid.w !== FOURROOMS_W || grid.h !== FOURROOMS_H || grid.walls.length !== grid.w * grid.h) {
+    throw new Error('Four Rooms requires complete recorded grid geometry');
+  }
+  return grid;
 }
 
 export function resolveHallways(grid: GridGeometry): readonly GridCell[] {
-  const h = grid.hallways;
-  return h && h.length > 0 ? h : FOURROOMS_HALLWAYS;
+  const hallways = grid.hallways;
+  if (hallways?.length !== 4) throw new Error('Four Rooms requires four recorded hallways');
+  return hallways;
 }
 
 export const SEASON_SPRING = 0;
@@ -176,21 +171,10 @@ export function courtyardSkin(palette: Palette, tokens: typeof TOKENS): Courtyar
   };
 }
 
-export function makeMeadowHeight(seed: number): (x: number, z: number) => number {
-  return (x, z) => {
-    const out = Math.max(Math.abs(x), Math.abs(z)) - COURT_HALF;
-    const w = smoothstep01(out / 5.5);
-    if (w <= 0) return 0;
-    const n1 = valueNoise2(x * 0.085 + 5.3, z * 0.085 + 11.7, 64, seed) - 0.5;
-    const n2 = valueNoise2(x * 0.21 + 2.1, z * 0.21 + 7.3, 64, seed ^ 0x51ed270b) - 0.5;
-    return w * (n1 * 2.3 + n2 * 0.8);
-  };
-}
-
 export interface WorldHandle extends WorldCore {
   sky: SkyHandle;
   rig: LightRig;
-  terrain: TerrainHandle;
+  setView(coverage: ViewCoverage, camera: THREE.Camera): void;
   field: CellFieldHandle;
   sundialRoot: THREE.Object3D;
   gateRoots: THREE.Object3D[];
@@ -226,38 +210,20 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   w.own(rig);
   rig.setShadowFocus({ x: 0, y: 0.35, z: 0 }, SHADOW_RADIUS);
 
-  applyFog(scene, palette, FOG_EXTENT);
+  const fog = applyFog(scene, palette, FOG_EXTENT);
 
-  const terrain = makeTerrain({
-    size: [TERRAIN_SIZE, TERRAIN_SIZE],
-    segments: [TERRAIN_SEGMENTS, TERRAIN_SEGMENTS],
-    seed: ctx.seed,
-    heightFn: makeMeadowHeight(ctx.seed),
-    jitter: 0,
-    colorNoise: 0.05,
-    slopeColor: skin.soil,
-    slopeStrength: 0.5,
-    slopeSharpness: 2.2,
-    flattenMask: { x: 0, z: 0, halfX: COURT_HALF, halfZ: COURT_HALF, feather: 2.6 },
-    flattenHeight: COURT_SINK,
-    colorRamp: [
-      { t: 0, color: blendTokens(palette.groundA, skin.soil, 0.35) },
-      { t: 0.45, color: palette.groundA },
-      { t: 1, color: blendTokens(palette.groundB, palette.groundA, 0.35) },
-    ],
-    materialOptions: {
-      rimColor: palette.skyHorizon,
-      rimStrength: 0.16,
-      toonSteps: 3,
-      toonSoftness: 0.3,
-      toonFloor: 0.24,
-    },
-    receiveShadow: true,
-    castShadow: false,
-    name: 'courtyardMeadow',
+  const landscape = makeLandscape(w, ctx, {
+    name: 'fourSeasons',
+    halfX: COURT_HALF,
+    halfZ: COURT_HALF,
+    ground: blendTokens(palette.groundA, skin.soil, 0.2),
+    grass: palette.groundB,
+    trees: skin.seasons.map((season) => season.tree),
+    grounds: skin.seasons.map((season) => season.floor),
+    archetypes: ['broadleaf', 'bare'],
+    treeKind: (x, z) => x >= 0 && z >= 0 ? 'bare' : 'broadleaf',
+    amplitude: 3.8,
   });
-  w.add(terrain.mesh);
-  w.own(terrain);
 
   const white = palette.sun;
   const field = buildCellField(
@@ -292,13 +258,10 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   w.own(field);
   w.time({ setTime: (t) => field.setTime(t) });
 
-  const stoneMaterial: OakMaterial = oakMaterial({
-    vertexColors: true,
-    flatShading: true,
+  const stoneMaterial: OakMaterial = sculptureMaterial({
     roughness: 0.94,
     rimColor: palette.skyHorizon,
     rimStrength: 0.34,
-    toonSteps: 3,
     toonSoftness: 0.3,
     toonFloor: 0.24,
     name: 'courtyardStone',
@@ -339,6 +302,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     sundialRoot.position.set(world[0], 0, world[2]);
   }
   w.add(sundialRoot);
+
+
   const sundialGeometry = makeSundialGeometry(skin);
   w.own({ dispose: () => sundialGeometry.dispose() });
   {
@@ -353,122 +318,37 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   const bounds: RoomBounds[] = [];
   for (let room = 0; room < 4; room++) bounds.push(roomBounds(grid, room));
 
-  const springArea = bounds[SEASON_SPRING] as RoomBounds;
-  const blossomBeds = scatterFlowers({
-    count: 150,
-    area: { x: springArea.cx, z: springArea.cz, halfX: springArea.halfX, halfZ: springArea.halfZ },
-    seed: ctx.seed ^ 0x5b10,
-    exclude: noPlanting,
-    color: skin.seasons[SEASON_SPRING]?.litter ?? white,
-    scale: [0.45, 0.85],
-    stretch: [0.8, 1.2],
-    hueJitter: 0.22,
-    wind: 0.03,
-    windFrequency: 1.5,
-    rimColor: palette.skyHorizon,
-    rimStrength: 0.3,
-    name: 'springBlossomBeds',
-  });
-  w.add(blossomBeds.group);
-  w.time(w.own(blossomBeds));
-
-  const summerArea = bounds[SEASON_SUMMER] as RoomBounds;
-  const lawn = scatterGrass({
-    count: 520,
-    area: { x: summerArea.cx, z: summerArea.cz, halfX: summerArea.halfX, halfZ: summerArea.halfZ },
-    seed: ctx.seed ^ 0x27a1,
-    exclude: noPlanting,
-    color: skin.seasons[SEASON_SUMMER]?.litter ?? white,
-    scale: [0.3, 0.62],
-    stretch: [0.8, 1.4],
-    hueJitter: 0.22,
-    wind: 0.045,
-    windFrequency: 1.7,
-    rimColor: palette.skyHorizon,
-    rimStrength: 0.34,
-    name: 'summerLawn',
-  });
-  w.add(lawn.group);
-  w.time(w.own(lawn));
-
-  const autumnArea = bounds[SEASON_AUTUMN] as RoomBounds;
-  const leafDrifts = scatterRocks({
-    count: 300,
-    area: { x: autumnArea.cx, z: autumnArea.cz, halfX: autumnArea.halfX, halfZ: autumnArea.halfZ },
-    seed: ctx.seed ^ 0x3f77,
-    exclude: noPlanting,
-    color: skin.seasons[SEASON_AUTUMN]?.litter ?? white,
-    scale: [0.11, 0.26],
-    stretch: [0.1, 0.2],
-    hueJitter: 0.3,
-    rimColor: palette.skyHorizon,
-    rimStrength: 0.26,
-    castShadow: false,
-    name: 'autumnLeafDrifts',
-  });
-  w.add(leafDrifts.group);
-  w.time(w.own(leafDrifts));
-
-  const winterArea = bounds[SEASON_WINTER] as RoomBounds;
-  const snowLumps = scatterRocks({
-    count: 190,
-    area: { x: winterArea.cx, z: winterArea.cz, halfX: winterArea.halfX, halfZ: winterArea.halfZ },
-    seed: ctx.seed ^ 0x6c31,
-    exclude: noPlanting,
-    color: skin.seasons[SEASON_WINTER]?.litter ?? white,
-    scale: [0.08, 0.2],
-    stretch: [0.2, 0.36],
-    hueJitter: 0.12,
-    rimColor: palette.hemiSky,
-    rimStrength: 0.4,
-    castShadow: false,
-    name: 'winterSnowLumps',
-  });
-  w.add(snowLumps.group);
-  w.time(w.own(snowLumps));
-
-  const offCourt = excludeRect(0, 0, COURT_HALF, COURT_HALF, 1.1);
-  const nearCamera = excludeRect(
-    Math.sin(CAMERA_AZIMUTH) * CAMERA_STANDOFF,
-    Math.cos(CAMERA_AZIMUTH) * CAMERA_STANDOFF,
-    5,
-    5,
-    0,
-  );
-  const treeSpecs: readonly { room: number; archetype: 'broadleaf' | 'bare'; count: number }[] = [
-    { room: SEASON_SPRING, archetype: 'broadleaf', count: 26 },
-    { room: SEASON_SUMMER, archetype: 'broadleaf', count: 24 },
-    { room: SEASON_AUTUMN, archetype: 'broadleaf', count: 24 },
-    { room: SEASON_WINTER, archetype: 'bare', count: 20 },
+  const planting = [
+    { scatter: scatterFlowers, count: 150, scale: [0.45, 0.85] as const, stretch: [0.8, 1.2] as const, wind: 0.03 },
+    { scatter: scatterGrass, count: 520, scale: [0.3, 0.62] as const, stretch: [0.8, 1.4] as const, wind: 0.045 },
+    { scatter: scatterRocks, count: 300, scale: [0.11, 0.26] as const, stretch: [0.1, 0.2] as const, wind: 0 },
+    { scatter: scatterRocks, count: 190, scale: [0.08, 0.2] as const, stretch: [0.2, 0.36] as const, wind: 0 },
   ];
-  const trees: VegetationHandle[] = [];
-  for (const spec of treeSpecs) {
-    const b = bounds[spec.room] as RoomBounds;
-    const dirX = Math.sign(b.cx) || 1;
-    const dirZ = Math.sign(b.cz) || 1;
-    const handle = scatterTrees({
-      archetypes: [spec.archetype],
-      count: spec.count,
-      area: { x: dirX * 9.6, z: dirZ * 9.6, halfX: 6.4, halfZ: 6.4 },
-      seed: (ctx.seed ^ 0x1a70) + spec.room * 977,
-      exclude: excludeAny(offCourt, nearCamera),
-      heightAt: (x, z) => terrain.sampleHeight(x, z),
-      maxSlope: 0.7,
-      color: skin.seasons[spec.room]?.tree ?? white,
-      scale: [0.7, 1.28],
-      stretch: [0.9, 1.35],
-      hueJitter: 0.24,
-      wind: 0.028,
-      windFrequency: 0.85,
-      rimColor: palette.skyHorizon,
-      rimStrength: 0.3,
-      castShadow: true,
-      name: `${SEASON_NAMES[spec.room] ?? 'season'}Trees`,
-    });
-    w.add(handle.group);
-    w.time(w.own(handle));
-    trees.push(handle);
-  }
+  planting.forEach((spec, season) => {
+    const area = bounds[season] as RoomBounds;
+    for (const outside of [false, true]) {
+      const plants = spec.scatter({
+        count: spec.count * (outside ? 2 : 1),
+        area: { x: area.cx, z: area.cz, halfX: area.halfX + (outside ? 6 : 0), halfZ: area.halfZ + (outside ? 6 : 0) },
+        seed: ctx.seed ^ (0x5b10 + season * 977 + (outside ? 917 : 0)),
+        exclude: outside ? (x, z) => {
+          const distance = Math.hypot(Math.max(0, Math.abs(x - area.cx) - area.halfX), Math.max(0, Math.abs(z - area.cz) - area.halfZ));
+          return Math.max(Math.abs(x) - grid.w * CELL / 2, Math.abs(z) - grid.h * CELL / 2) < 0.04
+            || hash2f(Math.floor(x * 1024), Math.floor(z * 1024), ctx.seed + season) > Math.exp(-distance * distance / 10) * (0.75 + Math.sin(x * 0.83 + Math.sin(z * 0.66) * 2) * 0.25);
+        } : noPlanting,
+        heightAt: outside ? landscape.heightAt : undefined,
+        color: skin.seasons[season]?.litter ?? white,
+        scale: spec.scale,
+        stretch: spec.stretch,
+        wind: spec.wind,
+        hueJitter: 0.22,
+        castShadow: false,
+        name: `${SEASON_NAMES[season]}Garden`,
+      });
+      w.add(plants.group);
+      w.time(w.own(plants));
+    }
+  });
 
   const moteSpecs: readonly {
     room: number;
@@ -508,22 +388,20 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   return w.seal({
     sky,
     rig,
-    terrain,
+    setView(coverage, camera) {
+      fog.density = 2.8 / coverage.far;
+      landscape.setView(coverage, camera, sky);
+    },
     field,
     sundialRoot,
     gateRoots,
     hallways,
-  }, {
-    drop: () => {
-      trees.length = 0;
-    },
   });
 }
 
 export function makeMoonGateGeometry(skin: CourtyardSkin): THREE.BufferGeometry {
-  const detail = 1;
-  const tubular = Math.max(10, Math.round(26 * detail));
-  const radial = Math.max(4, Math.round(7 * detail));
+  const tubular = 26;
+  const radial = 7;
   const RING_R = 0.455;
   const TUBE = 0.075;
   const RING_Y = 0.53;
@@ -550,8 +428,7 @@ export function makeMoonGateGeometry(skin: CourtyardSkin): THREE.BufferGeometry 
 }
 
 export function makeSundialGeometry(skin: CourtyardSkin): THREE.BufferGeometry {
-  const detail = 1;
-  const radial = Math.max(6, Math.round(14 * detail));
+  const radial = 14;
   const parts: ColoredPart[] = [];
 
   const kerb = new THREE.BoxGeometry(CELL - 0.06, 0.17, CELL - 0.06);

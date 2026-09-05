@@ -221,9 +221,8 @@ export function buildSeedRows(
   recorded: ReadonlySet<number>,
 ): SeedRow[] {
   const { lanes, seeds } = envLanes(meta, envId);
-  const maxStep = tape.rows > 0 ? tape.stepEnd[tape.rows - 1] ?? 0 : 0;
   const spark = windowedRates(tape, lanes, 1);
-  const sparkXs = Float64Array.from(spark.x, (x) => (maxStep > 0 ? x / maxStep : 0));
+  const sparkXs = Float64Array.from(spark.x);
   return lanes.map((lane, li) => ({
     seed: seeds[li] ?? 0,
     lane,

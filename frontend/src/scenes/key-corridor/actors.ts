@@ -1,3 +1,4 @@
+import { sculptureMaterial } from './world';
 import { GoalBeacon, KeyToken } from '@kit/grid';
 import {
   emissiveMaterial,
@@ -103,7 +104,6 @@ function sampleVine(u: number, du: number, a: THREE.Vector3, b: THREE.Vector3, o
 
 export function buildGate(opts: GateOptions): GateHandle {
   const { palette, skin, yaw, seed } = opts;
-  const detail = 1;
 
   const group = new THREE.Group();
   group.name = opts.name ?? 'ivyGate';
@@ -118,13 +118,10 @@ export function buildGate(opts: GateOptions): GateHandle {
   root.add(frame);
 
   const stoneGeometry = makeGateStoneGeometry(skin);
-  const stoneMaterial: OakMaterial = oakMaterial({
-    vertexColors: true,
-    flatShading: true,
+  const stoneMaterial: OakMaterial = sculptureMaterial({
     roughness: 0.93,
     rimColor: palette.skyHorizon,
     rimStrength: 0.14,
-    toonSteps: 3,
     toonSoftness: 0.3,
     toonFloor: 0.22,
     name: 'ivyGateStoneMaterial',
@@ -141,13 +138,10 @@ export function buildGate(opts: GateOptions): GateHandle {
   frame.add(pivot);
 
   const doorGeometry = makeDoorGeometry(skin);
-  const doorMaterial: OakMaterial = oakMaterial({
-    vertexColors: true,
-    flatShading: true,
+  const doorMaterial: OakMaterial = sculptureMaterial({
     roughness: 0.78,
     rimColor: palette.skyHorizon,
     rimStrength: 0.18,
-    toonSteps: 3,
     toonSoftness: 0.32,
     toonFloor: 0.28,
     name: 'ivyGateDoorMaterial',
@@ -158,16 +152,13 @@ export function buildGate(opts: GateOptions): GateHandle {
   door.receiveShadow = true;
   pivot.add(door);
 
-  const sprigCount = Math.max(14, Math.round(64 * detail));
+  const sprigCount = 64;
   const sprigGeometry = makeIvySprigGeometry(skin);
-  const ivyMaterial: OakMaterial = oakMaterial({
-    vertexColors: true,
-    flatShading: true,
+  const ivyMaterial: OakMaterial = sculptureMaterial({
     side: THREE.DoubleSide,
     roughness: 0.74,
     rimColor: palette.skyHorizon,
     rimStrength: 0.42,
-    toonSteps: 3,
     toonSoftness: 0.34,
     toonFloor: 0.3,
     name: 'ivyVineMaterial',
@@ -197,7 +188,7 @@ export function buildGate(opts: GateOptions): GateHandle {
     const tint = new THREE.Color();
     const du = 1 / (sprigCount * 4);
     for (let i = 0; i < sprigCount; i++) {
-      const u = sprigCount === 1 ? 0 : i / (sprigCount - 1);
+      const u = i / (sprigCount - 1);
       sampleVine(u, du, a, b, sample);
       us[i] = u;
       basePos[i * 3] = sample.x;
@@ -297,7 +288,6 @@ const JAMB_HEAD_Y = 0.66;
 const JAMB_HEAD_D = 0.4;
 
 export function makeGateStoneGeometry(skin: GardenSkin): THREE.BufferGeometry {
-  const detail = 1;
   const parts: ColoredPart[] = [];
   const jambW = 0.115;
   const jambD = DIVIDER_THICKNESS;
@@ -347,7 +337,7 @@ export function makeGateStoneGeometry(skin: GardenSkin): THREE.BufferGeometry {
 
   const stones = 2;
   for (let i = 0; i < stones; i++) {
-    const s = new THREE.IcosahedronGeometry(0.1, Math.round(detail));
+    const s = new THREE.IcosahedronGeometry(0.1, 1);
     s.scale(1, 0.7, 1.3);
     s.translate(i === 0 ? -0.36 : 0.36, 0.05, jambD * 0.5 - 0.06);
     parts.push({ geometry: s, color: skin.shrineDark });
@@ -357,7 +347,6 @@ export function makeGateStoneGeometry(skin: GardenSkin): THREE.BufferGeometry {
 }
 
 export function makeDoorGeometry(skin: GardenSkin): THREE.BufferGeometry {
-  const detail = 1;
   const parts: ColoredPart[] = [];
   const boards = 5;
   const h = DOOR_HEIGHT - 0.06;
@@ -376,7 +365,7 @@ export function makeDoorGeometry(skin: GardenSkin): THREE.BufferGeometry {
     parts.push({ geometry: strap, color: skin.iron });
   }
 
-  const ring = new THREE.TorusGeometry(0.062, 0.016, Math.max(4, Math.round(6 * detail)), Math.max(8, Math.round(14 * detail)));
+  const ring = new THREE.TorusGeometry(0.062, 0.016, 6, 14);
   ring.rotateY(Math.PI / 2);
   ring.translate(-DOOR_WIDTH + 0.15, h * 0.52, -DOOR_THICKNESS * 0.5 - 0.02);
   parts.push({ geometry: ring, color: skin.iron });
@@ -392,7 +381,7 @@ export function makeIvySprigGeometry(skin: GardenSkin): THREE.BufferGeometry {
   parts.push({ geometry: stem, color: skin.ivyDark });
 
   const leaves: readonly { at: number; side: number }[] =
-    false ? [{ at: 0.5, side: 1 }] : [{ at: 0.3, side: -1 }, { at: 0.74, side: 1 }];
+    [{ at: 0.3, side: -1 }, { at: 0.74, side: 1 }];
   for (const spec of leaves) {
     const leaf = ivyLeafGeometry();
     leaf.rotateZ(spec.side * 0.95);
@@ -447,13 +436,10 @@ export function buildShrine(opts: ShrineOptions): ShrineHandle {
   root.add(body);
 
   const stoneGeometry = makeShrineGeometry(skin);
-  const stoneMaterial: OakMaterial = oakMaterial({
-    vertexColors: true,
-    flatShading: true,
+  const stoneMaterial: OakMaterial = sculptureMaterial({
     roughness: 0.9,
     rimColor: palette.skyHorizon,
     rimStrength: 0.2,
-    toonSteps: 3,
     toonSoftness: 0.3,
     toonFloor: 0.24,
     name: 'shrineStoneMaterial',
@@ -512,8 +498,7 @@ export function buildShrine(opts: ShrineOptions): ShrineHandle {
 }
 
 export function makeShrineGeometry(skin: GardenSkin): THREE.BufferGeometry {
-  const detail = 1;
-  const radial = Math.max(5, Math.round(12 * detail));
+  const radial = 12;
   const parts: ColoredPart[] = [];
 
   const plinth = new THREE.BoxGeometry(0.54, 0.13, 0.54);
@@ -585,13 +570,10 @@ export function buildSeedBed(opts: SeedBedOptions): SeedBedHandle {
   root.add(bed);
 
   const bedGeometry = makeSeedBedGeometry(skin);
-  const bedMaterial: OakMaterial = oakMaterial({
-    vertexColors: true,
-    flatShading: true,
+  const bedMaterial: OakMaterial = sculptureMaterial({
     roughness: 0.92,
     rimColor: palette.skyHorizon,
     rimStrength: 0.34,
-    toonSteps: 3,
     toonSoftness: 0.32,
     toonFloor: 0.28,
     name: 'seedBedMaterial',
@@ -669,7 +651,6 @@ export function buildSeedBed(opts: SeedBedOptions): SeedBedHandle {
 }
 
 export function makeSeedBedGeometry(skin: GardenSkin): THREE.BufferGeometry {
-  const detail = 1;
   const parts: ColoredPart[] = [];
 
   const cushion = new THREE.IcosahedronGeometry(0.19, 1);
@@ -680,7 +661,7 @@ export function makeSeedBedGeometry(skin: GardenSkin): THREE.BufferGeometry {
   const stones = 7;
   for (let i = 0; i < stones; i++) {
     const a = (i / stones) * Math.PI * 2;
-    const s = new THREE.IcosahedronGeometry(0.062, Math.round(detail));
+    const s = new THREE.IcosahedronGeometry(0.062, 1);
     s.scale(1.25, 0.72, 0.9);
     s.translate(0.235, 0.035, 0);
     s.rotateY(a + i * 0.31);

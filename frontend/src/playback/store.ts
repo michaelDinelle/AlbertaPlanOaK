@@ -7,7 +7,7 @@ export interface TransportState {
   slice: boolean;
 }
 
-const transport = createStore<TransportState>({ playing: true, speed: DEFAULT_SPEED, slice: false });
+const transport = createStore<TransportState>('transport', { playing: true, speed: DEFAULT_SPEED, slice: false });
 
 export const transportSnapshot = transport.get;
 export const subscribeTransport = transport.subscribe;

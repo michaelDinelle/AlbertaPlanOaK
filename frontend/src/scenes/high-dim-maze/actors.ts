@@ -1,3 +1,4 @@
+import { sculptureMaterial, gradedGeometry } from '../key-corridor/world';
 import { GoalBeacon } from '@kit/grid';
 import {
   emissiveMaterial,
@@ -41,7 +42,6 @@ export interface OasisHandle {
 
 export function buildOasis(opts: OasisOptions): OasisHandle {
   const { palette, skin } = opts;
-  const detail = 1;
   const group = new THREE.Group();
   group.name = opts.name ?? 'oasisAlcove';
 
@@ -76,19 +76,16 @@ export function buildOasis(opts: OasisOptions): OasisHandle {
         color: i % 3 === 0 ? (skin.strata[1] ?? skin.stone) : (skin.strata[2] ?? skin.stone),
       });
     }
-    const bed = new THREE.CylinderGeometry(POOL_R * 1.08, POOL_R * 0.8, 0.09, Math.max(6, Math.round(16 * detail)));
+    const bed = new THREE.CylinderGeometry(POOL_R * 1.08, POOL_R * 0.8, 0.09, 16);
     bed.translate(0, 0.02, 0);
     basinParts.push({ geometry: bed, color: skin.waterDeep });
   }
   const basinGeometry = mergeColoredParts(basinParts, 'oasisBasin');
-  const basinMaterial: OakMaterial = oakMaterial({
+  const basinMaterial: OakMaterial = sculptureMaterial({
     color: palette.sun,
-    vertexColors: true,
-    flatShading: true,
     roughness: 0.7,
     rimColor: skin.rim,
     rimStrength: 0.45,
-    toonSteps: 3,
     toonSoftness: 0.3,
     toonFloor: 0.28,
     name: 'oasisBasinMaterial',
@@ -121,10 +118,8 @@ export function buildOasis(opts: OasisOptions): OasisHandle {
   alcove.add(water.mesh);
 
   const reedGeometry = makeReedGeometry();
-  const reedMaterial: OakMaterial = oakMaterial({
+  const reedMaterial: OakMaterial = sculptureMaterial({
     color: skin.reed,
-    vertexColors: true,
-    flatShading: true,
     side: THREE.DoubleSide,
     roughness: 0.78,
     rimColor: skin.rim,
@@ -171,7 +166,7 @@ export function buildOasis(opts: OasisOptions): OasisHandle {
     POOL_R * 2.5,
     POOL_R * 0.6,
     SHAFT_TOP,
-    Math.max(6, Math.round(18 * detail)),
+    18,
     1,
     true,
   );
@@ -240,9 +235,7 @@ export function buildOasis(opts: OasisOptions): OasisHandle {
 
 function makeReedGeometry(): THREE.BufferGeometry {
   const blades = 3;
-  const positions = new Float32Array(blades * 2 * 3 * 3);
-  const colors = new Float32Array(blades * 2 * 3 * 3);
-  let o = 0;
+  const vertices: (readonly [number, number, number, number])[] = [];
   for (let b = 0; b < blades; b++) {
     const a = (b / blades) * Math.PI * 1.1 - 0.4;
     const h = 0.3 + 0.14 * ((b * 5) % 3) / 2;
@@ -262,23 +255,9 @@ function makeReedGeometry(): THREE.BufferGeometry {
       [midX + dx * 0.5, h * 0.55, midZ + dz * 0.5, 0.85],
       [tipX, h, tipZ, 1.2],
     ];
-    for (const [x, y, z, k] of pts) {
-      positions[o * 3] = x;
-      positions[o * 3 + 1] = y;
-      positions[o * 3 + 2] = z;
-      colors[o * 3] = k;
-      colors[o * 3 + 1] = k;
-      colors[o * 3 + 2] = k;
-      o++;
-    }
+    vertices.push(...pts);
   }
-  const g = new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  g.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-  g.computeVertexNormals();
-  g.computeBoundingSphere();
-  g.name = 'oasisReed';
-  return g;
+  return gradedGeometry('oasisReed', vertices);
 }
 
 export interface ScarfOptions {
@@ -302,10 +281,8 @@ export function buildScarf(opts: ScarfOptions): ScarfHandle {
 
   const SEG_LEN = 0.2;
   const geometry = makeScarfPanelGeometry(SEG_LEN);
-  const material: OakMaterial = oakMaterial({
+  const material: OakMaterial = sculptureMaterial({
     color: opts.color,
-    vertexColors: true,
-    flatShading: true,
     side: THREE.DoubleSide,
     transparent: true,
     opacity: 0.9,
@@ -396,25 +373,7 @@ function makeScarfPanelGeometry(length: number): THREE.BufferGeometry {
     [w1, 0, -length * 0.5, 0.72],
     [-w1, 0, -length * 0.5, 0.72],
   ];
-  const positions = new Float32Array(verts.length * 3);
-  const colors = new Float32Array(verts.length * 3);
-  for (let i = 0; i < verts.length; i++) {
-    const v = verts[i];
-    if (!v) continue;
-    positions[i * 3] = v[0];
-    positions[i * 3 + 1] = v[1];
-    positions[i * 3 + 2] = v[2];
-    colors[i * 3] = v[3];
-    colors[i * 3 + 1] = v[3];
-    colors[i * 3 + 2] = v[3];
-  }
-  const g = new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  g.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-  g.computeVertexNormals();
-  g.computeBoundingSphere();
-  g.name = 'wispScarfPanel';
-  return g;
+  return gradedGeometry('wispScarfPanel', verts);
 }
 
 export interface GustOptions {

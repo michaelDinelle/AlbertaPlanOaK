@@ -1,3 +1,5 @@
+import { PULSE_SECONDS } from '@kit/celebrate';
+import { makeSceneView, type SceneView } from '../jelly-bean-world/view';
 import { DELAYEDCHAIN_ACTION, DELAYEDCHAIN_POS } from '@sim/envs/delayedchain';
 import type { GroundTruthOptions } from '@kit/debug';
 import { cellToWorld, cellToWorldVec, type GridSize } from '@kit/grid';
@@ -5,7 +7,7 @@ import { clamp01, envelope } from '@kit/mix';
 import type { OrbitRigOptions } from '@kit/rigs';
 import { StageScene, type Stage } from '@kit/stage';
 import { TOKENS } from '@kit/tokens';
-import type { FrameState, FrameUpdate, SceneContext, SceneFactory } from '@kit/types';
+import type { FrameState, FrameUpdate, SceneContext, SceneFactory, SceneSize } from '@kit/types';
 import { Wisp } from '@kit/wisp';
 import * as THREE from 'three';
 import type { GridCell, GridGeometry } from '@sim/types';
@@ -19,19 +21,12 @@ import {
   type WispGlowHandle,
 } from './actors';
 import {
-  CAMERA_AZIMUTH,
-  SHADOW_RADIUS,
   buildWorld,
   goalCellOf,
   resolveGrid,
   type WorldHandle,
 } from './world';
 
-const CAM_DISTANCE = 8.4;
-const CAM_POLAR = 1.43;
-const CAM_TARGET_Y = 1.3;
-const CAM_LOOK_AHEAD = 0.9;
-const CAM_FOLLOW_RATE = 5.5;
 
 export const WAVE_TRAVEL = 1.35;
 export const IGNITE_ATTACK = 0.14;
@@ -59,12 +54,13 @@ function readState(state: FrameState, grid: GridSize, out: GridCell): number {
 
 class LongNightRoadScene extends StageScene<WorldHandle> {
   protected readonly stageName = 'longNightRoad';
+  private view: SceneView | null = null;
 
   private road: LanternRoadHandle | null = null;
   private milestone: MilestoneHandle | null = null;
   private wisp: Wisp | null = null;
   private glow: WispGlowHandle | null = null;
-  private grid: GridGeometry = resolveGrid({});
+  private grid!: GridGeometry;
   private goalCell = 0;
 
   private waveAt = -Infinity;
@@ -78,15 +74,14 @@ class LongNightRoadScene extends StageScene<WorldHandle> {
   private readonly burstPos = new THREE.Vector3();
   private readonly groundPos = new THREE.Vector3();
   private readonly lightPos = new THREE.Vector3();
-  private readonly shadowCenter = { x: 0, y: 0.3, z: 0 };
-  private shadowCell = Number.NaN;
-  private camX = 0;
   private gold = 0xffd166;
   private flame = 0xffd166;
 
   protected buildWorld(ctx: SceneContext): WorldHandle {
     const grid = resolveGrid(ctx.geometry);
     this.grid = grid;
+    const half = Math.abs(cellToWorld(0, 0, grid)[0]) + 2;
+    this.view = makeSceneView(ctx, { min: [-half, -0.5, -3], max: [half, 3, 3] }, [0, 1.3, 0], { distance: 8.4, azimuth: -1.16, polar: 1.36 });
     this.goalCell = goalCellOf(grid);
     return buildWorld(ctx, this.scene, grid);
   }
@@ -163,22 +158,9 @@ class LongNightRoadScene extends StageScene<WorldHandle> {
     this.scene.add(glow.mesh);
   }
 
-  protected rigOptions(ctx: SceneContext): OrbitRigOptions {
-    return {
-      target: [0, CAM_TARGET_Y, 0],
-      distance: CAM_DISTANCE,
-      azimuth: CAMERA_AZIMUTH,
-      polar: CAM_POLAR,
-      limits: {
-            minPolar: 1.15,
-            maxPolar: 1.52,
-            minAzimuth: CAMERA_AZIMUTH - 0.45,
-            maxAzimuth: CAMERA_AZIMUTH + 0.45,
-            minDistance: 4.5,
-            maxDistance: 16,
-          },
-      rotateSpeed: 0.0035,
-    };
+  protected rigOptions(_ctx: SceneContext): OrbitRigOptions {
+    if (!this.view) throw new Error('Scene view is missing');
+    return this.view.options;
   }
 
   protected overlayOptions(): GroundTruthOptions {
@@ -203,18 +185,15 @@ class LongNightRoadScene extends StageScene<WorldHandle> {
     const rig = this.rig;
     if (!road || !wisp || !glow || !rig) return;
     world.setTime(0);
+    if (this.view && this.rig) world.setView(this.view.update(this.rig, 0, [(this.wisp?.position.x ?? 0) + 0.9, 1.3, 0]), this.camera);
     world.aurora.setGain(1);
     road.setTime(0);
     this.milestone?.setTime(0);
     wisp.setCell(0, 0, this.grid);
-    this.camX = wisp.position.x;
-    rig.setTarget(this.camX + CAM_LOOK_AHEAD, CAM_TARGET_Y, 0);
-    rig.snap();
     glow.mesh.position.copy(wisp.position);
     glow.mesh.position.y += ctx.tokens.wispHeight;
     glow.mesh.quaternion.copy(this.camera.quaternion);
     glow.setGain(1);
-    this.applyShadowFocus(wisp.position.x, world);
   }
 
   protected tick(frame: FrameUpdate, { world, pool, rig, time }: Stage<WorldHandle>): void {
@@ -230,7 +209,6 @@ class LongNightRoadScene extends StageScene<WorldHandle> {
 
     const lastA = readState(state, grid, agent);
 
-    let snapCamera = false;
     if (frame.scrubbed) {
       pool.clear();
       this.waveAt = -Infinity;
@@ -238,7 +216,32 @@ class LongNightRoadScene extends StageScene<WorldHandle> {
       this.burstAt = -Infinity;
       wisp.setCell(agent.x, agent.y, grid);
       wisp.snap();
-      snapCamera = true;
+      const log = frame.eventLog;
+      let low = 0;
+      let high = log.count;
+      while (low < high) {
+        const mid = (low + high) >>> 1;
+        if ((log.steps[mid] ?? Infinity) <= state.step) low = mid + 1;
+        else high = mid;
+      }
+      const seconds = state.step > 0 ? state.simTime / state.step : 0;
+      for (let i = low - 1; i >= 0; i--) {
+        const at = ((log.steps[i] ?? -1) + 1) * seconds;
+        if (time - at > WAVE_SPAN) break;
+        if (log.types[log.kinds[i] ?? 0] === 'goal') {
+          this.waveAt = at;
+          this.surgeAt = at;
+          this.burstAt = at;
+          this.burstPos.copy(road.endLamp);
+          cellToWorldVec(this.goalCell, 0, grid, this.groundPos);
+          pool.burst(this.burstPos, this.flame, BURST_SCALE, at);
+          pool.ripple(this.groundPos, this.gold, RIPPLE_SCALE, at);
+          pool.pulse.reset();
+          pool.pulse.fire(Math.max(0, PULSE_STRENGTH - (time - at) / PULSE_SECONDS));
+          pool.update(0, time);
+          break;
+        }
+      }
     }
 
     let teleported = false;
@@ -266,7 +269,6 @@ class LongNightRoadScene extends StageScene<WorldHandle> {
     if (teleported) {
       wisp.setCell(agent.x, agent.y, grid);
       wisp.snap();
-      snapCamera = true;
     }
     if (paid) wisp.flare(WISP_FLARE);
 
@@ -319,15 +321,15 @@ class LongNightRoadScene extends StageScene<WorldHandle> {
     road.update(frame.dtReal, time);
     this.milestone?.setTime(time);
 
-    {
-      const wispX = wisp.position.x;
-      if (snapCamera) this.camX = wispX;
-      else this.camX += (wispX - this.camX) * (1 - Math.exp(-CAM_FOLLOW_RATE * Math.max(0, frame.dtReal)));
-      rig.setTarget(this.camX + CAM_LOOK_AHEAD, CAM_TARGET_Y, 0);
+    if (this.view) world.setView(this.view.update(rig, frame.dtReal, [wisp.position.x + 0.9, 1.3, 0]), this.camera);
+  }
+
+  override resize(size: SceneSize): void {
+    super.resize(size);
+    if (this.view && this.rig && this.world) {
+      this.view.resize(size, this.rig);
+      this.world.setView(this.view.update(this.rig, 0, [(this.wisp?.position.x ?? 0) + 0.9, 1.3, 0]), this.camera);
     }
-    if (snapCamera) rig.snap();
-    else rig.update(frame.dtReal);
-    this.applyShadowFocus(wisp.position.x, world);
   }
 
   protected drop(): void {
@@ -343,16 +345,9 @@ class LongNightRoadScene extends StageScene<WorldHandle> {
     this.surgeAt = -Infinity;
     this.burstAt = -Infinity;
     this.waveLit = false;
-    this.shadowCell = Number.NaN;
   }
 
-  private applyShadowFocus(x: number, world: WorldHandle): void {
-    const cell = Math.round(x);
-    if (cell === this.shadowCell) return;
-    this.shadowCell = cell;
-    this.shadowCenter.x = cell;
-    world.rig.setShadowFocus(this.shadowCenter, SHADOW_RADIUS);
-  }
+
 }
 
 export function lanternGlow(age: number, index: number, count: number): number {

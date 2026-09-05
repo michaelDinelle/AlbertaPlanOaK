@@ -1,720 +1,517 @@
 import * as THREE from 'three';
+import { mergeGeometries, mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
 import { applyFog, makeLightRig, type LightRig } from '@kit/lighting';
-import { oakMaterial, oakUniforms, setMaterialsTime, type OakMaterial } from '@kit/materials';
-import { blendTokens, clampRange, smoothstep01, TOKEN_BLACK, TOKEN_WHITE } from '@kit/mix';
-import {
-  makeAmbientParticles,
-  makeMistPlanes,
-  type AmbientParticlesHandle,
-  type MistPlanesHandle,
-} from '@kit/particles';
-import { mergeColoredParts, type ColoredPart } from '@kit/parts';
-import { hash1f, hash2f, streamFor } from '@kit/rng';
+import { buildAurora } from '@kit/aurora';
+import { oakMaterial, oakUniforms } from '@kit/materials';
+import { rngAt } from '@kit/rng';
 import { skyFromPalette, type SkyHandle } from '@kit/sky';
-import { makeTileBank } from '@kit/tiles';
-import { makeTerrain, type TerrainHandle } from '@kit/terrain';
-import { TOKENS, type Palette } from '@kit/tokens';
+import type { Palette } from '@kit/tokens';
 import type { SceneContext } from '@kit/types';
-import { grassClumpGeometry, rockGeometry } from '@kit/vegetation';
+import type { VegetationHandle } from '@kit/vegetation';
 import { makeWorld, type WorldCore } from '@kit/world';
+import { makeContinuousSurface, makeSceneryBank, type ViewCoverage } from '../jelly-bean-world/view';
+import { makePrairieTerrain, mountainGeometry, prairieGroundHeight, prairiePlacement, prairieRidge } from './terrain';
 
-export const LANE_HALF_Z = 0.62;
-export const LANE_FEATHER = 3.1;
-export const GROUND_PERIOD = 48;
-export const GROUND_W = GROUND_PERIOD * 3;
-export const GROUND_D = 104;
-const GROUND_SEG_X = 192;
-const GROUND_SEG_Z = 84;
-export const TILE = 6;
-export const CAIRN_SPACING = 10;
-export const FOG_EXTENT = 250;
-export const SUN_DIR: readonly [number, number, number] = [-0.62, 0.469, -0.63];
-export const SHADOW_RADIUS = 4.2;
+export { prairieHeight } from './terrain';
 
-const ROLL_RAMP = 22;
-const RIDGE_Z = -72;
-const RIDGE_PERIOD = 96;
-const RIDGE_SEGMENTS = 288;
+export type Landscape = ReturnType<typeof makeLandscape>;
 
-const TWO_PI_OVER_PERIOD = (Math.PI * 2) / GROUND_PERIOD;
-
-export function savannaHeight(x: number, z: number): number {
-  const az = Math.abs(z);
-  const lane = smoothstep01((az - LANE_HALF_Z) / LANE_FEATHER);
-  if (lane <= 0) return 0;
-  const amp = lane * Math.min(1, (az - LANE_HALF_Z) / ROLL_RAMP);
-  if (amp <= 0) return 0;
-  const k = TWO_PI_OVER_PERIOD * x;
-  const roll =
-    0.7 * Math.sin(k + 0.7 + 0.021 * z) * Math.cos(0.048 * z) +
-    0.3 * Math.sin(2 * k + 2.3 + 0.075 * z) +
-    0.14 * Math.sin(3 * k - 1.1) * Math.sin(0.062 * z + 0.5);
-  const away = z < 0 ? Math.min(1, -z / 60) : 0;
-  return amp * (roll - 1.1 * away * away);
+export function makeLandscape(scene: THREE.Scene, name: string, palette: Palette, mood: 'dawn' | 'dusk' | 'night', options: {
+  sky?: Parameters<typeof skyFromPalette>[2];
+  light?: Parameters<typeof makeLightRig>[1];
+  fogExtent?: number;
+  fogDensity?: number;
+} = {}) {
+  const world = makeWorld(name);
+  const skyRadius = options.sky?.radius ?? 1;
+  const sky = world.own(world.time(skyFromPalette(palette, mood, { ...options.sky, radius: skyRadius })));
+  world.add(sky.mesh);
+  const rig = world.own(makeLightRig(palette, { sunDir: sky.sunDirection, pointCount: 2, ...options.light }));
+  world.add(rig.group);
+  const fog = applyFog(scene, palette, options.fogExtent ?? 220);
+  const surfaces: ReturnType<typeof makeContinuousSurface>[] = [];
+  const banks: { bank: ReturnType<typeof makeSceneryBank>; camera: boolean }[] = [];
+  return {
+    world,
+    sky,
+    rig,
+    fog,
+    surface(options: Parameters<typeof makeContinuousSurface>[0]) {
+      const surface = world.own(world.time(makeContinuousSurface(options)));
+      world.add(surface.mesh);
+      surfaces.push(surface);
+      return surface;
+    },
+    scatter(options: Parameters<typeof makeSceneryBank>[0], camera = false) {
+      world.own(options.geometry);
+      world.own(options.material);
+      const motion = oakUniforms(options.material);
+      if (motion) world.time(motion);
+      const bank = world.own(makeSceneryBank(options));
+      world.add(bank.mesh);
+      banks.push({ bank, camera });
+      return bank;
+    },
+    setView(coverage: ViewCoverage, camera: THREE.Camera, ...others: { setView(coverage: ViewCoverage): void }[]) {
+      for (const surface of surfaces) surface.setView(coverage);
+      for (const entry of banks) entry.bank.setView(entry.camera ? { ...coverage, x: camera.position.x, z: camera.position.z } : coverage);
+      for (const other of others) other.setView(coverage);
+      sky.mesh.position.copy(camera.position);
+      sky.mesh.scale.setScalar(coverage.far * 0.85 / skyRadius);
+      fog.density = options.fogDensity ?? 2.8 / coverage.far;
+    },
+  };
 }
 
-function groundPatch(x: number, z: number, seed: number): number {
-  const u = (x / GROUND_PERIOD) * 6;
-  return (
-    0.62 * noiseTiled(u, z * 0.14, 6, seed) +
-    0.38 * noiseTiled(u * 3, z * 0.42 + 11.7, 18, seed ^ 0x5f3a91)
-  );
-}
-
-function noiseTiled(u: number, v: number, period: number, seed: number): number {
-  const iu = Math.floor(u);
-  const iv = Math.floor(v);
-  const fu = fade(u - iu);
-  const fv = fade(v - iv);
-  const u0 = ((iu % period) + period) % period;
-  const u1 = ((iu + 1) % period + period) % period;
-  const n00 = hash2f(u0, iv, seed);
-  const n10 = hash2f(u1, iv, seed);
-  const n01 = hash2f(u0, iv + 1, seed);
-  const n11 = hash2f(u1, iv + 1, seed);
-  const a = n00 + (n10 - n00) * fu;
-  const b = n01 + (n11 - n01) * fu;
-  return a + (b - a) * fv;
-}
-
-function fade(t: number): number {
-  return t * t * (3 - 2 * t);
-}
-
-export function acaciaGeometry(detail: number, bark: THREE.Color, leafLow: THREE.Color, leafHigh: THREE.Color): THREE.BufferGeometry {
-  const parts: ColoredPart[] = [];
-  const radial = detail > 0 ? 7 : 5;
-  const trunk = new THREE.CylinderGeometry(0.075, 0.17, 1.75, radial, 1);
-  trunk.translate(0, 0.87, 0);
-  trunk.rotateZ(0.05);
-  parts.push({ geometry: trunk, color: bark });
-  const boughs: readonly (readonly [number, number, number])[] = [
-    [0.62, 0.95, 1.15],
-    [-0.72, 1.0, 2.5],
-    [0.2, 0.8, 4.1],
-  ];
-  for (const [lean, len, yaw] of boughs) {
-    const bough = new THREE.CylinderGeometry(0.045, 0.085, len, radial, 1);
-    bough.translate(0, len * 0.5, 0);
-    bough.rotateZ(lean > 0 ? -0.62 : 0.62);
-    bough.rotateY(yaw);
-    bough.translate(0, 1.6, 0);
-    parts.push({ geometry: bough, color: bark });
+function prairieGrass() {
+  const positions: number[] = [], colors: number[] = [];
+  const root = new THREE.Color(0x667044), tip = new THREE.Color(0xc2b875), color = new THREE.Color();
+  for (let blade = 0; blade < 6; blade++) {
+    const angle = blade * 2.3999632, radius = 0.07 * Math.sqrt(blade);
+    const height = 0.16 + 0.18 * (0.5 + 0.5 * Math.sin(blade * 4.1));
+    const vertices: THREE.Vector3[] = [];
+    for (let level = 0; level < 4; level++) {
+      const t = level / 3, bend = t * t * 0.19;
+      const x = Math.cos(angle) * (radius + bend), z = Math.sin(angle) * (radius + bend);
+      const width = (1 - t) * 0.011;
+      for (const side of level === 3 ? [0] : [-1, 1]) vertices.push(new THREE.Vector3(x + Math.sin(angle) * width * side, height * t, z - Math.cos(angle) * width * side));
+    }
+    for (const i of [0, 1, 2, 1, 3, 2, 2, 3, 4, 3, 5, 4, 4, 5, 6]) {
+      const p = vertices[i]!;
+      positions.push(p.x, p.y, p.z);
+      color.copy(root).lerp(tip, p.y / height);
+      colors.push(color.r, color.g, color.b);
+    }
   }
-  const crown: readonly (readonly [number, number, number, number])[] = [
-    [0, 2.36, 0, 1.72],
-    [1.24, 2.22, 0.4, 1.06],
-    [-1.16, 2.26, -0.5, 1.12],
-    [0.24, 2.16, -1.16, 0.9],
-    [-0.3, 2.14, 1.2, 0.84],
-    [0.7, 2.44, -0.3, 0.72],
-  ];
-  for (const [x, y, z, r] of crown) {
-    const blob = new THREE.IcosahedronGeometry(r, detail);
-    blob.scale(1, 0.2, 1);
-    blob.translate(x, y, z);
-    parts.push({ geometry: blob, color: y > 2.3 ? leafHigh : leafLow });
-  }
-  return mergeColoredParts(parts, 'acacia');
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+  geometry.computeVertexNormals();
+  const material = oakMaterial({ vertexColors: true, side: THREE.DoubleSide, roughness: 1, wind: { amplitude: 0.014, frequency: 0.6, height: 0.46 }, toonSteps: 6, toonSoftness: 1, toonFloor: 0.75 });
+  return { geometry, material };
 }
 
-export function cairnGeometry(seed: number, stone: THREE.Color, stoneLight: THREE.Color): THREE.BufferGeometry {
-  const parts: ColoredPart[] = [];
-  const rng = streamFor(seed, 'cairn');
-  const tiers = 6;
-  let stack = 0;
-  for (let i = 0; i < tiers; i++) {
-    const k = i / (tiers - 1);
-    const r = 0.15 * (1 - k * 0.55);
-    const h = 0.09 * (1 - k * 0.25);
-    const g = new THREE.IcosahedronGeometry(r, 0);
-    g.scale(1 + (rng() - 0.5) * 0.36, (h / r) * 1.2, 1 + (rng() - 0.5) * 0.36);
-    g.rotateY(rng() * Math.PI * 2);
-    g.translate((rng() - 0.5) * 0.05, stack + h * 0.5, (rng() - 0.5) * 0.05);
-    parts.push({ geometry: g, color: i % 2 === 0 ? stone : stoneLight });
-    stack += h;
+function aspenTree(world: ReturnType<typeof makeWorld>) {
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = 256;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('aspen texture canvas unavailable');
+  for (let i = 0; i < 110; i++) {
+    const angle = i * 2.3999632, radius = Math.sqrt(i / 110);
+    const x = 128 + Math.cos(angle) * radius * 112, y = 128 + Math.sin(angle) * radius * 112;
+    ctx.fillStyle = ['#8ca357', '#c6ce8a', '#a6bd70', '#d1d28b'][i % 4]!;
+    ctx.beginPath();
+    ctx.ellipse(x, y, 6 + i % 3, 9 + i % 4, angle, 0, Math.PI * 2);
+    ctx.fill();
   }
-  return mergeColoredParts(parts, 'cairn');
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, 4, 4);
+  const map = world.own(new THREE.CanvasTexture(canvas));
+  map.colorSpace = THREE.SRGBColorSpace;
+  const parts: THREE.BufferGeometry[] = [];
+  const add = (geometry: THREE.BufferGeometry, color: number, wood = false) => {
+    const colors = new Float32Array(geometry.getAttribute('position').count * 3), tint = new THREE.Color(color);
+    for (let i = 0; i < colors.length / 3; i++) colors.set([tint.r, tint.g, tint.b], i * 3);
+    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    if (wood) {
+      const uv = geometry.getAttribute('uv');
+      for (let i = 0; i < uv.count; i++) uv.setXY(i, 0.006, 0.994);
+    }
+    parts.push(geometry.toNonIndexed());
+    geometry.dispose();
+  };
+  add(new THREE.CylinderGeometry(0.025, 0.085, 3.4, 7).translate(0, 1.66, 0), 0xc4c4b0, true);
+  for (let i = 0; i < 15; i++) {
+    const angle = i * 2.4, y = 1.35 + i * 0.15;
+    const spread = 0.62 * Math.sin((i + 1) / 17 * Math.PI);
+    const end = new THREE.Vector3(Math.cos(angle) * spread, y + 0.32, Math.sin(angle) * spread);
+    const start = new THREE.Vector3(0, y, 0), branch = end.clone().sub(start);
+    const wood = new THREE.CylinderGeometry(0.006, 0.021, branch.length(), 5);
+    wood.applyQuaternion(new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), branch.normalize()));
+    wood.translate(end.x / 2, (y + end.y) / 2, end.z / 2);
+    add(wood, 0x979680, true);
+    for (let face = 0; face < 2; face++) {
+      const leaves = new THREE.PlaneGeometry(0.95, 1.05);
+      leaves.rotateY(angle + face * Math.PI / 2);
+      leaves.rotateZ(Math.sin(i * 1.7) * 0.2);
+      leaves.translate(end.x, end.y, end.z);
+      add(leaves, 0xffffff);
+    }
+  }
+  const geometry = mergeGeometries(parts);
+  for (const part of parts) part.dispose();
+  const material = oakMaterial({ map, vertexColors: true, roughness: 0.95, side: THREE.DoubleSide, toonSteps: 6, toonSoftness: 1, toonFloor: 0.6 });
+  material.alphaTest = 0.3;
+  material.alphaToCoverage = true;
+  return { geometry, material };
 }
 
-export function ridgeHeight(x: number): number {
-  const k = (Math.PI * 2 * x) / RIDGE_PERIOD;
-  return (
-    5.2 +
-    2.4 * Math.sin(k + 0.4) +
-    1.7 * Math.sin(2 * k + 2.1) +
-    1.1 * Math.sin(3 * k - 0.7) +
-    0.7 * Math.sin(5 * k + 1.9) +
-    0.4 * Math.sin(8 * k - 2.4)
-  );
+function fieldstones(world: ReturnType<typeof makeWorld>) {
+  const geometry = new THREE.SphereGeometry(0.4, 20, 12);
+  const position = geometry.getAttribute('position'), colors = new Float32Array(position.count * 3);
+  const stone = new THREE.Color(0xf5f2ec), lichen = new THREE.Color(0xc4c19a), color = new THREE.Color();
+  for (let i = 0; i < position.count; i++) {
+    const x = position.getX(i), y = position.getY(i), z = position.getZ(i);
+    const wear = 0.93 + 0.1 * Math.sin(x * 13 + y * 9) * Math.cos(z * 11 - x * 5);
+    position.setXYZ(i, x * wear, (y + 0.4) * 0.6 * wear, z * wear * 0.85);
+    color.copy(stone).lerp(lichen, THREE.MathUtils.smoothstep(y, 0.1, 0.4) * (0.5 + 0.5 * Math.sin(x * 28 + z * 17)));
+    color.multiplyScalar(THREE.MathUtils.lerp(0.48, 1, THREE.MathUtils.smoothstep(y, -0.4, -0.06)));
+    colors.set([color.r, color.g, color.b], i * 3);
+  }
+  geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  geometry.computeVertexNormals();
+  const map = world.own(new THREE.TextureLoader().load('/textures/prairie-fieldstone.webp'));
+  map.colorSpace = THREE.SRGBColorSpace;
+  map.wrapS = map.wrapT = THREE.MirroredRepeatWrapping;
+  map.repeat.set(2, 1);
+  map.anisotropy = 4;
+  return { geometry, material: new THREE.MeshStandardMaterial({ vertexColors: true, map, bumpMap: map, bumpScale: 0.012, roughness: 1 }) };
 }
 
-function ridgeGeometry(low: THREE.Color, high: THREE.Color): THREE.BufferGeometry {
-  const n = RIDGE_SEGMENTS;
-  const span = RIDGE_PERIOD * 4;
-  const positions = new Float32Array((n + 1) * 2 * 3);
-  const colors = new Float32Array((n + 1) * 2 * 3);
-  const indices = new Uint16Array(n * 6);
-  for (let i = 0; i <= n; i++) {
-    const x = -span / 2 + (span * i) / n;
-    const h = ridgeHeight(x);
-    const top = i * 2;
-    const bottom = top + 1;
-    positions[top * 3] = x;
-    positions[top * 3 + 1] = h;
-    positions[top * 3 + 2] = 0;
-    positions[bottom * 3] = x;
-    positions[bottom * 3 + 1] = -6;
-    positions[bottom * 3 + 2] = 0;
-    const k = Math.min(1, Math.max(0, (h - 3) / 6));
-    colors[top * 3] = low.r + (high.r - low.r) * k;
-    colors[top * 3 + 1] = low.g + (high.g - low.g) * k;
-    colors[top * 3 + 2] = low.b + (high.b - low.b) * k;
-    colors[bottom * 3] = low.r;
-    colors[bottom * 3 + 1] = low.g;
-    colors[bottom * 3 + 2] = low.b;
+function hoodooGeometry(): THREE.BufferGeometry {
+  const height = (x: number, z: number) => 1.65 * Math.exp(-x * x / 8 - z * z / 2.5)
+    + 2.3 * Math.exp(-Math.pow((x + 1.1 + z * 0.22) / 0.9, 6) - Math.pow((z + 0.2) / 0.8, 6))
+    + 1.3 * Math.exp(-Math.pow((x - 1.4) / 0.8, 4) - Math.pow((z - 0.15) / 0.7, 4));
+  const bluff = new THREE.PlaneGeometry(9, 5, 36, 24);
+  bluff.rotateX(-Math.PI / 2);
+  const position = bluff.getAttribute('position');
+  for (let i = 0; i < position.count; i++) {
+    const x = position.getX(i), z = position.getZ(i);
+    const erosion = 0.06 * Math.sin(x * 15 + z * 3) * Math.sin(z * 11);
+    position.setY(i, height(x, z) * (1 + erosion) - 0.16);
   }
-  let o = 0;
-  for (let i = 0; i < n; i++) {
-    const a = i * 2;
-    indices[o++] = a;
-    indices[o++] = a + 1;
-    indices[o++] = a + 2;
-    indices[o++] = a + 2;
-    indices[o++] = a + 1;
-    indices[o++] = a + 3;
+  bluff.computeVertexNormals();
+  const parts: THREE.BufferGeometry[] = [bluff.toNonIndexed()];
+  bluff.dispose();
+  for (const [x, z, width] of [[-1.1, -0.2, 1.9]] as const) {
+    const cap = new THREE.IcosahedronGeometry(1, 1);
+    const vertices = cap.getAttribute('position');
+    for (let i = 0; i < vertices.count; i++) {
+      const px = vertices.getX(i), py = vertices.getY(i), pz = vertices.getZ(i);
+      vertices.setXYZ(i, px * width * 0.62 * (1 + 0.15 * Math.sin(pz * 5 + x)), py * 0.22 + px * 0.06 + pz * 0.045, pz * 0.88 * (1 + 0.13 * Math.cos(px * 4 + x)));
+    }
+    cap.computeVertexNormals();
+    cap.translate(x, height(x, z) - 0.22, z);
+    parts.push(cap);
   }
-  const g = new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  g.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-  g.setIndex(new THREE.BufferAttribute(indices, 1));
-  g.computeVertexNormals();
-  g.computeBoundingSphere();
-  g.name = 'savannaRidge';
-  return g;
+  for (const [part, geometry] of parts.entries()) {
+    const vertices = geometry.getAttribute('position');
+    const colors = new Float32Array(vertices.count * 3);
+    const sand = new THREE.Color(0xdec9a9), shale = new THREE.Color(0x796656), color = new THREE.Color();
+    for (let i = 0; i < vertices.count; i++) {
+      const y = vertices.getY(i);
+      color.copy(sand).lerp(shale, part > 0 ? 0.65 : y < 1.1 ? 0.48 + 0.14 * Math.sin(y * 18) : 0.08);
+      colors.set([color.r, color.g, color.b], i * 3);
+    }
+    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  }
+  const merged = mergeGeometries(parts), geometry = mergeVertices(merged);
+  merged.dispose();
+  for (const part of parts) part.dispose();
+  return geometry;
 }
 
-function birdGeometry(): THREE.BufferGeometry {
-  const v = new Float32Array([
-    0, 0, 0, -0.62, 0.2, 0, -0.5, -0.02, 0,
-    0, 0, 0, -0.5, -0.02, 0, -0.12, -0.05, 0,
-    0, 0, 0, 0.5, -0.02, 0, 0.62, 0.2, 0,
-    0, 0, 0, 0.12, -0.05, 0, 0.5, -0.02, 0,
-  ]);
-  const g = new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.BufferAttribute(v, 3));
-  g.computeVertexNormals();
-  g.computeBoundingSphere();
-  g.name = 'savannaBird';
-  return g;
+function makeHoodoos(world: ReturnType<typeof makeWorld>, terrainMaterial: THREE.MeshStandardMaterial, seed: number) {
+  const source = world.own(hoodooGeometry());
+  const material = world.own(terrainMaterial.clone());
+  material.vertexColors = true;
+  material.onBeforeCompile = terrainMaterial.onBeforeCompile;
+  const meshes = new Map<string, THREE.Mesh>();
+  let previous = '';
+  return world.own({
+    setView(coverage: ViewCoverage) {
+      const cx = Math.floor(coverage.x / 64), cz = Math.floor(coverage.z / 96), center = `${cx},${cz}`;
+      if (center === previous) return;
+      previous = center;
+      const active = new Set<string>();
+      for (let tx = cx - 6; tx <= cx + 6; tx++) for (let tz = cz - 5; tz <= cz + 5; tz++) {
+        const rng = rngAt(tx, tz, seed), x = tx * 64 + (rng() - 0.5) * 32;
+        const ridge = prairieRidge(x, (tz + 0.5) * 96);
+        const z = Math.sign(tz + 0.5) * (ridge.center - ridge.width * 0.57);
+        if (tz !== Math.floor(z / 96) || prairieRidge(x, z).exposure < 0.35) continue;
+        const key = `${tx},${tz}`;
+        active.add(key);
+        if (meshes.has(key)) continue;
+        const scale = 1.2 + rng() * 0.5, angle = (rng() - 0.5) * 0.4;
+        const geometry = source.clone().scale(scale, scale, scale).rotateY(angle);
+        const positions = geometry.getAttribute('position'), uv = geometry.getAttribute('uv'), colors = geometry.getAttribute('color');
+        const exposure = new Float32Array(positions.count);
+        const anchor = prairieGroundHeight(x, z);
+        for (let i = 0; i < positions.count; i++) {
+          const px = x + positions.getX(i), pz = z + positions.getZ(i), py = positions.getY(i);
+          const ground = prairieGroundHeight(px, pz);
+          const y = py + THREE.MathUtils.lerp(ground, anchor, THREE.MathUtils.smoothstep(py / scale, 0.3, 1.8)) - 0.08;
+          positions.setXYZ(i, px, y, pz);
+          uv.setXY(i, px * 0.5, pz * 0.5);
+          const blend = THREE.MathUtils.smoothstep(py / scale, 0, 0.9);
+          exposure[i] = THREE.MathUtils.lerp(prairieRidge(px, pz).exposure, 1, blend);
+          colors.setXYZ(i, THREE.MathUtils.lerp(1, colors.getX(i) * 2.2, blend), THREE.MathUtils.lerp(1, colors.getY(i) * 2.5, blend), THREE.MathUtils.lerp(1, colors.getZ(i) * 3.2, blend));
+        }
+        geometry.setAttribute('exposure', new THREE.BufferAttribute(exposure, 1));
+        geometry.computeVertexNormals();
+        geometry.computeBoundingSphere();
+        const mesh = world.add(new THREE.Mesh(geometry, material));
+        mesh.name = 'sandstoneHoodoos';
+        mesh.castShadow = mesh.receiveShadow = true;
+        meshes.set(key, mesh);
+      }
+      for (const [key, mesh] of meshes) if (!active.has(key)) {
+        mesh.geometry.dispose();
+        mesh.removeFromParent();
+        meshes.delete(key);
+      }
+    },
+    dispose() {
+      for (const mesh of meshes.values()) { mesh.geometry.dispose(); mesh.removeFromParent(); }
+      meshes.clear();
+    },
+  });
 }
 
 export interface WorldHandle extends WorldCore {
   sky: SkyHandle;
   rig: LightRig;
-  terrain: TerrainHandle;
-  setOrigin(rootX: number): void;
-  setSpeed(speed01: number): void;
+  setView(coverage: ViewCoverage, camera: THREE.Camera): void;
   setShadowTarget(x: number): void;
 }
 
-const BIRDS = 4;
-
-export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
-  const palette: Palette = ctx.tokens.palettes.dusk;
-  const w = makeWorld('goldHourSavanna');
-  const veg = 1;
-
-  const cDust = blendTokens(blendTokens(palette.groundA, palette.hemiGround, 0.72), TOKEN_BLACK, 0.4);
-  const cStraw = blendTokens(blendTokens(palette.groundB, palette.hemiGround, 0.56), TOKEN_BLACK, 0.2);
-  const cGrassLow = blendTokens(blendTokens(palette.groundA, TOKENS.palettes.noon.groundA, 0.34), TOKEN_BLACK, 0.4);
-  const cGrassHigh = blendTokens(blendTokens(palette.groundB, palette.sun, 0.45), TOKEN_WHITE, 0.26);
-  const cRock = blendTokens(palette.hemiGround, palette.skyTop, 0.4);
-  const cStone = blendTokens(palette.hemiGround, palette.skyTop, 0.52);
-  const cStoneLight = blendTokens(cStone, palette.sun, 0.22);
-  const cBark = blendTokens(palette.hemiGround, TOKEN_BLACK, 0.62);
-  const cLeafLow = blendTokens(TOKENS.palettes.noon.groundA, TOKEN_BLACK, 0.8);
-  const cLeafHigh = blendTokens(TOKENS.palettes.noon.groundA, TOKEN_BLACK, 0.6);
-
-  const sky = skyFromPalette(palette, 'dusk', {
-    sunDir: SUN_DIR,
-    sunSize: 0.05,
-    sunHdr: 4.6,
-    sunGlow: 0.6,
-    sunGlowPower: 3.4,
-    topSpread: 0.2,
-    bottomSpread: 0.3,
-    radius: 320,
+export async function buildWorld(ctx: SceneContext, scene: THREE.Scene): Promise<WorldHandle> {
+  const land = makeLandscape(scene, 'albertaPrairieSunrise', ctx.tokens.palettes.dusk, 'dawn', {
+    sky: { topSpread: 0.18, sunSize: 0.035, sunGlow: 0.35, sunDir: [-0.62, 0.28, -0.73], stars: { intensity: 3, density: 180, threshold: 0.976, size: 0.08, color: 0xe4e4ff } }, light: { pointCount: 0 }, fogDensity: 0.00022,
   });
-  w.add(sky.mesh);
-  w.own(sky);
-  w.time({ setTime: (t) => sky.setTime(t) });
-
-  const rig = makeLightRig(palette, {
-    sunDir: sky.sunDirection,
-    pointCount: 2,
-    pointDistance: 16,
-    sunDistanceScale: 3.2,
-  });
-  w.add(rig.group);
-  w.own(rig);
-  rig.setShadowFocus({ x: 0, y: 0.35, z: 0 }, SHADOW_RADIUS);
-
-  const fog = applyFog(scene, palette, FOG_EXTENT);
-  fog.color.copy(blendTokens(palette.fog, palette.skyTop, 0.34));
-
-  const rampColor = new THREE.Color();
-  const terrain = makeTerrain({
-    size: [GROUND_W, GROUND_D],
-    segments: [GROUND_SEG_X, GROUND_SEG_Z],
-    seed: ctx.seed,
-    heightFn: savannaHeight,
-    jitter: 0,
-    colorNoise: 0.03,
-    slopeColor: cDust,
-    slopeStrength: 0.7,
-    slopeSharpness: 2,
-    colorRamp: (h, _slope, x, z) => {
-      const patch = groundPatch(x, z, ctx.seed);
-      const dry = smoothstep01(patch * 1.5 - 0.28 + h * 0.35);
-      rampColor.copy(cDust).lerp(cStraw, dry);
-      const lane = 1 - smoothstep01((Math.abs(z) - LANE_HALF_Z * 0.6) / 1.5);
-      if (lane > 0) rampColor.lerp(cDust, lane * 0.3);
-      return rampColor;
-    },
-    materialOptions: {
-      rimColor: palette.skyHorizon,
-      rimStrength: 0.22,
-      toonSteps: 3,
-      toonSoftness: 0.34,
-      toonFloor: 0.26,
-    },
-    receiveShadow: true,
-    castShadow: false,
-    name: 'savannaGround',
-  });
-  w.add(terrain.mesh);
-  w.own(terrain);
-
-  const grassMaterial: OakMaterial = oakMaterial({
-    color: TOKEN_WHITE,
-    vertexColors: true,
-    flatShading: true,
-    roughness: 0.92,
-    rimColor: palette.sun,
-    rimStrength: 0.75,
-    toonSteps: 2,
-    toonSoftness: 0.4,
-    toonFloor: 0.3,
-    wind: { amplitude: 0.05, frequency: 1.5, height: 0.42 },
-    side: THREE.DoubleSide,
-    name: 'savannaGrassMaterial',
-  });
-  const treeMaterial: OakMaterial = oakMaterial({
-    vertexColors: true,
-    flatShading: true,
-    roughness: 0.95,
-    rimColor: palette.sun,
-    rimStrength: 0.5,
-    toonSteps: 2,
-    toonSoftness: 0.3,
-    toonFloor: 0.14,
-    wind: { amplitude: 0.05, frequency: 0.62, height: 3.1 },
-    name: 'savannaAcaciaMaterial',
-  });
-  const stoneMaterial: OakMaterial = oakMaterial({
-    vertexColors: true,
-    flatShading: true,
-    roughness: 0.96,
-    rimColor: palette.sun,
-    rimStrength: 0.62,
-    toonSteps: 3,
-    toonSoftness: 0.3,
-    toonFloor: 0.2,
-    name: 'savannaStoneMaterial',
-  });
-  const animated: OakMaterial[] = [grassMaterial, treeMaterial];
-  w.time({ setTime: (t) => setMaterialsTime(animated, t) });
-  w.own({
-    dispose: () => {
-      grassMaterial.dispose();
-      treeMaterial.dispose();
-      stoneMaterial.dispose();
-    },
-  });
-
-  const grassGeometry = grassClumpGeometry(5, 0.42, 0.05);
-  w.own({ dispose: () => grassGeometry.dispose() });
-  const grassPerTile = Math.max(8, Math.round(520 * veg));
-  const grassBank = makeTileBank({
-    geometry: grassGeometry,
-    material: grassMaterial,
-    tilesX: 15,
-    tilesZ: 1,
-    backX: 5,
-    backZ: 0,
-    perTile: grassPerTile,
-    colorA: cGrassLow,
-    colorB: cGrassHigh,
-    seed: ctx.seed,
-    name: 'savannaGrass',
-    fill: (tile, _tileZ, rng, write) => {
-      const x0 = tile * TILE;
-      for (let i = 0; i < grassPerTile; i++) {
-        const x = x0 + rng() * TILE;
-        const u = rng();
-        const roll = rng();
-        let z: number;
-        let scale: number;
-        let mix: number;
-        if (roll < 0.16) {
-          z = 1.5 + u * 1.2;
-          scale = 0.62 * (0.55 + rng() * 0.8);
-          mix = rng() * 0.3;
-        } else if (roll < 0.34) {
-          z = LANE_HALF_Z + 0.12 + u * 0.85;
-          scale = 0.24 * (0.5 + rng() * 0.9);
-          mix = 0.2 + rng() * 0.5;
-        } else {
-          z = -(LANE_HALF_Z + 0.08 + Math.pow(u, 1.6) * 32);
-          scale = 0.5 * (0.5 + rng() * 0.85);
-          mix = 0.25 + rng() * 0.75;
-        }
-        const near = 1 - Math.min(1, Math.abs(z) / 9);
-        write(x, savannaHeight(x, z), z, rng() * Math.PI, scale * (0.75 + 0.4 * near), 0.7 + rng() * 0.8, mix);
-      }
-    },
-  });
-  w.add(grassBank.mesh);
-  w.own(grassBank);
-
-  const acaciaGeo = acaciaGeometry(1, cBark, cLeafLow, cLeafHigh);
-  w.own({ dispose: () => acaciaGeo.dispose() });
-  const acaciaBank = makeTileBank({
-    geometry: acaciaGeo,
-    material: treeMaterial,
-    tilesX: 15,
-    tilesZ: 1,
-    backX: 5,
-    backZ: 0,
-    perTile: 4,
-    colorA: new THREE.Color(1, 1, 1),
-    colorB: blendTokens(TOKEN_WHITE, palette.sun, 0.35),
-    seed: ctx.seed,
-    name: 'savannaAcacias',
-    fill: (tile, _tileZ, rng, write) => {
-      const x0 = tile * TILE;
-      for (let i = 0; i < 4; i++) {
-        if (rng() > 0.5) continue;
-        const x = x0 + rng() * TILE;
-        const u = rng();
-        const z = -(13 + Math.pow(u, 1.35) * 40);
-        write(x, savannaHeight(x, z), z, rng() * Math.PI * 2, 0.42 + rng() * 0.62, 0.85 + rng() * 0.6, rng());
-      }
-    },
-  });
-  w.add(acaciaBank.mesh);
-  w.own(acaciaBank);
-
-  const rockGeo = rockGeometry(1.7, 1);
-  w.own({ dispose: () => rockGeo.dispose() });
-  const rockBank = makeTileBank({
-    geometry: rockGeo,
-    material: stoneMaterial,
-    tilesX: 15,
-    tilesZ: 1,
-    backX: 5,
-    backZ: 0,
-    perTile: 3,
-    colorA: cRock,
-    colorB: blendTokens(cRock, palette.sun, 0.3),
-    castShadow: true,
-    seed: ctx.seed,
-    name: 'savannaRocks',
-    fill: (tile, _tileZ, rng, write) => {
-      const x0 = tile * TILE;
-      for (let i = 0; i < 3; i++) {
-        if (rng() > 0.62) continue;
-        const x = x0 + rng() * TILE;
-        const u = rng();
-        const mound = rng() < 0.3;
-        const scale = mound ? 0.7 + rng() * 0.9 : 0.3 + rng() * 0.8;
-        const stretch = mound ? 1.7 + rng() * 1.1 : 0.5 + rng() * 0.5;
-        const height = 0.24 * scale * stretch;
-        const side = height < 0.25 && rng() < 0.3 ? 1 : -1;
-        const z = side * (LANE_HALF_Z + 0.6 + height * 3.6 + u * u * 22);
-        write(x, savannaHeight(x, z) - 0.04, z, rng() * Math.PI * 2, scale, stretch, rng());
-      }
-    },
-  });
-  w.add(rockBank.mesh);
-  w.own(rockBank);
-
-  const cairnGeo = cairnGeometry(ctx.seed, cStone, cStoneLight);
-  w.own({ dispose: () => cairnGeo.dispose() });
-  const CAIRNS = 9;
-  const cairns = new THREE.InstancedMesh(cairnGeo, stoneMaterial, CAIRNS);
-  cairns.name = 'savannaCairns';
-  cairns.castShadow = true;
-  cairns.frustumCulled = false;
-  cairns.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(CAIRNS * 3), 3);
-  {
-    const c = new THREE.Color();
-    for (let i = 0; i < CAIRNS; i++) {
-      c.setRGB(1, 1, 1);
-      cairns.setColorAt(i, c);
-    }
-  }
-  w.add(cairns);
-  w.own({
-    dispose: () => {
-      cairns.dispose();
-      cairns.removeFromParent();
-    },
-  });
-
-  const ridgeGeo = ridgeGeometry(
-    blendTokens(palette.skyTop, TOKEN_BLACK, 0.55),
-    blendTokens(palette.skyTop, palette.hemiGround, 0.2),
-  );
-  const ridgeMaterial = oakMaterial({
-    vertexColors: true,
-    flatShading: true,
-    roughness: 1,
-    toonSteps: 1,
-    toonFloor: 0.55,
-    rimStrength: 0,
-    side: THREE.DoubleSide,
-    name: 'savannaRidgeMaterial',
-  });
-  const ridge = new THREE.Mesh(ridgeGeo, ridgeMaterial);
-  ridge.name = 'savannaRidge';
-  ridge.position.z = RIDGE_Z;
-  ridge.frustumCulled = false;
-  w.add(ridge);
-  w.own({
-    dispose: () => {
-      ridgeGeo.dispose();
-      ridgeMaterial.dispose();
-      ridge.removeFromParent();
-    },
-  });
-
-  const clothParts: ColoredPart[] = [];
-  {
-    const pole = new THREE.CylinderGeometry(0.016, 0.022, 0.46, 5);
-    pole.translate(0, 0.46, 0);
-    clothParts.push({ geometry: pole, color: blendTokens(palette.hemiGround, palette.groundB, 0.4) });
-    const cloth = new THREE.PlaneGeometry(0.17, 0.12, 1, 1);
-    cloth.translate(0.088, 0.62, 0);
-    clothParts.push({ geometry: cloth, color: TOKEN_WHITE });
-  }
-  const clothGeo = mergeColoredParts(clothParts, 'savannaMarkerCloth');
-  const clothMaterial = oakMaterial({
-    vertexColors: true,
-    flatShading: true,
-    roughness: 0.9,
-    rimColor: palette.sun,
-    rimStrength: 0.8,
-    toonSteps: 2,
-    toonSoftness: 0.36,
-    toonFloor: 0.34,
-    side: THREE.DoubleSide,
-    wind: { amplitude: 0.02, frequency: 2.6, height: 0.6 },
-    name: 'savannaMarkerMaterial',
-  });
-  animated.push(clothMaterial);
-  const markers = new THREE.InstancedMesh(clothGeo, clothMaterial, CAIRNS);
-  markers.name = 'savannaMarkers';
-  markers.frustumCulled = false;
-  markers.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(CAIRNS * 3), 3);
-  w.add(markers);
-  w.own({
-    dispose: () => {
-      markers.dispose();
-      clothGeo.dispose();
-      clothMaterial.dispose();
-      markers.removeFromParent();
-    },
-  });
-  const cairnCloth = blendTokens(blendTokens(palette.skyTop, palette.fog, 0.22), TOKEN_BLACK, 0.2);
-  const MARKER_COLORS: readonly THREE.ColorRepresentation[] = [
-    cairnCloth,
-    ctx.tokens.celebrationGold,
-    ctx.tokens.accents['four-rooms'] ?? ctx.tokens.celebrationGold,
-    ctx.tokens.accents['acrobot'] ?? cairnCloth,
-  ];
-
-  const haze: MistPlanesHandle = makeMistPlanes({
-    size: [96, 54],
-    color: blendTokens(palette.fog, palette.sun, 0.35),
-    seed: ctx.seed,
-    layers: 5,
-    baseY: 0.25,
-    spread: 3.4,
-    opacity: 0.2,
-    speed: 0.004,
-    scale: 3.2,
-    nearFade: 14,
-    name: 'savannaHaze',
-  });
-  haze.group.position.z = -38;
-  w.add(haze.group);
-  w.time(w.own(haze));
-
-  const pollen: AmbientParticlesHandle = makeAmbientParticles({
-    preset: 'pollen',
-    count: 460,
-    bounds: { y: 1.25, halfX: 8, halfY: 1.5, halfZ: 6 },
-    seed: ctx.seed,
-    color: blendTokens(palette.sun, TOKEN_WHITE, 0.3),
-    size: 0.75,
-    intensity: 0.9,
-    opacity: 0.34,
-    rise: 0.05,
-    swirl: 0.22,
-    name: 'savannaPollen',
-  });
-  w.add(pollen.points);
-  w.size(w.time(w.own(pollen)));
-
-  const birdGeo = birdGeometry();
-  const birdMaterial = oakMaterial({
-    color: blendTokens(TOKEN_BLACK, palette.skyTop, 0.3),
-    flatShading: true,
-    roughness: 1,
-    rimColor: palette.sun,
-    rimStrength: 0.3,
-    toonSteps: 2,
-    toonFloor: 0.12,
-    side: THREE.DoubleSide,
-    fog: false,
-    name: 'savannaBirdMaterial',
-  });
-  const birdGroup = new THREE.Group();
-  birdGroup.name = 'savannaBirds';
-  const birds: THREE.Mesh[] = [];
-  const birdWings: THREE.Object3D[] = [];
-  {
-    for (let i = 0; i < BIRDS; i++) {
-      const pivot = new THREE.Object3D();
-      pivot.name = `savannaBirdPivot${i}`;
-      const mesh = new THREE.Mesh(birdGeo, birdMaterial);
-      mesh.name = `savannaBird${i}`;
-      pivot.add(mesh);
-      birdGroup.add(pivot);
-      birds.push(mesh);
-      birdWings.push(pivot);
-    }
-  }
-  w.add(birdGroup);
-  w.own({
-    dispose: () => {
-      birdGeo.dispose();
-      birdMaterial.dispose();
-      birdGroup.clear();
-    },
-  });
-
-  const cairnMatrix = new THREE.Matrix4();
-  const cairnPos = new THREE.Vector3();
-  const cairnQuat = new THREE.Quaternion();
-  const cairnEuler = new THREE.Euler();
-  const cairnScale = new THREE.Vector3();
-  const markerColor = new THREE.Color();
-  let cairnOrigin = Number.NaN;
-
-  const placeCairns = (centre: number): void => {
-    for (let i = 0; i < CAIRNS; i++) {
-      const k = centre + i - ((CAIRNS - 1) >> 1);
-      const x = k * CAIRN_SPACING;
-      const side = (k & 1) === 0 ? -1.5 : -3.1;
-      const z = side + (hash1f(k, ctx.seed) - 0.5) * 0.5;
-      cairnPos.set(x, savannaHeight(x, z) - 0.02, z);
-      cairnEuler.set(0, hash1f(k, ctx.seed ^ 0x51ab) * Math.PI * 2, 0);
-      cairnQuat.setFromEuler(cairnEuler);
-      const s = 0.5 + hash1f(k, ctx.seed ^ 0x2b17) * 0.32;
-      cairnScale.set(s, s * (0.85 + hash1f(k, ctx.seed ^ 0x77) * 0.5), s);
-      cairnMatrix.compose(cairnPos, cairnQuat, cairnScale);
-      cairns.setMatrixAt(i, cairnMatrix);
-
-      cairnPos.set(x - 0.05, savannaHeight(x - 0.05, z - 0.06), z - 0.06);
-      cairnEuler.set(0, hash1f(k, ctx.seed ^ 0x99) * Math.PI * 2, 0);
-      cairnQuat.setFromEuler(cairnEuler);
-      const ms = 0.8 + hash1f(k, ctx.seed ^ 0x1234) * 0.35;
-      cairnScale.set(ms, ms, ms);
-      cairnMatrix.compose(cairnPos, cairnQuat, cairnScale);
-      markers.setMatrixAt(i, cairnMatrix);
-      markerColor.set(MARKER_COLORS[((k % MARKER_COLORS.length) + MARKER_COLORS.length) % MARKER_COLORS.length] ?? TOKEN_WHITE);
-      markers.setColorAt(i, markerColor);
-    }
-    cairns.instanceMatrix.needsUpdate = true;
-    markers.instanceMatrix.needsUpdate = true;
-    if (markers.instanceColor) markers.instanceColor.needsUpdate = true;
+  const { world, sky, rig, fog } = land;
+  sky.setColors(0x352d65, 0xff9fad, 0xe9ae9c);
+  world.time(world.own(buildAurora(sky, 0x95ddd0, 2.6))).setGain(1.5);
+  const terrain = makePrairieTerrain(world);
+  const mountainMaterial = world.own(new THREE.MeshStandardMaterial({ vertexColors: true, map: terrain.rock, bumpMap: terrain.rock, bumpScale: 0.6, roughness: 1 }));
+  mountainMaterial.onBeforeCompile = shader => {
+    shader.fragmentShader = shader.fragmentShader.replace('#include <map_fragment>', 'diffuseColor.rgb *= mix(vec3(1.0), texture2D(map, vMapUv).rgb * 2.6, 0.35);');
   };
-
-  const shadowQuantum = (2 * SHADOW_RADIUS * 4) / Math.max(256, 2048);
-  const shadowOffsetX = -sky.sunDirection.x * 1.1;
-  const shadowOffsetZ = -sky.sunDirection.z * 1.1;
-
-  const world: WorldHandle = w.seal({
-    sky,
-    rig,
-    terrain,
-
-    setOrigin(rootX) {
-      terrain.mesh.position.x = Math.round(rootX / GROUND_PERIOD) * GROUND_PERIOD;
-      const tile = Math.floor(rootX / TILE);
-      grassBank.setOrigin(tile, 0);
-      acaciaBank.setOrigin(tile, 0);
-      rockBank.setOrigin(tile, 0);
-      const cairnCentre = Math.round(rootX / CAIRN_SPACING);
-      if (cairnCentre !== cairnOrigin) {
-        cairnOrigin = cairnCentre;
-        placeCairns(cairnCentre);
-      }
-      ridge.position.x = Math.round(rootX / RIDGE_PERIOD) * RIDGE_PERIOD;
-      haze.group.position.x = rootX;
-      pollen.points.position.x = rootX;
-      birdGroup.position.x = rootX;
-    },
-
-    setShadowTarget(x) {
-      const q = Math.round(x / shadowQuantum) * shadowQuantum;
-      rig.setShadowFocus({ x: q + shadowOffsetX, y: 0.3, z: shadowOffsetZ }, SHADOW_RADIUS);
-    },
-
-    setSpeed(v) {
-      const s = clampRange(v, 0, 1);
-      oakUniforms(grassMaterial)?.setWind(0.05 * (1 + 1.9 * s), 1.5 + 2.2 * s);
-      oakUniforms(treeMaterial)?.setWind(0.05 * (1 + 0.9 * s), 0.62 + 0.5 * s);
-      pollen.setDensity(0.45 + 0.55 * s);
-    },
-
-  }, {
-    time: (t) => {
-      for (let i = 0; i < birdWings.length; i++) {
-        const pivot = birdWings[i];
-        const mesh = birds[i];
-        if (!pivot || !mesh) continue;
-        const span = 96;
-        const drift = (t * (0.5 + 0.22 * i) + i * 31.7 + hash1f(i, ctx.seed) * span) % span;
-        const bx = drift - span * 0.5;
-        pivot.position.set(bx, 8.5 + i * 2.1 + Math.sin(t * 0.21 + i) * 0.9, -34 - i * 4.5);
-        const flap = Math.sin(t * (2.4 + 0.4 * i) + i * 2.1);
-        pivot.rotation.z = flap * 0.26;
-        mesh.scale.set(1.6 + 0.35 * i, 1 + 0.28 * flap, 1);
+  const mountains = new THREE.Mesh(world.own(await mountainGeometry()), mountainMaterial);
+  mountains.name = 'rockyMountainRanges';
+  world.add(mountains);
+  rig.sun.color.set(0xffd2ad);
+  rig.sun.intensity = 2.5;
+  rig.hemi.color.set(0xd7d8ef);
+  rig.hemi.groundColor.set(0xc2a074);
+  rig.hemi.intensity = 2.1;
+  fog.color.set(0xb8a2b6);
+  const hoodoos = makeHoodoos(world, terrain.material, ctx.seed);
+  land.scatter({
+    name: 'prairieBunchgrass', seed: ctx.seed, tileSize: 28, perTile: 448,
+    ...prairieGrass(), colorA: 0xc1c895, colorB: 0xf1dfa9,
+    fill(tx, tz, rng, write) {
+      for (let i = 0; i < 448; i++) {
+        const x = (tx + rng()) * 28, z = (tz + rng()) * 28;
+        if (Math.abs(z) < 0.9 || prairieRidge(x, z).exposure > 0.16) continue;
+        write(x, prairieGroundHeight(x, z) - 0.01, z, rng() * Math.PI * 2, 0.95 + rng() * 0.7, 0.8 + rng() * 0.4, rng());
       }
     },
-    drop: () => {
-      birds.length = 0;
-      birdWings.length = 0;
+  }, true);
+  land.scatter({
+    name: 'aspenGroves', seed: ctx.seed, tileSize: 48, perTile: 5,
+    ...aspenTree(world),
+    colorA: 0xd4d3af, colorB: 0xffffff, castShadow: true,
+    fill(tx, tz, rng, write) {
+      const x = tx * 48 + 10 + rng() * 26, z = tz * 48 + 9 + rng() * 28;
+      if (Math.abs(z) < 7 || prairieRidge(x, z).exposure > 0.06 || Math.sin(x * 0.047 + z * 0.027) < -0.1) return;
+      for (let i = 0; i < 5; i++) {
+        const px = x + Math.cos(i * 2.4) * Math.sqrt(i) * 1.5, pz = z + Math.sin(i * 2.4) * Math.sqrt(i) * 1.5;
+        write(px, prairieGroundHeight(px, pz) - 0.08, pz, rng() * 6.28, 0.85 + rng() * 0.6, 0.9 + rng() * 0.25, rng());
+      }
     },
   });
+  land.scatter({
+    name: 'prairieFieldstones', seed: ctx.seed, tileSize: 20, perTile: 4,
+    ...fieldstones(world),
+    colorA: 0xd7d1c7, colorB: 0xffffff,
+    fill(tx, tz, rng, write) {
+      const x = tx * 20 + 4 + rng() * 12, z = tz * 20 + 4 + rng() * 12;
+      if (Math.abs(z) < 2) return;
+      for (let i = 0; i < 4; i++) {
+        const px = x + rng() * 2.4, pz = z + rng() * 1.8;
+        const scale = 1.3 + rng() * 1.6;
+        const place = prairiePlacement(px, pz, scale * 0.4);
+        write(px, place.height - 0.04 * scale, pz, rng() * 6.28, scale, 0.7 + rng() * 0.4, rng(), place.normal);
+      }
+    },
+  });
+  const shadowRight = new THREE.Vector3().crossVectors(new THREE.Vector3(0, 1, 0), rig.sunDirection).normalize();
+  const shadowUp = new THREE.Vector3().crossVectors(rig.sunDirection, shadowRight).normalize();
+  const shadowCenter = new THREE.Vector3();
+  return world.seal<WorldHandle>({
+    sky, rig,
+    setView(coverage, camera) {
+      land.setView(coverage, camera);
+      terrain.setView(coverage, camera);
+      hoodoos.setView(coverage);
+      mountains.position.x = coverage.x;
+    },
+    setShadowTarget(x) {
+      shadowCenter.set(x, 0.65, 0);
+      const texel = 14 / rig.sun.shadow.mapSize.x;
+      const right = shadowCenter.dot(shadowRight);
+      const up = shadowCenter.dot(shadowUp);
+      shadowCenter.addScaledVector(shadowRight, Math.round(right / texel) * texel - right);
+      shadowCenter.addScaledVector(shadowUp, Math.round(up / texel) * texel - up);
+      rig.setShadowFocus(shadowCenter, 7);
+    },
+  });
+}
 
-  world.setOrigin(0);
-  world.setShadowTarget(0);
-  world.setSpeed(0);
-  world.setTime(0);
-  return world;
+export const WORLD_NOISE = `
+float worldHash(vec2 p, uint seed) {
+  uint h = seed ^ 0x9e3779b9u;
+  h = (h ^ uint(p.x)) * 0x85ebca6bu;
+  h ^= h >> 13u;
+  h = (h ^ uint(p.y)) * 0xc2b2ae35u;
+  h ^= h >> 16u;
+  h *= 0x27d4eb2fu;
+  h ^= h >> 15u;
+  return float(h) / 4294967296.0;
+}
+float worldNoise(vec2 p, float period, uint seed) {
+  vec2 cell = floor(p);
+  vec2 f = fract(p);
+  f = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+  vec2 a = mod(cell, period);
+  vec2 b = mod(cell + 1.0, period);
+  float value = mix(mix(worldHash(a, seed), worldHash(vec2(b.x, a.y), seed), f.x), mix(worldHash(vec2(a.x, b.y), seed), worldHash(b, seed), f.x), f.y);
+  return value;
+}
+`;
+
+export function makeSceneTerrain(
+  options: Parameters<typeof makeContinuousSurface>[0],
+  sampleHeight: (x: number, z: number) => number,
+  materialOptions: Parameters<typeof oakMaterial>[0],
+) {
+  const surface = makeContinuousSurface(options);
+  const finish = oakMaterial(materialOptions);
+  const compile = surface.material.onBeforeCompile;
+  const key = surface.material.customProgramCacheKey();
+  surface.material.roughness = finish.roughness;
+  surface.material.onBeforeCompile = (shader, renderer) => {
+    finish.onBeforeCompile.call(finish, shader, renderer);
+    compile.call(surface.material, shader, renderer);
+    shader.vertexShader = shader.vertexShader.replace('float landHash', `${WORLD_NOISE}\nfloat landHash`);
+    shader.fragmentShader = shader.fragmentShader.replace('float landHash', `${WORLD_NOISE}\nfloat landHash`);
+  };
+  surface.material.customProgramCacheKey = () => `${key}|${finish.customProgramCacheKey()}|world-noise`;
+  return {
+    ...surface,
+    sampleHeight,
+    setTime(t: number) {
+      surface.setTime(t);
+      finish.oak.setTime(t);
+    },
+    dispose() {
+      finish.dispose();
+      surface.dispose();
+    },
+  };
+}
+
+export function extendWater(
+  mesh: THREE.Mesh,
+  coverage: ViewCoverage,
+  width: number,
+  depth: number,
+  bedDepth: string,
+): void {
+  const material = mesh.material;
+  if (!(material instanceof THREE.ShaderMaterial)) throw new Error('water shader required');
+  if (!material.userData.worldWater) {
+    const waves = material.vertexShader.slice(material.vertexShader.indexOf('const int OAK_WAVES'), material.vertexShader.indexOf('float oakWaveHeight'));
+    material.vertexShader = material.vertexShader.replace('world4.y += h;', '');
+    material.fragmentShader = material.fragmentShader
+      .replace('uniform float uTime;', 'uniform float uTime;\nuniform float uAmplitude;')
+      .replace('void main() {', `${waves}
+vec3 waterWave(vec2 p, float footprint) {
+  vec3 wave = vec3(0.0);
+  for (int i = 0; i < OAK_WAVES; i++) {
+    vec4 w = OAK_WAVE[i];
+    float k = w.z * uWaveScale;
+    float phase = dot(p, w.xy) * k + uTime * w.w * uSpeed;
+    float amplitude = OAK_WAVE_AMP[i] * uAmplitude / (1.0 + footprint * footprint * k * k);
+    wave += vec3(cos(phase) * amplitude * k * w.xy, sin(phase) * amplitude);
+  }
+  return wave;
+}
+void main() {`)
+      .replace('vec3 n = normalize( vNormalW );', `float footprint = length(fwidth(vWorld.xz));
+  vec3 wave = waterWave(vWorld.xz, footprint);
+  vec3 n = normalize(vec3(-wave.x, 1.0, -wave.y));`)
+      .replace('-vDepth / max( uDepthFalloff, 0.001 )', `-max(0.0, ${bedDepth}) / max(uDepthFalloff, 0.001)`)
+      .replace('vHeight * 6.0', 'wave.z * 6.0')
+      .replace('oakCaustic( vWorld.xz * uWaveScale, uTime * uSpeed );', 'oakCaustic(vWorld.xz * uWaveScale, uTime * uSpeed) * (1.0 - smoothstep(0.12, 0.7, footprint * uWaveScale));')
+      .replace('96.0 );', '36.0 );')
+      .replace('spec * uSpecular', 'spec * uSpecular * 0.4 / (1.0 + footprint * footprint * 4.0)');
+    material.userData.worldWater = true;
+    material.needsUpdate = true;
+  }
+  mesh.position.x = coverage.x;
+  mesh.position.z = coverage.z;
+  mesh.scale.set(coverage.radius * 2 / width, 1, coverage.radius * 2 / depth);
+  mesh.frustumCulled = false;
+}
+
+export function extendVegetation(
+  source: VegetationHandle,
+  options: {
+    name: string; seed: number; tileSize: number; perTile: number;
+    scale: readonly [number, number]; stretch: readonly [number, number];
+    heightAt: (x: number, z: number) => number; exclude: (x: number, z: number, height: number) => boolean;
+    bark?: THREE.ColorRepresentation;
+  },
+) {
+  const count = Math.ceil(options.perTile / source.meshes.length);
+  for (const mesh of source.meshes) {
+    const geometry = mesh.geometry;
+    const material = mesh.material;
+    if (!/^oak(Broadleaf|Conifer|BareTree)$/.test(geometry.name) || geometry.userData.treeTint) continue;
+    if (!(material instanceof THREE.MeshStandardMaterial)) throw new Error('tree surface material required');
+    const positions = geometry.getAttribute('position');
+    const colors = geometry.getAttribute('color');
+    const bark = new THREE.Color(options.bark ?? 0x7e6852);
+    const leaf = material.color.clone();
+    for (let i = 0; i < positions.count; i += 3) {
+      let wood = true;
+      for (let j = i; j < i + 3; j++) wood &&= Math.hypot(positions.getX(j), positions.getZ(j)) <= 0.101 && positions.getY(j) <= 1.151;
+      const tint = wood || geometry.name === 'oakBareTree' ? bark : leaf;
+      for (let j = i; j < i + 3; j++) {
+        const shade = colors.getX(j);
+        colors.setXYZ(j, tint.r * shade, tint.g * shade, tint.b * shade);
+      }
+    }
+    colors.needsUpdate = true;
+    material.color.set(0xffffff);
+    geometry.userData.treeTint = true;
+  }
+  const banks = source.meshes.map((mesh, variant) => makeSceneryBank({
+    name: `${options.name}${variant}`, seed: options.seed + variant,
+    tileSize: options.tileSize, perTile: count,
+    geometry: mesh.geometry, material: mesh.material as THREE.Material,
+    colorA: 0xd8d8d8, colorB: 0xffffff, castShadow: mesh.castShadow,
+    fill(tx, tz, rng, write) {
+      for (let i = 0; i < count; i++) {
+        const x = (tx + rng()) * options.tileSize;
+        const z = (tz + rng()) * options.tileSize;
+        const height = options.heightAt(x, z);
+        if (options.exclude(x, z, height)) continue;
+        write(x, height, z, rng() * Math.PI * 2,
+          options.scale[0] + rng() * (options.scale[1] - options.scale[0]),
+          options.stretch[0] + rng() * (options.stretch[1] - options.stretch[0]), rng());
+      }
+    },
+  }));
+  return {
+    meshes: banks.map((bank) => bank.mesh),
+    setView(coverage: ViewCoverage) {
+      for (const bank of banks) bank.setView(coverage);
+    },
+    dispose() {
+      for (const bank of banks) bank.dispose();
+    },
+  };
 }

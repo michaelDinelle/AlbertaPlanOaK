@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { applyFog, makeLightRig, type LightRig } from '@kit/lighting';
+import type { LightRig } from '@kit/lighting';
 import {
   emissiveMaterial,
   oakMaterial,
@@ -16,15 +16,16 @@ import {
 } from '@kit/particles';
 import { mergeColoredParts, type ColoredPart } from '@kit/parts';
 import { streamFor } from '@kit/rng';
-import { skyFromPalette, type SkyHandle } from '@kit/sky';
-import { makeTerrain, type TerrainHandle } from '@kit/terrain';
+import type { SkyHandle } from '@kit/sky';
+import { makeLandscape, makeSceneTerrain, extendWater, extendVegetation, WORLD_NOISE } from '../half-cheetah/world';
+import type { ViewCoverage } from '../jelly-bean-world/view';
 import { radialSprite, valueNoise2 } from '@kit/textures';
 import type { Palette } from '@kit/tokens';
 import type { SceneContext } from '@kit/types';
 import { excludeAny, scatterGrass, scatterTrees, type ExcludeFn } from '@kit/vegetation';
 import { makeWater, type WaterHandle } from '@kit/water';
-import { makeWorld, type WorldCore } from '@kit/world';
-import { AB_L1, AB_L2, AB_SUCCESS_HEIGHT } from '@sim/envs/acrobot';
+import type { WorldBuilder, WorldCore } from '@kit/world';
+import { AB_L1, AB_L2 } from '@sim/envs/acrobot';
 import type { EnvGeometry } from '@sim/types';
 
 export const REACH = AB_L1 + AB_L2;
@@ -33,8 +34,6 @@ export const SWING_CLEARANCE = 0.3;
 export const WATER_Y = -(AB_L1 + AB_L2) - 0.42;
 export const POND_SIZE: readonly [number, number] = [30, 30];
 
-export const TERRAIN_SIZE: readonly [number, number] = [46, 34];
-export const TERRAIN_SEGMENTS: readonly [number, number] = [152, 112];
 
 export const GARLAND_HALF_X = 3.42;
 export const GARLAND_Z = 0.34;
@@ -81,17 +80,18 @@ export function acrobotPointsExact(th1: number, th2: number, out: Float64Array):
 export function anchorOf(
   geometry: EnvGeometry,
   key: string,
-  fallback: readonly [number, number, number],
 ): readonly [number, number, number] {
-  return geometry.classic?.anchors?.[key] ?? fallback;
+  const anchor = geometry.classic?.anchors?.[key];
+  if (!anchor) throw new Error(`acrobot ${key} anchor required`);
+  return anchor;
 }
 
 export function pivotAnchor(geometry: EnvGeometry): readonly [number, number, number] {
-  return anchorOf(geometry, 'pivot', [0, 0, 0]);
+  return anchorOf(geometry, 'pivot');
 }
 
 export function successAnchor(geometry: EnvGeometry): readonly [number, number, number] {
-  return anchorOf(geometry, 'successLine', [0, AB_SUCCESS_HEIGHT, 0]);
+  return anchorOf(geometry, 'successLine');
 }
 
 export function makeBankHeight(seed: number): (x: number, z: number) => number {
@@ -99,11 +99,13 @@ export function makeBankHeight(seed: number): (x: number, z: number) => number {
   return (x, z) => {
     const away = smoothstep01((-z - 7.5) / 9);
     const side = smoothstep01((Math.abs(x) - 9.5) / 6);
-    const w = away > side ? away : side;
+    const w = Math.max(away, side, smoothstep01((z - 15) / 11));
     if (w <= 0) return floor;
     const n1 = valueNoise2(x * 0.22 + 4.1, z * 0.22 + 9.3, 64, seed) - 0.5;
     const n2 = valueNoise2(x * 0.63 + 1.7, z * 0.63 + 3.9, 64, seed ^ 0x2f19) - 0.5;
-    return floor + w * (2.35 + n1 * 1.9 + n2 * 0.7);
+    const distant = smoothstep01((Math.hypot(x, z) - 19) / 30);
+    const hills = valueNoise2(x * 0.025 + 4.1, z * 0.025 + 9.3, 64, seed) - 0.5;
+    return floor + w * (2.35 + (n1 * (1 - distant) + hills * distant) * 1.9 + n2 * 0.7 * (1 - distant));
   };
 }
 
@@ -111,7 +113,8 @@ export interface WorldHandle extends WorldCore {
   sky: SkyHandle;
   rig: LightRig;
   water: WaterHandle;
-  terrain: TerrainHandle;
+  terrain: ReturnType<typeof makeSceneTerrain>;
+  setView(coverage: ViewCoverage, camera: THREE.Camera): void;
   garlandRoot: THREE.Object3D;
   waterY: number;
   setDawn(k01: number): void;
@@ -124,7 +127,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   const palette: Palette = ctx.tokens.palettes.dawn;
   const accent = ctx.tokens.accents['acrobot'] ?? ctx.tokens.celebrationGold;
   const gold = ctx.tokens.celebrationGold;
-  const w = makeWorld('willowSwing');
   const animated: OakMaterial[] = [];
 
   const pivot = pivotAnchor(ctx.geometry);
@@ -138,7 +140,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   const shoreLit = blendTokens(palette.groundB, palette.skyHorizon, 0.28);
   const brass = blendTokens(palette.sun, palette.hemiGround, 0.42);
 
-  const sky = skyFromPalette(palette, 'dawn', {
+  const land = makeLandscape(scene, 'willowSwing', palette, 'dawn', { sky: {
     sunDir: SUN_DIR,
     sunSize: 0.034,
     sunHdr: 3.6,
@@ -147,63 +149,37 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     topSpread: 0.28,
     bottomSpread: 0.42,
     radius: 320,
-  });
-  w.add(sky.mesh);
-  w.own(sky);
-  w.time({ setTime: (t) => sky.setTime(t) });
-
-  const rig = makeLightRig(palette, {
-    sunDir: sky.sunDirection,
+  }, light: {
     pointCount: 3,
     pointDistance: 7,
     sunDistanceScale: 3,
-  });
-  w.add(rig.group);
-  w.own(rig);
+  }, fogExtent: FOG_EXTENT });
+  const { world: w, sky, rig, fog } = land;
   rig.setShadowFocus({ x: 0, y: -0.45, z: -0.6 }, 4.2);
 
-  applyFog(scene, palette, FOG_EXTENT);
-
   const bankHeight = makeBankHeight(ctx.seed);
-  const rampColor = new THREE.Color();
   const bedColor = blendTokens(palette.hemiGround, TOKEN_BLACK, 0.78);
-  const terrain = makeTerrain({
-    size: TERRAIN_SIZE,
-    segments: TERRAIN_SEGMENTS,
-    seed: ctx.seed,
-    heightFn: bankHeight,
-    jitter: 0,
-    colorNoise: 0.05,
-    slopeColor: blendTokens(shore, TOKEN_BLACK, 0.3),
-    slopeStrength: 0.6,
-    slopeSharpness: 2.1,
-    colorRamp: (h) => {
-      const wet = smoothstep01((h - (WATER_Y - 0.55)) / 0.75);
-      const dry = smoothstep01((h - (WATER_Y + 0.55)) / 1.5);
-      rampColor.copy(bedColor).lerp(shore, wet);
-      rampColor.lerp(shoreLit, dry);
-      return rampColor;
-    },
-    materialOptions: {
-      rimColor: palette.skyHorizon,
-      rimStrength: 0.3,
-      toonSteps: 3,
-      toonSoftness: 0.34,
-      toonFloor: 0.26,
-    },
-    receiveShadow: true,
-    castShadow: false,
-    name: 'pondBank',
-  });
+  const bedHeight = `
+float w = max(max(smoothstep(7.5, 16.5, -p.y), smoothstep(9.5, 15.5, abs(p.x))), smoothstep(15.0, 26.0, p.y));
+float n1 = worldNoise(p * 0.22 + vec2(4.1, 9.3), 64.0, ${ctx.seed >>> 0}u) - 0.5;
+float n2 = worldNoise(p * 0.63 + vec2(1.7, 3.9), 64.0, ${(ctx.seed ^ 0x2f19) >>> 0}u) - 0.5;
+float distant = smoothstep(19.0, 49.0, length(p));
+float hills = worldNoise(p * 0.025 + vec2(4.1, 9.3), 64.0, ${ctx.seed >>> 0}u) - 0.5;
+return ${WATER_Y - 1.05} + w * (2.35 + mix(n1, hills, distant) * 1.9 + n2 * 0.7 * (1.0 - distant));
+`;
+  const terrain = makeSceneTerrain({
+    name: 'pondBank', seed: ctx.seed, colorA: bedColor, colorB: shore, segments: 160, height: bedHeight,
+    detail: `float wet = smoothstep(${WATER_Y - 0.55}, ${WATER_Y + 0.2}, p.y); float dry = smoothstep(${WATER_Y + 0.55}, ${WATER_Y + 2.05}, p.y); color = mix(mix(uLandA, uLandB, wet), vec3(${shoreLit.r}, ${shoreLit.g}, ${shoreLit.b}), dry);`,
+  }, bankHeight, { rimColor: palette.skyHorizon, rimStrength: 0.3, toonSteps: 3, toonSoftness: 0.34, toonFloor: 0.26 });
   w.add(terrain.mesh);
-  w.own(terrain);
+  w.time(w.own(terrain));
 
   const pondShallow = blendTokens(palette.skyTop, TOKEN_BLACK, 0.86);
   const pondDeep = blendTokens(TOKEN_BLACK, palette.skyTop, 0.12);
   const water = makeWater({
     size: POND_SIZE,
     palette,
-    segments: 96,
+    segments: 2,
     level: WATER_Y,
     shallow: pondShallow,
     deep: pondDeep,
@@ -214,11 +190,12 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     speed: 0.4,
     fresnel: 0.22,
     caustics: 0.06,
-    depthFalloff: 11,
+    depthFalloff: 0.9,
     opacity: 0.985,
     sunDir: sky.sunDirection,
     name: 'mirrorPond',
   });
+  water.material.fragmentShader = `${WORLD_NOISE}\nfloat willowPondBed(vec2 p) {${bedHeight}}\n${water.material.fragmentShader}`;
   water.setColors(pondShallow, pondDeep);
   water.uniforms.uSpecular.value = 1.15;
   w.add(water.mesh);
@@ -304,12 +281,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   willowMesh.castShadow = true;
   willowMesh.receiveShadow = true;
   w.add(willowMesh);
-  w.own({
-    dispose: () => {
-      willowGeometry.dispose();
-      woodMaterial.dispose();
-    },
-  });
+  w.own(woodMaterial);
+  w.own(willowGeometry);
 
   const FROND_LEN = 1.5;
   const frondGeometry = makeFrondGeometry(FROND_LEN);
@@ -328,21 +301,13 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     name: 'willowFrond',
   });
   animated.push(frondMaterial);
-  const fronds = buildFronds({
+  buildFronds(w, {
     geometry: frondGeometry,
     material: frondMaterial,
     boughs: boughPoints,
     seed: ctx.seed,
     length: FROND_LEN,
     colors: [frondA, frondB, blendTokens(frondA, palette.groundB, 0.35)],
-  });
-  w.add(fronds);
-  w.own({
-    dispose: () => {
-      fronds.dispose();
-      frondGeometry.dispose();
-      frondMaterial.dispose();
-    },
   });
 
   const garlandRoot = new THREE.Object3D();
@@ -375,7 +340,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   garlandMesh.name = 'garlandRig';
   garlandMesh.castShadow = false;
   w.add(garlandMesh);
-  w.own({ dispose: () => garlandGeometry.dispose() });
+  w.own(garlandGeometry);
 
   const BULB_BASE_HDR = 1.25;
   const bulbGeometry = new THREE.IcosahedronGeometry(0.05, 1);
@@ -412,13 +377,9 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     bulbs.computeBoundingSphere();
   }
   w.add(bulbs);
-  w.own({
-    dispose: () => {
-      bulbs.dispose();
-      bulbGeometry.dispose();
-      bulbMaterial.dispose();
-    },
-  });
+  w.own(bulbMaterial);
+  w.own(bulbGeometry);
+  w.own(bulbs);
 
   const notShallow: ExcludeFn = (x, z) =>
     bankHeight(x, z) < WATER_Y - 0.85 || bankHeight(x, z) > WATER_Y - 0.02;
@@ -484,6 +445,18 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   w.add(farTrees.group);
   w.time(w.own(farTrees));
 
+  const meadow = w.own(extendVegetation(shoreGrass, {
+    name: 'willowShoreMeadow', seed: ctx.seed ^ 0x7f42, tileSize: 5, perTile: 120,
+    scale: [0.18, 0.4], stretch: [0.8, 1.3], heightAt: bankHeight,
+    exclude: (x, z, height) => Math.abs(x) < 17 && Math.abs(z + 13) < 6.5 || height < WATER_Y + 0.08,
+  }));
+  const grove = w.own(extendVegetation(farTrees, {
+    name: 'willowShoreGrove', seed: ctx.seed ^ 0x1a3d, tileSize: 12, perTile: 26,
+    scale: [0.5, 1.2], stretch: [0.9, 1.5], heightAt: bankHeight,
+    exclude: (x, z, height) => Math.abs(x) < 18 && Math.abs(z + 12.5) < 5.5 || height < WATER_Y + 0.5 || Math.sin(x * 0.08 + z * 0.13) < -0.2,
+  }));
+  for (const mesh of [...meadow.meshes, ...grove.meshes]) w.add(mesh);
+
   const padGeometry = makePadGeometry();
   const padMaterial = oakMaterial({
     color: TOKEN_WHITE,
@@ -497,7 +470,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     toonFloor: 0.3,
     name: 'lilyPad',
   });
-  const pads = buildPads({
+  buildPads(w, {
     geometry: padGeometry,
     material: padMaterial,
     seed: ctx.seed,
@@ -507,14 +480,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
       blendTokens(palette.groundA, palette.skyTop, 0.45),
     ],
     bankHeight,
-  });
-  w.add(pads);
-  w.own({
-    dispose: () => {
-      pads.dispose();
-      padGeometry.dispose();
-      padMaterial.dispose();
-    },
   });
 
   const glintSprite = radialSprite(64, 1.7);
@@ -534,13 +499,9 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   glint.renderOrder = 3;
   glint.visible = false;
   w.add(glint);
-  w.own({
-    dispose: () => {
-      glintGeometry.dispose();
-      glintMaterial.dispose();
-      glintSprite.dispose();
-    },
-  });
+  w.own(glintSprite);
+  w.own(glintMaterial);
+  w.own(glintGeometry);
 
   const mist: MistPlanesHandle = makeMistPlanes({
     size: [22, 12],
@@ -619,6 +580,10 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     terrain,
     garlandRoot,
     waterY: WATER_Y,
+    setView(coverage, camera) {
+      land.setView(coverage, camera, terrain, meadow, grove);
+      extendWater(water.mesh, coverage, POND_SIZE[0], POND_SIZE[1], `${WATER_Y} - willowPondBed(vWorld.xz)`);
+    },
 
     setDawn(k01) {
       const k = clampRange(k01, 0, 1);
@@ -748,20 +713,35 @@ interface FrondOptions {
   colors: readonly THREE.Color[];
 }
 
-function buildFronds(opts: FrondOptions): THREE.InstancedMesh & { dispose(): void } {
+export function plantInstances(world: WorldBuilder, name: string, geometry: THREE.BufferGeometry, material: THREE.Material, count: number) {
+  world.own(material);
+  world.own(geometry);
+  const mesh = world.add(world.own(new THREE.InstancedMesh(geometry, material, count)));
+  mesh.name = name;
+  mesh.count = 0;
+  const transform = new THREE.Object3D();
+  return {
+    mesh,
+    transform,
+    write(index: number, color?: THREE.Color) {
+      transform.updateMatrix();
+      mesh.setMatrixAt(index, transform.matrix);
+      if (color) mesh.setColorAt(index, color);
+    },
+    commit(count: number) {
+      mesh.count = count;
+      mesh.instanceMatrix.needsUpdate = true;
+      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+      if (mesh.frustumCulled) mesh.computeBoundingSphere();
+    },
+  };
+}
+
+function buildFronds(world: WorldBuilder, opts: FrondOptions): void {
   const wanted = 620;
   const rng = streamFor(opts.seed, 'fronds');
-  const mesh = new THREE.InstancedMesh(opts.geometry, opts.material, wanted);
-  mesh.name = 'willowFronds';
-  mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(wanted * 3), 3);
-  mesh.castShadow = false;
-  mesh.receiveShadow = false;
-
-  const m = new THREE.Matrix4();
-  const p = new THREE.Vector3();
-  const q = new THREE.Quaternion();
-  const e = new THREE.Euler();
-  const s = new THREE.Vector3();
+  const plants = plantInstances(world, 'willowFronds', opts.geometry, opts.material, wanted);
+  const { position: p, rotation: e, scale: s } = plants.transform;
   const col = new THREE.Color();
   let n = 0;
   let guard = 0;
@@ -790,19 +770,12 @@ function buildFronds(opts: FrondOptions): THREE.InstancedMesh & { dispose(): voi
 
     p.set(x, y, z);
     e.set(0, rng() * Math.PI * 2, Math.PI + (rng() - 0.5) * 0.5);
-    q.setFromEuler(e);
     s.set(0.7 + rng() * 0.7, scale, 1);
-    m.compose(p, q, s);
-    mesh.setMatrixAt(n, m);
     col.copy(opts.colors[Math.min(opts.colors.length - 1, (rng() * opts.colors.length) | 0)] ?? opts.colors[0] ?? col);
-    mesh.setColorAt(n, col);
+    plants.write(n, col);
     n++;
   }
-  mesh.count = n;
-  mesh.instanceMatrix.needsUpdate = true;
-  if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
-  mesh.computeBoundingSphere();
-  return mesh as THREE.InstancedMesh & { dispose(): void };
+  plants.commit(n);
 }
 
 export function makePadGeometry(): THREE.BufferGeometry {
@@ -835,17 +808,11 @@ interface PadOptions {
   bankHeight(x: number, z: number): number;
 }
 
-function buildPads(opts: PadOptions): THREE.InstancedMesh & { dispose(): void } {
+function buildPads(world: WorldBuilder, opts: PadOptions): void {
   const wanted = 26;
   const rng = streamFor(opts.seed, 'lilies');
-  const mesh = new THREE.InstancedMesh(opts.geometry, opts.material, wanted);
-  mesh.name = 'lilyPads';
-  mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(wanted * 3), 3);
-  const m = new THREE.Matrix4();
-  const p = new THREE.Vector3();
-  const q = new THREE.Quaternion();
-  const e = new THREE.Euler();
-  const s = new THREE.Vector3();
+  const plants = plantInstances(world, 'lilyPads', opts.geometry, opts.material, wanted);
+  const { position: p, rotation: e, scale: s } = plants.transform;
   const col = new THREE.Color();
   let n = 0;
   let guard = 0;
@@ -858,17 +825,10 @@ function buildPads(opts: PadOptions): THREE.InstancedMesh & { dispose(): void } 
     const scale = 0.38 + rng() * 0.5;
     p.set(x, WATER_Y + 0.012 + rng() * 0.006, z);
     e.set((rng() - 0.5) * 0.09, rng() * Math.PI * 2, (rng() - 0.5) * 0.09);
-    q.setFromEuler(e);
     s.set(scale, scale, scale);
-    m.compose(p, q, s);
-    mesh.setMatrixAt(n, m);
     col.copy(opts.colors[Math.min(opts.colors.length - 1, (rng() * opts.colors.length) | 0)] ?? opts.colors[0] ?? col);
-    mesh.setColorAt(n, col);
+    plants.write(n, col);
     n++;
   }
-  mesh.count = n;
-  mesh.instanceMatrix.needsUpdate = true;
-  if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
-  mesh.computeBoundingSphere();
-  return mesh as THREE.InstancedMesh & { dispose(): void };
+  plants.commit(n);
 }

@@ -3,12 +3,11 @@ import { blendTokens, shade } from '@kit/mix';
 import { mergeColoredParts, type ColoredPart } from '@kit/parts';
 import { hash2f } from '@kit/rng';
 import { rockGeometry } from '@kit/vegetation';
-import { emissiveMaterial, setEmissiveIntensity } from '@kit/materials';
+import { emissiveMaterial, oakMaterial, setEmissiveIntensity } from '@kit/materials';
 import { radialSprite } from '@kit/textures';
+import { Wisp } from '@kit/wisp';
 import {
   JBW_BANANA,
-  JBW_BLOCK,
-  JBW_BLOCK_ITEMS,
   JBW_JELLY,
   JBW_ONION,
   JBW_TREE,
@@ -46,13 +45,10 @@ export const ITEM_MOTION: Record<number, { hover: number; bob: number; spin: num
   [JBW_TRUFFLE]: { hover: AGENT_SPAN * 0.62, bob: AGENT_SPAN * 0.13, spin: 1.15 },
 };
 
-export const ITEM_GLOW = 0.34;
-export const HALO_GLOW = 0.08;
+export const ITEM_GLOW = 0.16;
+export const HALO_GLOW = 0.035;
 
 export const HALO_WHITEN = 0.16;
-export const HALO_SPAN = AGENT_SPAN * 1.28;
-export const HALO_HOVER = AGENT_SPAN * 0.52;
-export const HALO_BOB = AGENT_SPAN * 0.11;
 
 const ITEM_SPAN: Record<number, number> = {
   [JBW_BANANA]: AGENT_SPAN,
@@ -63,11 +59,10 @@ const ITEM_SPAN: Record<number, number> = {
   [JBW_TRUFFLE]: AGENT_SPAN,
 };
 
-export const DRAW_RADIUS = 520;
+export const DRAW_RADIUS = 4096;
 
-const DRAW_BLOCKS = ((2 * DRAW_RADIUS) / JBW_BLOCK + 2) ** 2;
-const CANDIDATES = DRAW_BLOCKS * JBW_BLOCK_ITEMS;
-const WALL_CELLS = DRAW_BLOCKS * JBW_BLOCK;
+const CANDIDATES = 1 << 16;
+const WALL_CELLS = CANDIDATES * 2;
 
 export const ITEM_CAPACITY: Record<number, number> = {
   [JBW_BANANA]: CANDIDATES,
@@ -326,4 +321,34 @@ export function orchardItemGeometry(item: number, skin: OrchardSkin): THREE.Buff
   const sat = geometry.boundingBox;
   if (sat) geometry.translate(0, -sat.min.y, 0);
   return geometry;
+}
+
+export function buildSeedpod(color: number): Wisp {
+  const traveler = new Wisp({ color: blendTokens(color, 0xffedbb, 0.6), radius: AGENT_SPAN / 4, height: AGENT_SPAN * 0.42, skirt: false, ribbon: true, silhouette: false, hop: { duration: 0.11, height: 0.16 }, name: 'orchardSeedpod' }, { w: 1, h: 1 });
+  const parts: ColoredPart[] = [];
+  for (const side of [-1, 1]) {
+    const shell = new THREE.SphereGeometry(0.62, 10, 8, 0.16, Math.PI - 0.32);
+    shell.scale(0.86, 0.78, 0.66);
+    shell.rotateY(side > 0 ? 0 : Math.PI);
+    shell.rotateX(side * 0.16);
+    shell.translate(0, -0.24, side * 0.25);
+    parts.push({ geometry: shell, color: side > 0 ? 0xb59d65 : 0xddc991 });
+  }
+  const leaf = new THREE.SphereGeometry(0.2, 7, 5);
+  leaf.scale(0.35, 1.1, 0.16);
+  leaf.rotateZ(-0.5);
+  leaf.translate(0.12, 0.68, 0);
+  parts.push({ geometry: leaf, color: 0x8fa669 });
+  const geometry = mergeColoredParts(parts, 'seedpodShell');
+  const material = oakMaterial({ vertexColors: true, roughness: 0.75, side: THREE.DoubleSide, rimStrength: 0.25 });
+  const shell = new THREE.Mesh(geometry, material);
+  shell.castShadow = true;
+  traveler.core.add(shell);
+  const dispose = traveler.dispose.bind(traveler);
+  traveler.dispose = () => {
+    geometry.dispose();
+    material.dispose();
+    dispose();
+  };
+  return traveler;
 }

@@ -1,169 +1,26 @@
 import * as THREE from 'three';
-import {
-  buildCellField,
-  CELL,
-  cellToWorld,
-  excludeCellCenters,
-  excludeWallCells,
-  isWall,
-  type CellFieldHandle,
-  type GridSize,
-  type Vec3Tuple,
-} from '@kit/grid';
+import { CELL, buildCellField, cellToWorldVec, isWall, type CellFieldHandle } from '@kit/grid';
 import { applyFog, makeLightRig, type LightRig } from '@kit/lighting';
-import { oakMaterial, type OakMaterial } from '@kit/materials';
-import { blendTokens, clamp01, shade, smoothstep01 } from '@kit/mix';
-import { makeAmbientParticles, makeMistPlanes } from '@kit/particles';
+import { oakMaterial } from '@kit/materials';
+import { blendTokens, shade, smoothstep01 } from '@kit/mix';
+import { makeAmbientParticles } from '@kit/particles';
 import { mergeColoredParts, type ColoredPart } from '@kit/parts';
-import { mulberry32, hash2f } from '@kit/rng';
+import { hash2f } from '@kit/rng';
 import { skyFromPalette, type SkyHandle } from '@kit/sky';
-import { makeTerrain, type TerrainHandle } from '@kit/terrain';
-import { valueNoise2 } from '@kit/textures';
 import { TOKENS, type Palette } from '@kit/tokens';
 import type { SceneContext } from '@kit/types';
-import {
-  excludeAny,
-  excludeRect,
-  scatterGrass,
-  scatterRocks,
-  scatterTrees,
-} from '@kit/vegetation';
+import { grassClumpGeometry, rockGeometry } from '@kit/vegetation';
 import { makeWorld, type WorldCore } from '@kit/world';
-import {
-  HIGHDIMMAZE_GAPS,
-  HIGHDIMMAZE_H,
-  HIGHDIMMAZE_W,
-  highDimMazeWalls,
-} from '@sim/envs/highdimmaze';
-import type { EnvGeometry, GridCell, GridGeometry } from '@sim/types';
-
-export const CANYON_HALF = (HIGHDIMMAZE_W * CELL) / 2;
-export const TERRAIN_SIZE = 76;
-export const TERRAIN_SEGMENTS = 120;
-export const CANYON_SINK = -0.1;
-
-export const FIN_HEIGHT_NORTH = 1.28;
-export const FIN_HEIGHT_SOUTH = 1.0;
-export const RIM_HEIGHT_NORTH = 1.24;
-export const RIM_HEIGHT_SOUTH = 0.54;
-export const WALL_BASE_HEIGHT = FIN_HEIGHT_NORTH;
-
-export const ARCH_NOTCH: readonly number[] = Object.freeze([0.36, 0.74]);
-
-export const ARCH_RISE = 0.14;
-export const ARCH_OPENING = 1.25;
-export const ARCH_BAND = 0.34;
-export const ARCH_SPAN_HALF = 0.5;
-export const ARCH_RIBBON = 0.36;
-export const ARCH_LEG = 0.24;
-
-export const FOG_EXTENT = 700;
-
-export const SUN_DIR: readonly [number, number, number] = [-0.5, 0.8, 0.33];
-export const SHADOW_RADIUS = 12.5;
-
-export const CAMERA_AZIMUTH = 0.25;
-export const CAMERA_STANDOFF = 15;
-
-export function lerp(a: number, b: number, t: number): number {
-  return a + (b - a) * t;
-}
+import { HIGHDIMMAZE_H, HIGHDIMMAZE_W } from '@sim/envs/highdimmaze';
+import type { EnvGeometry, GridGeometry } from '@sim/types';
+import { makeContinuousSurface, makeSceneryBank, type ViewCoverage } from '../jelly-bean-world/view';
 
 export function resolveGrid(geometry: EnvGeometry): GridGeometry {
-  const g = geometry.grid;
-  if (g && g.w === HIGHDIMMAZE_W && g.h === HIGHDIMMAZE_H) return g;
-  return {
-    w: HIGHDIMMAZE_W,
-    h: HIGHDIMMAZE_H,
-    walls: highDimMazeWalls(),
-    hallways: HIGHDIMMAZE_GAPS.map((c) => ({ ...c })),
-  };
-}
-
-export function resolveGaps(grid: GridGeometry): readonly GridCell[] {
-  const h = grid.hallways;
-  return h && h.length > 0 ? h : HIGHDIMMAZE_GAPS;
-}
-
-export function isRimCell(grid: GridSize, x: number, y: number): boolean {
-  return x === 0 || y === 0 || x === grid.w - 1 || y === grid.h - 1;
-}
-
-export function wallNominalAt(grid: GridGeometry, x: number, y: number): number {
-  if (!isWall(grid, x, y)) return 0;
-  const t = grid.h > 1 ? clamp01(y / (grid.h - 1)) : 0;
-  return isRimCell(grid, x, y)
-    ? lerp(RIM_HEIGHT_NORTH, RIM_HEIGHT_SOUTH, t)
-    : lerp(FIN_HEIGHT_NORTH, FIN_HEIGHT_SOUTH, t);
-}
-
-export function archNotch(grid: GridGeometry, x: number, y: number): number {
-  if (!isWall(grid, x, y) || isRimCell(grid, x, y)) return 1;
-  let k = 1;
-  const gaps = resolveGaps(grid);
-  for (let i = 0; i < gaps.length; i++) {
-    const gap = gaps[i];
-    if (!gap) continue;
-    const alongZ = archAxis(grid, gap) === 'alongZ';
-    const along = alongZ ? Math.abs(y - gap.y) : Math.abs(x - gap.x);
-    const across = alongZ ? Math.abs(x - gap.x) : Math.abs(y - gap.y);
-    if (across !== 0 || along < 1) continue;
-    const f = ARCH_NOTCH[along - 1];
-    if (f !== undefined && f < k) k = f;
+  const grid = geometry.grid;
+  if (!grid || grid.w !== HIGHDIMMAZE_W || grid.h !== HIGHDIMMAZE_H || grid.walls.length !== grid.w * grid.h || !grid.hallways?.length) {
+    throw new Error('High-Dim Maze requires complete recorded grid geometry');
   }
-  return k;
-}
-
-export function wallHeightAt(grid: GridGeometry, x: number, y: number): number {
-  return wallNominalAt(grid, x, y) * archNotch(grid, x, y);
-}
-
-export function wallHeightJitter(x: number, y: number, seed: number, amount = 0.09): number {
-  return 1 + (hash2f(x, y, seed ^ 0x51ed270b) - 0.5) * 2 * amount;
-}
-
-export function wallDistance(grid: GridGeometry, x: number, y: number, cap = 3): number {
-  if (isWall(grid, x, y)) return 0;
-  for (let r = 1; r <= cap; r++) {
-    for (let dy = -r; dy <= r; dy++) {
-      for (let dx = -r; dx <= r; dx++) {
-        if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
-        if (isWall(grid, x + dx, y + dy)) return r;
-      }
-    }
-  }
-  return cap + 1;
-}
-
-export type ArchAxis = 'alongX' | 'alongZ';
-
-export function archAxis(grid: GridGeometry, gap: GridCell): ArchAxis {
-  const runsAlongZ = isWall(grid, gap.x, gap.y - 1) && isWall(grid, gap.x, gap.y + 1);
-  return runsAlongZ ? 'alongZ' : 'alongX';
-}
-
-export function archYaw(axis: ArchAxis): number {
-  return axis === 'alongZ' ? Math.PI / 2 : 0;
-}
-
-export function archJambs(grid: GridGeometry, gap: GridCell, heights?: Float32Array): [number, number] {
-  const at = (x: number, y: number): number => {
-    if (heights && x >= 0 && y >= 0 && x < grid.w && y < grid.h) {
-      const h = heights[y * grid.w + x] ?? 0;
-      if (h > 0) return h;
-    }
-    return wallHeightAt(grid, x, y);
-  };
-  return archAxis(grid, gap) === 'alongZ'
-    ? [at(gap.x, gap.y + 1), at(gap.x, gap.y - 1)]
-    : [at(gap.x - 1, gap.y), at(gap.x + 1, gap.y)];
-}
-
-export function archHeight(grid: GridGeometry, gap: GridCell, _heights?: Float32Array): number {
-  const alongZ = archAxis(grid, gap) === 'alongZ';
-  const a = alongZ ? wallNominalAt(grid, gap.x, gap.y + 1) : wallNominalAt(grid, gap.x - 1, gap.y);
-  const b = alongZ ? wallNominalAt(grid, gap.x, gap.y - 1) : wallNominalAt(grid, gap.x + 1, gap.y);
-  return Math.max(a, b) + ARCH_RISE;
+  return grid;
 }
 
 export interface CanyonSkin {
@@ -212,469 +69,31 @@ export function canyonSkin(palette: Palette, tokens: typeof TOKENS): CanyonSkin 
   };
 }
 
-export const MESA_EDGE = 8.5;
-export const MESA_EDGE_WIDTH = 3.5;
-export const MESA_DROP = 10.5;
+const ARCH_SPAN_HALF = 0.5;
+const ARCH_OPENING = 1.25;
+const ARCH_BAND = 0.34;
+const ARCH_RIBBON = 0.36;
+const ARCH_LEG = 0.24;
 
-export function makeMesaHeight(seed: number): (x: number, z: number) => number {
-  return (x, z) => {
-    const out = Math.max(Math.abs(x), Math.abs(z)) - CANYON_HALF;
-    const w = smoothstep01(out / 4);
-    if (w <= 0) return 0;
-    const n1 = valueNoise2(x * 0.038 + 3.7, z * 0.038 + 9.1, 64, seed) - 0.5;
-    const n2 = valueNoise2(x * 0.095 + 1.3, z * 0.095 + 4.7, 64, seed ^ 0x51ed270b) - 0.5;
-    const n3 = valueNoise2(x * 0.24 + 7.9, z * 0.24 + 2.3, 64, seed ^ 0x2545f491) - 0.5;
-    const dunes = n1 * 3.0 + n2 * 1.4 + n3 * 0.5;
-    const wander = (valueNoise2(x * 0.06 + 21.3, z * 0.06 + 5.9, 64, seed ^ 0x7f4a7c15) - 0.5) * 4.5;
-    const fall = smoothstep01((out - (MESA_EDGE + wander)) / MESA_EDGE_WIDTH);
-    return w * dunes - fall * MESA_DROP;
-  };
-}
-
-export interface WorldHandle extends WorldCore {
-  sky: SkyHandle;
-  rig: LightRig;
-  terrain: TerrainHandle;
-  field: CellFieldHandle;
-  archRoots: THREE.Object3D[];
-  gaps: readonly GridCell[];
-  wallHeights: Float32Array;
-}
-
-export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeometry): WorldHandle {
-  const palette: Palette = ctx.tokens.palettes.afternoon;
-  const skin = canyonSkin(palette, ctx.tokens);
-  const w = makeWorld('slotCanyons');
-
-  const sky = skyFromPalette(palette, 'afternoon', {
-    sunDir: SUN_DIR,
-    sunSize: 0.03,
-    sunHdr: 5.2,
-    sunGlow: 0.3,
-    sunGlowPower: 26,
-    topSpread: 0.68,
-    bottomSpread: 0.42,
-    radius: 340,
-  });
-  w.add(sky.mesh);
-  w.own(sky);
-  w.time({ setTime: (t) => sky.setTime(t) });
-
-  const rig = makeLightRig(palette, {
-    sunDir: sky.sunDirection,
-    pointCount: 3,
-    pointDistance: 6,
-    sunDistanceScale: 2.4,
-  });
-  w.add(rig.group);
-  w.own(rig);
-  rig.hemi.intensity = palette.hemiIntensity * 1.35;
-  rig.setShadowFocus({ x: 0, y: 0.5, z: 0 }, SHADOW_RADIUS);
-
-  applyFog(scene, palette, FOG_EXTENT);
-
-  const terrain = makeTerrain({
-    size: [TERRAIN_SIZE, TERRAIN_SIZE],
-    segments: [TERRAIN_SEGMENTS, TERRAIN_SEGMENTS],
-    seed: ctx.seed,
-    heightFn: makeMesaHeight(ctx.seed),
-    jitter: 0,
-    colorNoise: 0.06,
-    slopeColor: skin.strata[0] ?? skin.stone,
-    slopeStrength: 0.62,
-    slopeSharpness: 1.8,
-    flattenMask: { x: 0, z: 0, halfX: CANYON_HALF, halfZ: CANYON_HALF, feather: 3.2 },
-    flattenHeight: CANYON_SINK,
-    colorRamp: [
-      { t: 0, color: blendTokens(skin.desert, skin.stone, 0.4) },
-      { t: 0.45, color: skin.desert },
-      { t: 1, color: blendTokens(skin.desert, skin.sandSun, 0.55) },
-    ],
-    materialOptions: {
-      rimColor: skin.rim,
-      rimStrength: 0.18,
-      toonSteps: 3,
-      toonSoftness: 0.32,
-      toonFloor: 0.28,
-    },
-    receiveShadow: true,
-    castShadow: false,
-    name: 'canyonDesert',
-  });
-  w.add(terrain.mesh);
-  w.own(terrain);
-
-  const white = palette.sun;
-  const field = buildCellField(
-    grid,
-    {
-      floorColor: white,
-      wallColor: white,
-      floorUnderWalls: true,
-      floorTint: (x, y) => {
-        if (isWall(grid, x, y)) return skin.strata[0] ?? skin.stone;
-        const open = clamp01((wallDistance(grid, x, y) - 1) / 1.5);
-        return blendTokens(skin.sandShade, skin.sandSun, open);
-      },
-      wallTint: () => skin.stone,
-      wallShape: 'block',
-      wallHeight: WALL_BASE_HEIGHT,
-      wallInset: 0,
-      floorInset: 0.03,
-      floorThickness: 0.16,
-      jitter: 0.08,
-      rimColor: skin.rim,
-      rimStrength: 0.26,
-      seed: ctx.seed,
-      name: 'canyonCells',
-    },
-  );
-  w.add(field.group);
-  w.own(field);
-  w.time({ setTime: (t) => field.setTime(t) });
-
-  const wallHeights = applyWallHeights(field, grid, ctx.seed);
-
-  const strataGeometry = makeStrataGeometry(skin);
-  const strataMaterial: OakMaterial = oakMaterial({
-    color: white,
-    vertexColors: true,
-    flatShading: true,
-    roughness: 0.96,
-    rimColor: skin.rim,
-    rimStrength: 0.5,
-    toonSteps: 3,
-    toonSoftness: 0.3,
-    toonFloor: 0.26,
-    name: 'canyonStrataMaterial',
-  });
-  w.own({ dispose: () => strataMaterial.dispose() });
-  w.own({ dispose: () => strataGeometry.dispose() });
-  {
-    let count = 0;
-    for (let i = 0; i < wallHeights.length; i++) if ((wallHeights[i] ?? 0) > 0) count++;
-    const mesh = new THREE.InstancedMesh(strataGeometry, strataMaterial, Math.max(1, count));
-    mesh.name = 'canyonStrata';
-    mesh.castShadow = false;
-    mesh.receiveShadow = true;
-    mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(Math.max(1, count) * 3), 3);
-    const matrix = new THREE.Matrix4();
-    const position = new THREE.Vector3();
-    const quaternion = new THREE.Quaternion();
-    const scaleVec = new THREE.Vector3();
-    const color = new THREE.Color();
-    const world: Vec3Tuple = [0, 0, 0];
-    let n = 0;
-    for (let y = 0; y < grid.h; y++) {
-      for (let x = 0; x < grid.w; x++) {
-        const h = wallHeights[y * grid.w + x] ?? 0;
-        if (h <= 0) continue;
-        cellToWorld(x, y, grid, world);
-        position.set(world[0], 0, world[2]);
-        scaleVec.set(1, h, 1);
-        matrix.compose(position, quaternion, scaleVec);
-        mesh.setMatrixAt(n, matrix);
-        const k = 0.9 + 0.2 * hash2f(x, y, ctx.seed ^ 0x2c1b3a95);
-        color.setRGB(k, k * (0.99 + 0.03 * hash2f(x, y, ctx.seed ^ 0x1a3)), k * 0.98);
-        mesh.setColorAt(n, color);
-        n++;
-      }
-    }
-    mesh.count = n;
-    mesh.instanceMatrix.needsUpdate = true;
-    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
-    mesh.computeBoundingSphere();
-    w.add(mesh);
-    w.own({ dispose: () => mesh.dispose() });
-  }
-
-  const gaps = resolveGaps(grid);
-  const archMaterial: OakMaterial = oakMaterial({
-    color: white,
-    vertexColors: true,
-    flatShading: true,
-    roughness: 0.95,
-    rimColor: skin.rim,
-    rimStrength: 0.55,
-    toonSteps: 3,
-    toonSoftness: 0.32,
-    toonFloor: 0.42,
-    name: 'canyonArchMaterial',
-  });
-  w.own({ dispose: () => archMaterial.dispose() });
-  const archRoots: THREE.Object3D[] = [];
-  {
-    const world: Vec3Tuple = [0, 0, 0];
-    for (let i = 0; i < gaps.length; i++) {
-      const gap = gaps[i];
-      if (!gap) continue;
-      const root = new THREE.Object3D();
-      root.name = `canyonArchRoot${i}`;
-      cellToWorld(gap.x, gap.y, grid, world);
-      root.position.set(world[0], 0, world[2]);
-      const jambs = archJambs(grid, gap, wallHeights);
-      const geometry = makeArchGeometry(
-        skin,
-        archHeight(grid, gap, wallHeights),
-        jambs,
-        ctx.seed + i * 7919,
-      );
-      const mesh = new THREE.Mesh(geometry, archMaterial);
-      mesh.name = `canyonArch${i}`;
-      mesh.rotation.y = archYaw(archAxis(grid, gap));
-      mesh.castShadow = true;
-      mesh.receiveShadow = true;
-      root.add(mesh);
-      w.add(root);
-      archRoots.push(root);
-      w.own({ dispose: () => geometry.dispose() });
-    }
-  }
-
-  {
-    const geometry = makeMesaLineGeometry(skin, ctx.seed);
-    const material: OakMaterial = oakMaterial({
-      color: white,
-      vertexColors: true,
-      flatShading: true,
-      roughness: 1,
-      rimColor: palette.skyHorizon,
-      rimStrength: 0.2,
-      toonSteps: 2,
-      toonSoftness: 0.4,
-      toonFloor: 0.42,
-      name: 'canyonMesaLineMaterial',
-    });
-    const mesh = new THREE.Mesh(geometry, material);
-    mesh.name = 'canyonMesaLine';
-    mesh.castShadow = false;
-    mesh.receiveShadow = false;
-    w.add(mesh);
-    w.own({ dispose: () => { geometry.dispose(); material.dispose(); } });
-  }
-
-  const offCanyon = excludeRect(0, 0, CANYON_HALF, CANYON_HALF, 0.7);
-  const nearCamera = excludeRect(
-    Math.sin(CAMERA_AZIMUTH) * CAMERA_STANDOFF,
-    Math.cos(CAMERA_AZIMUTH) * CAMERA_STANDOFF,
-    5.5,
-    5.5,
-    0,
-  );
-  const outside = excludeAny(offCanyon, nearCamera);
-
-  const scrub = scatterGrass({
-    count: 1500,
-    area: { x: 0, z: 0, halfX: 24, halfZ: 24, innerRadius: CANYON_HALF + 0.9 },
-    seed: ctx.seed ^ 0x5c1a,
-    exclude: outside,
-    heightAt: (x, z) => terrain.sampleHeight(x, z),
-    color: skin.scrub,
-    scale: [0.4, 0.95],
-    stretch: [0.6, 1.1],
-    hueJitter: 0.26,
-    wind: 0.05,
-    windFrequency: 1.9,
-    rimColor: skin.rim,
-    rimStrength: 0.36,
-    name: 'desertScrub',
-  });
-  w.add(scrub.group);
-  w.time(w.own(scrub));
-
-  const boulders = scatterRocks({
-    count: 340,
-    area: { x: 0, z: 0, halfX: 28, halfZ: 28, innerRadius: CANYON_HALF + 1.1 },
-    seed: ctx.seed ^ 0x77b3,
-    exclude: outside,
-    heightAt: (x, z) => terrain.sampleHeight(x, z),
-    maxSlope: 0.75,
-    color: shade(skin.stone, 0.1),
-    scale: [0.3, 1.5],
-    stretch: [0.5, 1.1],
-    hueJitter: 0.24,
-    rimColor: skin.rim,
-    rimStrength: 0.32,
-    castShadow: true,
-    name: 'desertBoulders',
-  });
-  w.add(boulders.group);
-  w.time(w.own(boulders));
-
-  const outcrops = scatterRocks({
-    count: 30,
-    area: { x: 0, z: 0, halfX: 19, halfZ: 19, innerRadius: CANYON_HALF + 4.2 },
-    seed: ctx.seed ^ 0x18ce,
-    exclude: outside,
-    heightAt: (x, z) => terrain.sampleHeight(x, z),
-    maxSlope: 0.62,
-    color: shade(blendTokens(skin.stone, skin.farStone, 0.3), 0.06),
-    scale: [1.0, 2.5],
-    stretch: [0.5, 1.05],
-    hueJitter: 0.2,
-    rimColor: skin.rim,
-    rimStrength: 0.3,
-    castShadow: true,
-    name: 'desertOutcrops',
-  });
-  w.add(outcrops.group);
-  w.time(w.own(outcrops));
-
-  const junipers = scatterTrees({
-    archetypes: ['bare'],
-    count: 26,
-    area: { x: 0, z: 0, halfX: 22, halfZ: 22, innerRadius: CANYON_HALF + 2.4 },
-    seed: ctx.seed ^ 0x31f7,
-    exclude: outside,
-    heightAt: (x, z) => terrain.sampleHeight(x, z),
-    maxSlope: 0.6,
-    color: shade(blendTokens(skin.scrub, skin.stone, 0.42), 0.3),
-    scale: [0.55, 1.05],
-    stretch: [0.7, 1.15],
-    hueJitter: 0.2,
-    wind: 0.024,
-    windFrequency: 0.9,
-    rimColor: skin.rim,
-    rimStrength: 0.3,
-    castShadow: true,
-    name: 'deadJunipers',
-  });
-  w.add(junipers.group);
-  w.time(w.own(junipers));
-
-  const scree = scatterRocks({
-    count: 120,
-    area: { x: 0, z: 0, halfX: CANYON_HALF - 0.6, halfZ: CANYON_HALF - 0.6 },
-    seed: ctx.seed ^ 0x2d41,
-    exclude: excludeAny(excludeWallCells(grid), excludeCellCenters(grid, 0.36)),
-    color: shade(skin.strata[2] ?? skin.stone, 0.1),
-    scale: [0.07, 0.2],
-    stretch: [0.3, 0.7],
-    hueJitter: 0.34,
-    rimColor: skin.rim,
-    rimStrength: 0.3,
-    castShadow: false,
-    name: 'canyonScree',
-  });
-  w.add(scree.group);
-  w.time(w.own(scree));
-
-  const dust = makeAmbientParticles({
-    preset: 'dust',
-    count: 220,
-    bounds: { x: 0, y: 1.25, z: 0, halfX: CANYON_HALF - 0.4, halfY: 0.55, halfZ: CANYON_HALF - 0.4 },
-    seed: ctx.seed ^ 0x7d21,
-    color: skin.dust,
-    size: 0.34,
-    intensity: 0.95,
-    opacity: 0.1,
-    rise: 0.035,
-    swirl: 0.16,
-    name: 'canyonDust',
-  });
-  w.add(dust.points);
-  w.size(w.time(w.own(dust)));
-
-  for (const spot of sandFallSpots(grid, ctx.seed, 4)) {
-    const fall = makeAmbientParticles({
-      preset: 'dust',
-      count: 46,
-      bounds: { x: spot.x, y: spot.top * 0.5, z: spot.z, halfX: 0.07, halfY: spot.top * 0.5, halfZ: 0.26 },
-      seed: ctx.seed ^ (0x4a13 + spot.index * 977),
-      color: blendTokens(skin.dust, skin.sandSun, 0.35),
-      size: 0.42,
-      intensity: 1.05,
-      opacity: 0.22,
-      rise: -0.42,
-      swirl: 0.05,
-      name: `canyonSandFall${spot.index}`,
-    });
-    w.add(fall.points);
-    w.size(w.time(w.own(fall)));
-  }
-
-  const shimmer = makeMistPlanes({
-    size: [HIGHDIMMAZE_W * CELL, HIGHDIMMAZE_H * CELL],
-    color: blendTokens(skin.dust, palette.sun, 0.4),
-    seed: ctx.seed ^ 0x6b21,
-    layers: 2,
-    baseY: 0.1,
-    spread: 0.34,
-    opacity: 0.045,
-    speed: 0.05,
-    scale: 3.4,
-    nearFade: 2,
-    name: 'canyonHeatShimmer',
-  });
-  w.add(shimmer.group);
-  w.time(w.own(shimmer));
-
-  return w.seal({
-    sky,
-    rig,
-    terrain,
-    field,
-    archRoots,
-    gaps,
-    wallHeights,
-  });
-}
-
-export function applyWallHeights(field: CellFieldHandle, grid: GridGeometry, seed: number): Float32Array {
-  const heights = new Float32Array(grid.w * grid.h);
-  const mesh = field.wallMeshes[0];
-  const matrix = new THREE.Matrix4();
-  const position = new THREE.Vector3();
-  const quaternion = new THREE.Quaternion();
-  const scaleVec = new THREE.Vector3();
-  const world: Vec3Tuple = [0, 0, 0];
-  for (let y = 0; y < grid.h; y++) {
-    for (let x = 0; x < grid.w; x++) {
-      const base = wallHeightAt(grid, x, y);
-      if (base <= 0) continue;
-      const h = base * wallHeightJitter(x, y, seed);
-      heights[y * grid.w + x] = h;
-      if (!mesh) continue;
-      const id = field.wallInstanceAt(x, y);
-      if (id < 0) continue;
-      cellToWorld(x, y, grid, world);
-      position.set(world[0], 0, world[2]);
-      scaleVec.set(1, h / WALL_BASE_HEIGHT, 1);
-      matrix.compose(position, quaternion, scaleVec);
-      mesh.setMatrixAt(id, matrix);
-    }
-  }
-  if (mesh) {
-    mesh.instanceMatrix.needsUpdate = true;
-    mesh.computeBoundingSphere();
-  }
-  return heights;
-}
-
-export function makeStrataGeometry(skin: CanyonSkin): THREE.BufferGeometry {
-  const beds: readonly (readonly [number, number, number])[] =
-    false
-      ? [
-          [0.46, 0.05, 1.03],
-          [1.0, 0.032, 1.028],
-        ]
-      : [
-          [0.17, 0.03, 1.042],
-          [0.42, 0.025, 1.026],
-          [0.67, 0.022, 1.046],
-          [1.0, 0.032, 1.028],
-        ];
+function finGeometry(skin: CanyonSkin): THREE.BufferGeometry {
   const parts: ColoredPart[] = [];
-  for (let i = 0; i < beds.length; i++) {
-    const bed = beds[i];
-    if (!bed) continue;
-    const [cy, half, spread] = bed;
-    const g = new THREE.BoxGeometry(CELL * spread, half * 2, CELL * spread);
-    g.translate(0, cy, 0);
-    const tone = false ? (i === 0 ? 0 : 3) : i;
-    parts.push({ geometry: g, color: skin.strata[tone] ?? skin.stone });
+  const core = new THREE.BoxGeometry(0.985, 1, 0.985, 2, 4, 2);
+  core.translate(0, 0.5, 0);
+  const position = core.getAttribute('position');
+  for (let i = 0; i < position.count; i++) {
+    const y = position.getY(i);
+    position.setX(i, position.getX(i) + Math.sin(y * 17 + position.getZ(i) * 3) * 0.018);
+    position.setZ(i, position.getZ(i) + Math.cos(y * 13 + position.getX(i) * 4) * 0.016);
   }
-  return mergeColoredParts(parts, 'canyonStrata');
+  core.computeVertexNormals();
+  parts.push({ geometry: core, color: skin.stone });
+  for (const [i, cy] of [0.17, 0.42, 0.67, 1].entries()) {
+    const spread = 1.026 + (i % 2) * 0.018;
+    const bed = new THREE.BoxGeometry(spread, i === 3 ? 0.064 : 0.05, spread);
+    bed.translate(0, cy, 0);
+    parts.push({ geometry: bed, color: skin.strata[i]! });
+  }
+  return mergeColoredParts(parts, 'weatheredSandstoneFin');
 }
 
 export function makeArchGeometry(
@@ -785,70 +204,190 @@ export function makeArchGeometry(
   return g;
 }
 
-export function makeMesaLineGeometry(skin: CanyonSkin, seed: number): THREE.BufferGeometry {
-  const rng = mulberry32((seed | 0) ^ 0x1d3b7c51);
-  const count = 10;
-  const parts: ColoredPart[] = [];
-  for (let i = 0; i < count; i++) {
-    const spread = Math.PI * 2 - 1.1;
-    let angle = CAMERA_AZIMUTH + 0.55 + ((i + rng() * 0.55) / count) * spread;
-    angle = ((angle + Math.PI) % (Math.PI * 2)) - Math.PI;
-    const radius = 18 + rng() * 11;
-    const w = 5 + rng() * 11;
-    const d = 4 + rng() * 8;
-    const h = 7.5 + rng() * 6;
-    const cx = Math.sin(angle) * radius;
-    const cz = Math.cos(angle) * radius;
-    const base = -MESA_DROP - 1;
-    const box = new THREE.BoxGeometry(w, h, d);
-    box.translate(cx, base + h * 0.5, cz);
-    parts.push({ geometry: box, color: skin.farStone });
-    const cap = new THREE.BoxGeometry(w * 0.7, h * 0.3, d * 0.7);
-    cap.translate(cx, base + h, cz);
-    parts.push({ geometry: cap, color: blendTokens(skin.farStone, skin.strata[3] ?? skin.stone, 0.4) });
+export interface WorldHandle extends WorldCore {
+  sky: SkyHandle;
+  rig: LightRig;
+  field: CellFieldHandle;
+  setView(coverage: ViewCoverage, camera: THREE.Camera): void;
+}
+
+export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeometry): WorldHandle {
+  const palette = ctx.tokens.palettes.afternoon;
+  const skin = canyonSkin(palette, ctx.tokens);
+  const w = makeWorld('terracottaCanyons');
+  const sky = w.time(w.own(skyFromPalette(palette, 'afternoon', {
+    sunDir: [-0.5, 0.8, 0.33],
+    sunGlow: 0.3,
+    sunHdr: 5.2,
+    topSpread: 0.7,
+  })));
+  w.add(sky.mesh);
+  const rig = w.own(makeLightRig(palette, { sunDir: sky.sunDirection, pointCount: 3, pointDistance: 6, sunDistanceScale: 2.4 }));
+  w.add(rig.group);
+  rig.setShadowFocus({ x: 0, y: 0.5, z: 0 }, 12.5);
+  const fog = applyFog(scene, palette, 550);
+  const half = Math.max(grid.w, grid.h) * CELL / 2;
+  const phase = ((ctx.seed >>> 0) % 8192) / 8192 * 6.28;
+  const heightAt = (x: number, z: number): number => {
+    const band = 0.65 * Math.sin(x * 0.13 + Math.sin(z * 0.045) * 1.1) * Math.cos(z * 0.095 + Math.sin(x * 0.04))
+      + 0.25 * Math.sin(x * 0.065 + z * 0.045 + phase);
+    const ridge = smoothstep01((band + 0.1) / 0.68) * (2.3 + Math.sin(z * 0.035 + phase) * 0.7);
+    return -0.1 + smoothstep01((Math.max(Math.abs(x), Math.abs(z)) - half) / 3.5)
+      * (ridge + 0.5 * Math.sin(x * 0.055 + phase) * Math.cos(z * 0.07));
+  };
+  const surface = w.time(w.own(makeContinuousSurface({
+    name: 'ochreDesert',
+    seed: ctx.seed,
+    colorA: skin.sandShade,
+    colorB: skin.sandSun,
+    height: `
+      float blend = smoothstep(0.0, 3.5, max(abs(p.x), abs(p.y)) - ${half.toFixed(4)});
+      float band = 0.65 * sin(p.x * 0.13 + sin(p.y * 0.045) * 1.1) * cos(p.y * 0.095 + sin(p.x * 0.04))
+        + 0.25 * sin(p.x * 0.065 + p.y * 0.045 + ${phase.toFixed(6)});
+      float ridge = smoothstep(-0.1, 0.58, band) * (2.3 + sin(p.y * 0.035 + ${phase.toFixed(6)}) * 0.7);
+      return -0.1 + blend * (ridge + 0.5 * sin(p.x * 0.055 + ${phase.toFixed(6)}) * cos(p.y * 0.07));
+    `,
+    detail: `
+      float wind = sin(p.x * 2.5 + p.z * 0.3 + sin(p.z * 0.22));
+      color *= 0.98 + wind * 0.02;
+      float ridgeFace = smoothstep(0.3, 1.5, p.y);
+      float strata = 0.5 + 0.5 * sin(p.y * 12.0 + sin(p.x * 0.6 + p.z * 0.5) * 0.4);
+      color = mix(color, mix(vec3(${skin.strata[0]!.r.toFixed(5)}, ${skin.strata[0]!.g.toFixed(5)}, ${skin.strata[0]!.b.toFixed(5)}),
+        vec3(${skin.strata[3]!.r.toFixed(5)}, ${skin.strata[3]!.g.toFixed(5)}, ${skin.strata[3]!.b.toFixed(5)}), strata * 0.45), ridgeFace * 0.6);
+    `,
+  })));
+  w.add(surface.mesh);
+  const field = w.time(w.own(buildCellField(grid, {
+    floorColor: palette.sun,
+    wallColor: palette.sun,
+    floorUnderWalls: true,
+    floorTint: (x, y) => isWall(grid, x, y) ? skin.stone : blendTokens(skin.sandShade, skin.sandSun, 0.65),
+    wallHeight: 0,
+    floorThickness: 0.16,
+    floorInset: 0.025,
+    seed: ctx.seed,
+    name: 'canyonRoutes',
+  })));
+  w.add(field.group);
+  for (const mesh of [...field.wallMeshes, ...field.floorMeshes]) mesh.visible = false;
+  const material = w.own(oakMaterial({
+    vertexColors: true, roughness: 0.96, flatShading: true,
+    rimColor: skin.rim, rimStrength: 0.32, toonSteps: 3, toonSoftness: 0.3, toonFloor: 0.3,
+    name: 'layeredSandstone',
+  }));
+  const wallGeometry = w.own(finGeometry(skin));
+  const cells: [number, number][] = [];
+  for (let y = 0; y < grid.h; y++) {
+    for (let x = 0; x < grid.w; x++) if (isWall(grid, x, y)) cells.push([x, y]);
   }
-  return mergeColoredParts(parts, 'canyonMesaLine');
-}
-
-export interface SandFallSpot {
-  index: number;
-  x: number;
-  z: number;
-  top: number;
-}
-
-export function sandFallSpots(grid: GridGeometry, seed: number, want: number): SandFallSpot[] {
-  if (want <= 0) return [];
-  interface Lip { x: number; z: number; top: number }
-  const lips: Lip[] = [];
-  const world: Vec3Tuple = [0, 0, 0];
-  for (let y = 1; y < grid.h - 1; y++) {
-    for (let x = 0; x < grid.w; x++) {
-      if (!isWall(grid, x, y)) continue;
-      const left = !isWall(grid, x - 1, y);
-      const right = !isWall(grid, x + 1, y);
-      if (!left && !right) continue;
-      const dir = right ? 1 : -1;
-      cellToWorld(x, y, grid, world);
-      lips.push({
-        x: world[0] + dir * CELL * 0.52,
-        z: world[2],
-        top: wallHeightAt(grid, x, y),
-      });
+  const walls = w.own(new THREE.InstancedMesh(wallGeometry, material, cells.length));
+  walls.castShadow = true;
+  walls.receiveShadow = true;
+  walls.name = 'canyonFins';
+  const transform = new THREE.Object3D();
+  cells.forEach(([x, y], i) => {
+    cellToWorldVec(x, y, grid, transform.position);
+    transform.rotation.set(0, 0, 0);
+    const t = y / (grid.h - 1);
+    const rim = x === 0 || y === 0 || x === grid.w - 1 || y === grid.h - 1;
+    let height = rim ? 1.24 - t * 0.7 : 1.28 - t * 0.28;
+    if (!rim) for (const gap of grid.hallways!) {
+      const alongZ = isWall(grid, gap.x, gap.y - 1) && isWall(grid, gap.x, gap.y + 1);
+      const along = alongZ ? Math.abs(y - gap.y) : Math.abs(x - gap.x);
+      const across = alongZ ? Math.abs(x - gap.x) : Math.abs(y - gap.y);
+      if (across === 0 && (along === 1 || along === 2)) height *= along === 1 ? 0.36 : 0.74;
     }
+    transform.scale.set(1, height * (0.91 + hash2f(x, y, ctx.seed ^ 0x51ed270b) * 0.18), 1);
+    transform.updateMatrix();
+    walls.setMatrixAt(i, transform.matrix);
+  });
+  walls.instanceMatrix.needsUpdate = true;
+  w.add(walls);
+  const arch = w.own(makeArchGeometry(skin, 1.4, [0.4, 0.4], ctx.seed));
+  const gaps = grid.hallways!;
+  const arches = w.own(new THREE.InstancedMesh(arch, material, gaps.length));
+  arches.castShadow = true;
+  arches.name = 'canyonPassages';
+  gaps.forEach((gap, i) => {
+    cellToWorldVec(gap.x, gap.y, grid, transform.position);
+    transform.rotation.y = isWall(grid, gap.x - 1, gap.y) && isWall(grid, gap.x + 1, gap.y) ? 0 : Math.PI / 2;
+    transform.scale.setScalar(1);
+    transform.updateMatrix();
+    arches.setMatrixAt(i, transform.matrix);
+  });
+  arches.instanceMatrix.needsUpdate = true;
+  w.add(arches);
+  const mesaParts: ColoredPart[] = [];
+  for (let i = 0; i < 5; i++) {
+    const fin = wallGeometry.clone();
+    fin.scale(1.8 + (i % 3) * 0.7, 1.4 + i * 0.3, 1.5 + (i % 2) * 0.6);
+    fin.translate(Math.sin(i * 2.3) * 1.7, 0, Math.cos(i * 2.3) * 1.2);
+    mesaParts.push({ geometry: fin, color: skin.strata[i % skin.strata.length]! });
   }
-  if (lips.length === 0) return [];
-  const rng = mulberry32((seed | 0) ^ 0x3f2a91b7);
-  const out: SandFallSpot[] = [];
-  const used = new Set<number>();
-  for (let i = 0; i < want && used.size < lips.length; i++) {
-    let pick = Math.min(lips.length - 1, (rng() * lips.length) | 0);
-    let guard = 0;
-    while (used.has(pick) && guard++ < lips.length) pick = (pick + 1) % lips.length;
-    used.add(pick);
-    const lip = lips[pick];
-    if (!lip) continue;
-    out.push({ index: i, x: lip.x, z: lip.z, top: lip.top });
+  const mesa = w.own(mergeColoredParts(mesaParts, 'erodedSandstoneRidge'));
+  const banks = [
+    { name: 'farSandstoneRidges', geometry: mesa, tile: 128, perTile: 5, low: 2, span: 4 },
+  ].map((spec) => {
+    const bank = w.own(makeSceneryBank({
+      name: spec.name, geometry: spec.geometry, material,
+      tileSize: spec.tile, perTile: spec.perTile, seed: ctx.seed,
+      colorA: 0xffffff, colorB: 0xd8bfa5, receiveShadow: true,
+      fill(tx, tz, rng, write) {
+        for (let i = 0; i < spec.perTile; i++) {
+          const x = (tx + rng()) * spec.tile;
+          const z = (tz + rng()) * spec.tile;
+          const size = spec.low + rng() * spec.span;
+          const edge = size * 2.8 + 38;
+          if (Math.abs(x) < half + edge && Math.abs(z) < half + edge) continue;
+          write(x, heightAt(x, z), z, rng() * Math.PI, size, 0.8 + rng() * 0.5, rng() * 0.4);
+        }
+      },
+    }));
+    w.add(bank.mesh);
+    return bank;
+  });
+  for (const plants of [true, false]) {
+    const scatter = w.own(makeSceneryBank({
+      name: plants ? 'canyonScrub' : 'canyonScree',
+      geometry: w.own(plants ? grassClumpGeometry(3) : rockGeometry(1, 0)),
+      material: w.own(oakMaterial({ color: plants ? skin.scrub : skin.stone, vertexColors: true,
+        roughness: 0.98, side: THREE.DoubleSide, rimColor: skin.rim, rimStrength: 0.16 })),
+      tileSize: 12, perTile: plants ? 32 : 20, seed: ctx.seed ^ 0x69c,
+      colorA: 0xffffff, colorB: 0xc5ae8d,
+      fill(tx, tz, rng, write) {
+        for (let i = 0; i < (plants ? 32 : 20); i++) {
+          const x = (tx + rng()) * 12;
+          const z = (tz + rng()) * 12;
+          if (Math.abs(x) < half && Math.abs(z) < half) continue;
+          write(x, heightAt(x, z), z, rng() * Math.PI, 0.12 + rng() * (plants ? 0.35 : 0.3), 0.6 + rng() * 0.6, rng());
+        }
+      },
+    }));
+    w.add(scatter.mesh);
+    banks.push(scatter);
   }
-  return out;
+  const dust = w.size(w.time(w.own(makeAmbientParticles({
+    preset: 'dust', count: 260,
+    bounds: { x: 0, y: 0.7, z: 0, halfX: half, halfY: 0.6, halfZ: half },
+    seed: ctx.seed ^ 0x7d21,
+    color: skin.dust,
+    size: 0.55,
+    opacity: 0.22,
+    rise: 0.025,
+    swirl: 0.1,
+    name: 'canyonWind',
+  }))));
+  w.add(dust.points);
+  return w.seal({
+    sky,
+    rig,
+    field,
+    setView(coverage, camera) {
+      surface.setView(coverage);
+      for (const bank of banks) bank.setView(coverage);
+      fog.density = 2.8 / coverage.far;
+      sky.mesh.position.copy(camera.position);
+      sky.mesh.scale.setScalar(coverage.far * 0.85);
+    },
+  });
 }
