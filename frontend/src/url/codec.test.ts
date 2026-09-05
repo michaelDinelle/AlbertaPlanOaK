@@ -9,7 +9,7 @@ import {
 
 const states: UrlState[] = [
   DEFAULT_URL_STATE,
-  { run: 'abc', env: 'CartPole-cont-v0', seed: 12, at: 120000, speed: 64, sort: 'retention', policy: 'ppo' },
+  { run: 'abc', env: 'Pendulum-cont-v0', seed: 12, at: 120000, speed: 64, sort: 'retention', policy: 'ppo' },
   { ...DEFAULT_URL_STATE, run: 'r1' },
   { ...DEFAULT_URL_STATE, env: 'HalfCheetah-v4', at: 5 },
   { ...DEFAULT_URL_STATE, policy: 'random', sort: 'seed', speed: 1024, seed: 0 },
@@ -59,9 +59,9 @@ test('merge patches every named field and preserves the rest', () => {
 });
 
 test('a policy flip never loses env, seed, or step', () => {
-  const deepLink = parseUrlState('?run=abc&env=CartPole-cont-v0&seed=12&at=120000');
+  const deepLink = parseUrlState('?run=abc&env=Pendulum-cont-v0&seed=12&at=120000');
   const flipped = parseUrlState(serializeUrlState(mergeUrlState(deepLink, { policy: 'ppo' })));
-  expect(flipped.env).toBe('CartPole-cont-v0');
+  expect(flipped.env).toBe('Pendulum-cont-v0');
   expect(flipped.seed).toBe(12);
   expect(flipped.at).toBe(120000);
   expect(flipped.policy).toBe('ppo');

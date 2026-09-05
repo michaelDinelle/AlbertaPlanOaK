@@ -109,7 +109,7 @@ export interface CreekSkin {
 
 export function creekSkin(palette: Palette, tokens: typeof TOKENS): CreekSkin {
   const blossom = tokens.accents['chain'] ?? tokens.celebrationGold;
-  const leaf = tokens.accents['cart-pole'] ?? palette.groundA;
+  const leaf = tokens.accents['foliage'] ?? palette.groundA;
   const silver = tokens.accents['po-maze'] ?? palette.hemiSky;
   const petalPink = tokens.accents['acrobot'] ?? blossom;
   const teal = tokens.accents['deep-sea'] ?? palette.hemiSky;

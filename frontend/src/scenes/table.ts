@@ -25,7 +25,6 @@ export const SCENES: Record<EnvId, SceneRow> = {
   'KeyCorridor-cont-v0': { slug: 'key-corridor', bloom: 0.3, burst: 110, fog: { from: ['morning', 'fog'] }, load: () => import('./key-corridor/index') },
   'Acrobot-cont-v0': { slug: 'acrobot', bloom: 0.46, burst: 110, fog: { from: ['dawn', 'fog'] }, load: () => import('./acrobot/index') },
   'MountainCar-cont-v0': { slug: 'mountain-car', bloom: 0.44, burst: 84, fog: { from: ['dusk', 'fog'] }, load: () => import('./mountain-car/index') },
-  'CartPole-cont-v0': { slug: 'cart-pole', bloom: 0.34, fog: { from: ['noon', 'fog'] }, load: () => import('./cart-pole/index') },
   'Pendulum-cont-v0': { slug: 'pendulum', bloom: 0.54, fog: { from: ['night', 'fog'] }, load: () => import('./pendulum/index') },
   'Chain-cont-v0': { slug: 'chain', bloom: 0.34, burst: 120, fog: { from: ['afternoon', 'fog'] }, load: () => import('./chain/index') },
   'LargeDeepSea-cont-v0': { slug: 'large-deep-sea', bloom: 0.48, burst: 130, fog: { from: ['abyss', 'fog'] }, load: () => import('./large-deep-sea/index') },

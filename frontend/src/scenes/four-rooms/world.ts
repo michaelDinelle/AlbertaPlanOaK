@@ -129,7 +129,7 @@ export interface CourtyardSkin {
 
 export function courtyardSkin(palette: Palette, tokens: typeof TOKENS): CourtyardSkin {
   const blossom = tokens.accents['chain'] ?? tokens.celebrationGold;
-  const leaf = tokens.accents['cart-pole'] ?? palette.groundA;
+  const leaf = tokens.accents['foliage'] ?? palette.groundA;
   const gold = tokens.accents['multi-key-corridor'] ?? tokens.celebrationGold;
   const terracotta = tokens.accents['high-dim-maze'] ?? tokens.celebrationGold;
   const silver = tokens.accents['po-maze'] ?? palette.hemiSky;

@@ -5,7 +5,6 @@ export const ENV_IDS = [
   'KeyCorridor-cont-v0',
   'Acrobot-cont-v0',
   'MountainCar-cont-v0',
-  'CartPole-cont-v0',
   'Pendulum-cont-v0',
   'Chain-cont-v0',
   'LargeDeepSea-cont-v0',

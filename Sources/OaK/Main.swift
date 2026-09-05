@@ -605,10 +605,6 @@ struct RecordCodec {
         RecordField(0, 1e-4), RecordField(1, 1e-5), RecordField(3),
       ]),
       RecordCodec(category: "classic", fields: [
-        RecordField(0, 1e-4), RecordField(1, 1e-3),
-        RecordField(2, 1e-4, true), RecordField(3, 1e-3), RecordField(4),
-      ]),
-      RecordCodec(category: "classic", fields: [
         RecordField(0, 1e-4, true), RecordField(1, 1e-3), RecordField(2, 1e-3),
       ]),
       grid([0]),
@@ -1240,7 +1236,7 @@ final class TapeWriter {
   }
   static let envIdsByKind: [String] = [
     "HalfCheetah-v4", "FourRooms-cont-v0", "DeepSea-cont-v0", "KeyCorridor-cont-v0",
-    "Acrobot-cont-v0", "MountainCar-cont-v0", "CartPole-cont-v0", "Pendulum-cont-v0",
+    "Acrobot-cont-v0", "MountainCar-cont-v0", "Pendulum-cont-v0",
     "Chain-cont-v0", "LargeDeepSea-cont-v0", "MultiKeyCorridor-cont-v0", "MemoryChain-cont-v0",
     "ProceduralMaze-cont-v0", "HighDimMaze-cont-v0", "POMaze-cont-v0", "DelayedChain-cont-v0",
     "JellyBeanWorld-cont-v0",

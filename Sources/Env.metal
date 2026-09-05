@@ -6,18 +6,17 @@ constant uint OAK_ENV_DEEPSEA = 2u;
 constant uint OAK_ENV_KEYCORRIDOR = 3u;
 constant uint OAK_ENV_ACROBOT = 4u;
 constant uint OAK_ENV_MOUNTAINCAR = 5u;
-constant uint OAK_ENV_CARTPOLE = 6u;
-constant uint OAK_ENV_PENDULUM = 7u;
-constant uint OAK_ENV_CHAIN = 8u;
-constant uint OAK_ENV_LARGEDEEPSEA = 9u;
-constant uint OAK_ENV_MULTIKEYCORRIDOR = 10u;
-constant uint OAK_ENV_MEMORYCHAIN = 11u;
-constant uint OAK_ENV_PROCEDURALMAZE = 12u;
-constant uint OAK_ENV_HIGHDIMMAZE = 13u;
-constant uint OAK_ENV_POMAZE = 14u;
-constant uint OAK_ENV_DELAYEDCHAIN = 15u;
-constant uint OAK_ENV_JELLYBEANWORLD = 16u;
-constant uint OAK_ENV_COUNT = 17u;
+constant uint OAK_ENV_PENDULUM = 6u;
+constant uint OAK_ENV_CHAIN = 7u;
+constant uint OAK_ENV_LARGEDEEPSEA = 8u;
+constant uint OAK_ENV_MULTIKEYCORRIDOR = 9u;
+constant uint OAK_ENV_MEMORYCHAIN = 10u;
+constant uint OAK_ENV_PROCEDURALMAZE = 11u;
+constant uint OAK_ENV_HIGHDIMMAZE = 12u;
+constant uint OAK_ENV_POMAZE = 13u;
+constant uint OAK_ENV_DELAYEDCHAIN = 14u;
+constant uint OAK_ENV_JELLYBEANWORLD = 15u;
+constant uint OAK_ENV_COUNT = 16u;
 
 constant uint OAK_ENV_OBS_MAX   = 17u;
 constant uint OAK_ENV_ACT_MAX   = 6u;
@@ -68,8 +67,6 @@ constant OakEnvSpec OAK_ENV_SPECS[OAK_ENV_COUNT] = {
       { OAK_SLOT_Q + 0u, OAK_SLOT_Q + 1u, OAK_SLOT_Q + 2u, OAK_SLOT_Q + 3u, OAK_SLOT_EFFORT, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
     { 0xf5b3ddc8u, 3u, 1u, 3u, 12u, 0u, 0u, 30u, 10u, 0xffffffffu, 1u,
       { OAK_SLOT_Q + 0u, OAK_SLOT_Q + 1u, OAK_SLOT_NONE, OAK_SLOT_EFFORT, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
-    { 0x41f9937du, 5u, 1u, 2u, 12u, 0u, 0u, 50u, 10u, 0xffffffffu, 1u,
-      { OAK_SLOT_Q + 0u, OAK_SLOT_Q + 1u, OAK_SLOT_Q + 2u, OAK_SLOT_Q + 3u, OAK_SLOT_EFFORT, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
     { 0x69bbbb73u, 4u, 0u, 1u, 12u, 0u, 0u, 20u, 10u, 0xffffffffu, 1u,
       { OAK_SLOT_Q + 0u, OAK_SLOT_Q + 1u, OAK_SLOT_EFFORT, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
     { 0x7b267422u, 2u, 1u, 2u, 12u, 16u, 1u, 8u, 10u, 0xffffffffu, 1u,
@@ -103,7 +100,6 @@ inline float env_step(uint envKind, uint seed, thread const float *ctrl,
     if (envKind == OAK_ENV_KEYCORRIDOR) return keyCorridor_step(words, seed, discreteAction, obs, &done);
     if (envKind == OAK_ENV_ACROBOT) return acrobot_step(words, discreteAction, obs, &done);
     if (envKind == OAK_ENV_MOUNTAINCAR) return mountainCar_step(words, discreteAction, obs, &done);
-    if (envKind == OAK_ENV_CARTPOLE) return cartPole_step(words, discreteAction, obs, &done);
     if (envKind == OAK_ENV_PENDULUM) return pendulum_step(words, ctrl[0], obs);
     if (envKind == OAK_ENV_CHAIN) return chain_step(words, discreteAction, obs, &done);
     if (envKind == OAK_ENV_LARGEDEEPSEA) return largeDeepSea_step(words, discreteAction, obs);
@@ -180,9 +176,6 @@ inline void env_observe(uint envKind, device const uint *words, thread float *ob
                     as_type<float>(words[2]), as_type<float>(words[3]), obs);
     } else if (envKind == OAK_ENV_MOUNTAINCAR) {
         mountainCar_obs(as_type<float>(words[0]), as_type<float>(words[1]), obs);
-    } else if (envKind == OAK_ENV_CARTPOLE) {
-        cartPole_obs(as_type<float>(words[0]), as_type<float>(words[1]),
-                     as_type<float>(words[2]), as_type<float>(words[3]), obs);
     } else if (envKind == OAK_ENV_PENDULUM) {
         pendulum_obs(as_type<float>(words[0]), as_type<float>(words[1]), obs);
     } else if (envKind == OAK_ENV_CHAIN) {
@@ -226,7 +219,6 @@ constant OakPosePlan OAK_POSE_PLANS[OAK_ENV_COUNT] = {
     { 0u, 0u,  0.0f, { 0u } },
     { 5u, 1u,  0.0f, { 0u, 1u, 2u, 3u, OAK_POSE_SOURCE_CONTROL } },
     { 4u, 1u,  0.5f, { 0u, 1u, OAK_POSE_SOURCE_GOAL, OAK_POSE_SOURCE_CONTROL } },
-    { 5u, 1u,  0.0f, { 0u, 1u, 2u, 3u, OAK_POSE_SOURCE_CONTROL } },
     { 0u, 0u,  0.0f, { 0u } },
     { 2u, 0u, 15.0f, { 0u, OAK_POSE_SOURCE_GOAL } },
     { 0u, 0u,  0.0f, { 0u } },

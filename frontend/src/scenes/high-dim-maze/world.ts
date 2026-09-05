@@ -186,7 +186,7 @@ export function canyonSkin(palette: Palette, tokens: typeof TOKENS): CanyonSkin 
   const terracotta = tokens.accents['high-dim-maze'] ?? tokens.celebrationGold;
   const ember = tokens.accents['mountain-car'] ?? terracotta;
   const teal = tokens.accents['deep-sea'] ?? tokens.uiCyan;
-  const leaf = tokens.accents['cart-pole'] ?? palette.groundA;
+  const leaf = tokens.accents['foliage'] ?? palette.groundA;
   const tan = TOKENS.palettes.dusk.groundA;
   const hot = TOKENS.palettes.dusk.skyHorizon;
 

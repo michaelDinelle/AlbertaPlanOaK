@@ -9,7 +9,6 @@ using namespace metal;
 #include "envs/KeyCorridor.metal"
 #include "envs/Acrobot.metal"
 #include "envs/MountainCar.metal"
-#include "envs/CartPole.metal"
 #include "envs/Pendulum.metal"
 #include "envs/Chain.metal"
 #include "envs/LargeDeepSea.metal"

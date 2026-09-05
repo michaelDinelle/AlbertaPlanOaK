@@ -7,7 +7,6 @@ import { deepSeaDecoder } from './envs/deepsea';
 import { keyCorridorDecoder } from './envs/keycorridor';
 import { acrobotDecoder } from './envs/acrobot';
 import { mountainCarDecoder } from './envs/mountaincar';
-import { cartPoleDecoder } from './envs/cartpole';
 import { pendulumDecoder } from './envs/pendulum';
 import { chainDecoder } from './envs/chain';
 import { largeDeepSeaDecoder } from './envs/largedeepsea';
@@ -26,7 +25,6 @@ const TABLE = {
   'KeyCorridor-cont-v0': keyCorridorDecoder,
   'Acrobot-cont-v0': acrobotDecoder,
   'MountainCar-cont-v0': mountainCarDecoder,
-  'CartPole-cont-v0': cartPoleDecoder,
   'Pendulum-cont-v0': pendulumDecoder,
   'Chain-cont-v0': chainDecoder,
   'LargeDeepSea-cont-v0': largeDeepSeaDecoder,

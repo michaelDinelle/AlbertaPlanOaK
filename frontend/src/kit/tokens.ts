@@ -61,7 +61,7 @@ export const TOKENS: DesignTokens = {
     'key-corridor':       0xffc94d,
     'acrobot':            0xf2a7c3,
     'mountain-car':       0xe86e4d,
-    'cart-pole':          0xa9d954,
+    'foliage':            0xa9d954,
     'pendulum':           0xffb35e,
     'chain':              0xf7a8b8,
     'large-deep-sea':     0x7fd4e8,
