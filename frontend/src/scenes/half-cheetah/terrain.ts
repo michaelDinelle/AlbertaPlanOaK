@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { hash2f } from '@kit/rng';
+import { terrainNoise as noise } from '@kit/mountains';
 import type { WorldBuilder } from '@kit/world';
 import type { ViewCoverage } from '../jelly-bean-world/view';
 
@@ -161,38 +161,4 @@ diffuseColor.rgb *= mix(mix(grass, stone, vExposure), vec3(0.24, 0.17, 0.10), tr
       }
     },
   };
-}
-
-function noise(x: number, z: number): number {
-  const ix = Math.floor(x), iz = Math.floor(z), u = smooth(x - ix, 0, 1), v = smooth(z - iz, 0, 1);
-  return THREE.MathUtils.lerp(THREE.MathUtils.lerp(hash2f(ix, iz, 81), hash2f(ix + 1, iz, 81), u), THREE.MathUtils.lerp(hash2f(ix, iz + 1, 81), hash2f(ix + 1, iz + 1, 81), u), v);
-}
-
-export async function mountainGeometry(): Promise<THREE.BufferGeometry> {
-  const response = await fetch('/terrain/banff-canmore-elevation.bin');
-  if (!response.ok) throw new Error(`Rockies elevation unavailable: ${response.status}`);
-  const elevations = new Float32Array(await response.arrayBuffer());
-  if (elevations.length !== 256 * 192) throw new Error('Rockies elevation grid is incomplete');
-  const geometry = new THREE.PlaneGeometry(3600, 2600, 255, 191);
-  geometry.rotateX(-Math.PI / 2);
-  const positions = geometry.getAttribute('position');
-  const uv = geometry.getAttribute('uv');
-  for (let i = 0; i < positions.count; i++) {
-    const column = i % 256, row = Math.floor(i / 256);
-    const edge = smooth(Math.min(column, 255 - column), 0, 12) * smooth(Math.min(row, 191 - row), 0, 10);
-    positions.setXYZ(i, positions.getX(i), (elevations[i]! - 1300) * 0.21 * edge - 8, positions.getZ(i) - 2600);
-    uv.setXY(i, positions.getX(i) * 0.025, positions.getY(i) * 0.04);
-  }
-  geometry.computeVertexNormals();
-  const normals = geometry.getAttribute('normal'), colors = new Float32Array(positions.count * 3);
-  const rock = new THREE.Color(0xb7afa4), snow = new THREE.Color(0xffeadd), meadow = new THREE.Color(0x98916e), color = new THREE.Color();
-  for (let i = 0; i < positions.count; i++) {
-    const x = positions.getX(i), z = positions.getZ(i), elevation = elevations[i]!;
-    const snowCover = smooth(elevation + noise(x * 0.035, z * 0.035) * 130, 2310, 2630) * smooth(normals.getY(i), 0.3, 0.8);
-    color.copy(meadow).lerp(rock, smooth(elevation, 1800, 2300)).lerp(snow, snowCover);
-    colors.set([color.r, color.g, color.b], i * 3);
-  }
-  geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-  geometry.userData.source = { name: 'Canadian Digital Elevation Model via Mapzen', bounds: [-115.6640625, 51.01375465718819, -115.3125, 51.17934297928927], url: 'https://registry.opendata.aws/terrain-tiles/' };
-  return geometry;
 }

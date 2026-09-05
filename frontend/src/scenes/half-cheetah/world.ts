@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { mergeGeometries, mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
 import { applyFog, makeLightRig, type LightRig } from '@kit/lighting';
 import { buildAurora } from '@kit/aurora';
+import { mountainGeometry } from '@kit/mountains';
 import { oakMaterial, oakUniforms } from '@kit/materials';
 import { rngAt } from '@kit/rng';
 import { skyFromPalette, type SkyHandle } from '@kit/sky';
@@ -10,7 +11,7 @@ import type { SceneContext } from '@kit/types';
 import type { VegetationHandle } from '@kit/vegetation';
 import { makeWorld, type WorldCore } from '@kit/world';
 import { makeContinuousSurface, makeSceneryBank, type ViewCoverage } from '../jelly-bean-world/view';
-import { makePrairieTerrain, mountainGeometry, prairieGroundHeight, prairiePlacement, prairieRidge } from './terrain';
+import { makePrairieTerrain, prairieGroundHeight, prairiePlacement, prairieRidge } from './terrain';
 
 export { prairieHeight } from './terrain';
 
@@ -63,7 +64,7 @@ export function makeLandscape(scene: THREE.Scene, name: string, palette: Palette
   };
 }
 
-function prairieGrass() {
+export function prairieGrass() {
   const positions: number[] = [], colors: number[] = [];
   const root = new THREE.Color(0x667044), tip = new THREE.Color(0xc2b875), color = new THREE.Color();
   for (let blade = 0; blade < 6; blade++) {
@@ -146,7 +147,7 @@ function aspenTree(world: ReturnType<typeof makeWorld>) {
   return { geometry, material };
 }
 
-function fieldstones(world: ReturnType<typeof makeWorld>) {
+export function fieldstones(world: ReturnType<typeof makeWorld>) {
   const geometry = new THREE.SphereGeometry(0.4, 20, 12);
   const position = geometry.getAttribute('position'), colors = new Float32Array(position.count * 3);
   const stone = new THREE.Color(0xf5f2ec), lichen = new THREE.Color(0xc4c19a), color = new THREE.Color();

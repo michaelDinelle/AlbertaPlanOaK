@@ -37,6 +37,7 @@ export const STR = {
     policyLabel: 'policy',
     hidePanel: 'Hide the side panel',
     showPanel: 'Show the side panel',
+    resetCamera: 'Reset camera',
     debug: 'Show what the world is really doing',
     fullscreen: 'Fill the screen',
     windowed: 'Back to the window',

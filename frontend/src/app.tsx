@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { clsx } from 'clsx';
-import { ChevronDown, PanelRightOpen } from 'lucide-react';
+import { ChevronDown, PanelRightOpen, RotateCcw } from 'lucide-react';
 import { ENV_IDS } from '@shared/envs';
 import type { Policy, RunDetail, RunIndexEntry } from '@shared/types';
 import { AboutOaK } from './about/AboutOaK';
@@ -33,7 +33,7 @@ import {
 import { STR } from './strings';
 import { setLive, useTapeProgress } from './tape/store';
 import { setTransport, transportSnapshot } from './playback/store';
-import { setTheaterInputs, stepBySteps, useStageMeta } from './theater/controller';
+import { resetCamera, setTheaterInputs, stepBySteps, useStageMeta } from './theater/controller';
 import { seedsFor } from './theater/loader';
 import { TheaterStage } from './theater/TheaterStage';
 import { sceneRegistry } from './scenes/table';
@@ -334,8 +334,13 @@ export function App() {
           <Notice title={notice.title} detail={notice.detail ?? null} pulse={notice.pulse} />
         </div>
       )}
-      <div className="pointer-events-none absolute left-4 top-4 z-20">
+      <div className="pointer-events-none absolute left-4 top-4 z-20 flex items-start gap-2">
         <RunChip entries={entries} active={active} />
+        <Panel>
+          <button type="button" onClick={resetCamera} aria-label={STR.bar.resetCamera} title={STR.bar.resetCamera} className="pointer-events-auto flex h-9 items-center gap-2 rounded-lg px-3 text-xs text-ink-dim transition-colors hover:bg-white/10 hover:text-ink active:bg-white/15">
+            <RotateCcw className="size-3.5" /><span className="hidden sm:inline">{STR.bar.resetCamera}</span>
+          </button>
+        </Panel>
       </div>
       <div
         className={clsx(

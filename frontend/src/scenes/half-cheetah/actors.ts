@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { bevelBox, robotMaterials } from '@kit/robot';
 import { mergeColoredParts, type ColoredPart } from '@kit/parts';
 import { CHEETAH_BONES, FK_POINT_INDEX } from '@sim/fk/cheetah';
 import type { CheetahGeometry } from '@sim/types';
@@ -13,24 +14,8 @@ export interface CheetahHandle {
 export function buildCheetah(cheetah: CheetahGeometry): CheetahHandle {
   const group = new THREE.Group();
   group.name = 'fieldRobot';
-  const armor = new THREE.MeshStandardMaterial({ color: 0xe7b83c, roughness: 0.62, metalness: 0.18 });
-  const frame = new THREE.MeshStandardMaterial({ color: 0x303b46, roughness: 0.58, metalness: 0.45 });
-  const alloy = new THREE.MeshStandardMaterial({ color: 0xa5b0b6, roughness: 0.64, metalness: 0.48 });
-  const rubber = new THREE.MeshStandardMaterial({ color: 0x222a30, roughness: 0.92 });
-  const hardware = new THREE.MeshStandardMaterial({ color: 0xffffff, vertexColors: true, roughness: 0.56, metalness: 0.5 });
-  const status = new THREE.MeshStandardMaterial({ color: 0x8dd4d0, roughness: 0.3, emissive: 0x589c99, emissiveIntensity: 0.12 });
+  const { armor, frame, alloy, rubber, hardware, status } = robotMaterials();
   const geometries: THREE.BufferGeometry[] = [];
-  const bevelBox = (width: number, length: number, depth: number, bevel: number): THREE.BufferGeometry => {
-    const shape = new THREE.Shape();
-    const w = width * 0.5;
-    const h = length * 0.5;
-    const outline = [[-w + bevel, -h], [w - bevel, -h], [w, -h + bevel], [w, h - bevel], [w - bevel, h], [-w + bevel, h], [-w, h - bevel], [-w, -h + bevel]];
-    outline.forEach(([x = 0, y = 0], i) => i === 0 ? shape.moveTo(x, y) : shape.lineTo(x, y));
-    shape.closePath();
-    const geometry = new THREE.ExtrudeGeometry(shape, { depth, bevelEnabled: true, bevelThickness: bevel * 0.35, bevelSize: bevel * 0.35, bevelSegments: 1, steps: 1, curveSegments: 1 });
-    geometry.translate(0, 0, -depth * 0.5);
-    return geometry;
-  };
   const add = (root: THREE.Object3D, geometry: THREE.BufferGeometry, material: THREE.Material, x = 0, y = 0, z = 0): THREE.Mesh => {
     geometries.push(geometry);
     const mesh = new THREE.Mesh(geometry, material);

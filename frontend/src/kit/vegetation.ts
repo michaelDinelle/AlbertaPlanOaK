@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import type { WorldBuilder } from './world';
 import { oakMaterial, oakUniforms } from './materials';
 import type { OakMaterial } from './materials';
 import { streamFor } from './rng';
@@ -470,5 +471,29 @@ export function excludeAny(...tests: readonly (ExcludeFn | undefined)[]): Exclud
   return (x, z) => {
     for (const t of live) if (t(x, z)) return true;
     return false;
+  };
+}
+
+export function plantInstances(world: WorldBuilder, name: string, geometry: THREE.BufferGeometry, material: THREE.Material, count: number) {
+  world.own(material);
+  world.own(geometry);
+  const mesh = world.add(world.own(new THREE.InstancedMesh(geometry, material, count)));
+  mesh.name = name;
+  mesh.count = 0;
+  const transform = new THREE.Object3D();
+  return {
+    mesh,
+    transform,
+    write(index: number, color?: THREE.Color) {
+      transform.updateMatrix();
+      mesh.setMatrixAt(index, transform.matrix);
+      if (color) mesh.setColorAt(index, color);
+    },
+    commit(count: number) {
+      mesh.count = count;
+      mesh.instanceMatrix.needsUpdate = true;
+      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+      if (mesh.frustumCulled) mesh.computeBoundingSphere();
+    },
   };
 }

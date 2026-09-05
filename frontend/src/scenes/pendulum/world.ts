@@ -18,7 +18,7 @@ import { mergeColoredParts, type ColoredPart } from '@kit/parts';
 import { streamFor } from '@kit/rng';
 import type { SkyHandle } from '@kit/sky';
 import { makeLandscape, makeSceneTerrain, extendWater, extendVegetation, WORLD_NOISE } from '../half-cheetah/world';
-import { plantInstances } from '../acrobot/world';
+import { plantInstances } from '@kit/vegetation';
 import type { ViewCoverage } from '../jelly-bean-world/view';
 import { radialSprite } from '@kit/textures';
 import { TOKENS, type Palette } from '@kit/tokens';

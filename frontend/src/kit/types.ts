@@ -40,6 +40,7 @@ export interface SceneModule {
   init(ctx: SceneContext): Promise<void>;
   update(frame: FrameUpdate): void;
   resize(size: SceneSize): void;
+  resetCamera(): void;
   setDebug(on: boolean): void;
   dispose(): void;
 }

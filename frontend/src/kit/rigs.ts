@@ -94,6 +94,7 @@ export interface OrbitRig extends RigHandle {
   readonly state: OrbitState;
   readonly desired: OrbitState;
   readonly limits: OrbitLimits;
+  reset(): void;
   orbit(dAzimuth: number, dPolar: number): void;
   zoom(delta: number): void;
   pan(dx: number, dy: number): void;
@@ -212,6 +213,10 @@ export function makeOrbitRig(opts: OrbitRigOptions = {}): OrbitRig {
     state,
     desired,
     limits,
+    reset() {
+      Object.assign(desired, home);
+      panOffset.set(0, 0, 0);
+    },
     orbit(dAzimuth, dPolar) {
       desired.azimuth += dAzimuth;
       desired.polar += dPolar;
@@ -274,6 +279,7 @@ export function makeOrbitRig(opts: OrbitRigOptions = {}): OrbitRig {
       canvas.removeEventListener('pointerup', onPointerUp);
       canvas.removeEventListener('pointercancel', onPointerUp);
       canvas.removeEventListener('wheel', onWheel);
+      canvas.removeEventListener('dblclick', rig.reset);
     },
   };
 
@@ -284,12 +290,7 @@ export function makeOrbitRig(opts: OrbitRigOptions = {}): OrbitRig {
     canvas.addEventListener('pointercancel', onPointerUp);
     canvas.addEventListener('wheel', onWheel, { passive: false });
     canvas.addEventListener('contextmenu', (e: Event) => e.preventDefault());
-    canvas.addEventListener('dblclick', () => {
-      desired.azimuth = home.azimuth;
-      desired.polar = home.polar;
-      desired.distance = home.distance;
-      panOffset.set(0, 0, 0);
-    });
+    canvas.addEventListener('dblclick', rig.reset);
   }
 
   return rig;

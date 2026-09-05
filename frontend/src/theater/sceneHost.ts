@@ -47,6 +47,7 @@ export interface SceneHostHandle {
   seek(position: number): void;
   setSource(source: PlaybackSource, opts?: { at?: number }): Promise<void>;
   setEnv(envId: EnvId, source: PlaybackSource, opts?: { at?: number }): Promise<void>;
+  resetCamera(): void;
   setDebug(on: boolean): void;
   destroy(): void;
 }
@@ -220,7 +221,6 @@ export async function mountSceneHost(
 
   let raf = 0;
   let lastWall = 0;
-
   const tick = (now: number): void => {
     raf = requestAnimationFrame(tick);
     if (!scene || !post) return;
@@ -319,6 +319,7 @@ export async function mountSceneHost(
       swapSource(nextSource, opts.at ?? 0);
       await buildScene();
     },
+    resetCamera() { scene?.resetCamera(); },
     setDebug(on) {
       debugOn = on;
       scene?.setDebug(on);

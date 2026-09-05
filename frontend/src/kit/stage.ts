@@ -102,6 +102,10 @@ export abstract class StageScene<W extends WorldCore> implements SceneModule {
     this.pool?.setPixelRatio(size.dpr);
   }
 
+  resetCamera(): void {
+    this.rig?.reset();
+  }
+
   setDebug(on: boolean): void {
     this.debugOn = on;
     if (this.overlay) this.overlay.visible = on;

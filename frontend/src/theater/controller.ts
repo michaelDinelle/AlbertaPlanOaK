@@ -152,6 +152,8 @@ function applyTransport(): void {
   else sceneHost.pause();
 }
 
+export function resetCamera(): void { sceneHost?.resetCamera(); }
+
 function applyDebug(): void {
   const debug = selectionSnapshot().debug;
   if (debug === appliedDebug) return;
