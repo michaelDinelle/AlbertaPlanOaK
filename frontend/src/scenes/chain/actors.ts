@@ -1,544 +1,166 @@
-import { emissiveMaterial, oakMaterial, oakUniforms, setEmissiveIntensity } from '@kit/materials';
-import type { EmissiveMaterial, OakMaterial } from '@kit/materials';
-import { blendTokens, clamp01 } from '@kit/mix';
-import { mergeColoredParts, type ColoredPart } from '@kit/parts';
-import { hash2f } from '@kit/rng';
-import type { Palette } from '@kit/tokens';
 import * as THREE from 'three';
-import { tubeGeometry } from './world';
+import { alpineTexture } from '@kit/alpine';
+import { bevelBox, engravedPanel, modelParts, robotMaterials } from '@kit/robot';
+import { CELL } from '@kit/grid';
+import { makeWorld, type WorldCore } from '@kit/world';
+import type { GridGeometry } from '@sim/types';
+import { riverHeight } from './world';
 
-type Vec3 = readonly [number, number, number];
+export const deckHeight = (x: number) => 0.003 * x * x;
+export const chainX = (position: number, grid: GridGeometry) => (position - (grid.w - 1) / 2) * CELL;
 
-interface Limb {
-  a: Vec3;
-  b: Vec3;
-  ra: number;
-  rb: number;
-  twig: boolean;
-}
-
-const FORK: Vec3 = [0.22, 1.52, -0.08];
-
-const TRUNK: readonly Limb[] = [
-  { a: [0, 0, 0], b: [0.1, 0.78, -0.03], ra: 0.2, rb: 0.135, twig: false },
-  { a: [0.1, 0.78, -0.03], b: FORK, ra: 0.135, rb: 0.092, twig: false },
-];
-
-const BOUGHS: readonly { mid: Vec3; tip: Vec3 }[] = [
-  { mid: [-0.5, 1.95, 0.16], tip: [-1.12, 2.34, 0.36] },
-  { mid: [0.78, 1.9, -0.22], tip: [1.46, 2.24, -0.46] },
-  { mid: [0.36, 2.12, 0.5], tip: [0.4, 2.66, 1.06] },
-  { mid: [0.38, 2.04, -0.56], tip: [0.58, 2.5, -1.14] },
-];
-
-const TWIGS: readonly Vec3[] = [
-  [-0.42, 0.44, 0.32],
-  [-0.3, 0.5, -0.3],
-  [-0.5, 0.34, -0.08],
-  [0.4, 0.42, 0.3],
-  [0.18, 0.54, -0.34],
-  [0.5, 0.36, 0.02],
-  [-0.32, 0.4, 0.36],
-  [0.3, 0.5, 0.26],
-  [0.06, 0.46, 0.48],
-  [0.36, 0.44, -0.28],
-  [-0.24, 0.52, -0.26],
-  [0.14, 0.38, -0.5],
-];
-
-function offset3(a: Vec3, d: Vec3): Vec3 {
-  return [a[0] + d[0], a[1] + d[1], a[2] + d[2]];
-}
-
-function lerp3(a: Vec3, b: Vec3, t: number): Vec3 {
-  return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
-}
-
-export function blossomTreeLimbs(): Limb[] {
-  const limbs: Limb[] = [...TRUNK];
-  for (let i = 0; i < BOUGHS.length; i++) {
-    const bough = BOUGHS[i] as { mid: Vec3; tip: Vec3 };
-    limbs.push({ a: FORK, b: bough.mid, ra: 0.082, rb: 0.05, twig: false });
-    limbs.push({ a: bough.mid, b: bough.tip, ra: 0.05, rb: 0.03, twig: false });
-    const d0 = TWIGS[i * 3] as Vec3;
-    const d1 = TWIGS[i * 3 + 1] as Vec3;
-    const d2 = TWIGS[i * 3 + 2] as Vec3;
-    limbs.push({ a: bough.mid, b: offset3(bough.mid, d0), ra: 0.03, rb: 0.014, twig: true });
-    limbs.push({ a: bough.tip, b: offset3(bough.tip, d1), ra: 0.028, rb: 0.013, twig: true });
-    limbs.push({ a: bough.tip, b: offset3(bough.tip, d2), ra: 0.026, rb: 0.012, twig: true });
+export function buildCrossing(grid: GridGeometry) {
+  const world = makeWorld('suspensionCrossing'), root = world.group;
+  const materials = robotMaterials();
+  Object.values(materials).forEach(material => world.own(material));
+  const { frame, armor, alloy, rubber, status } = materials;
+  const parts = modelParts(world), { box, disc, rod } = parts;
+  const half = grid.w * CELL / 2 + 0.8;
+  const timber = alpineTexture(world, 'alpine-timber');
+  const wood = world.own(new THREE.MeshStandardMaterial({ map: timber, bumpMap: timber, bumpScale: 0.009, roughness: 0.88, color: 0xc0a987 }));
+  const footing = world.own(new THREE.MeshStandardMaterial({ map: alpineTexture(world, 'alpine-limestone'), color: 0x86968b, roughness: 1 }));
+  const cableHeight = (x: number) => 1.05 + 1.8 * (Math.cosh(x / half) - 1) / (Math.cosh(1) - 1);
+  const plankCount = Math.ceil((half + 0.65) * 2 / 0.28), pitch = (half + 0.65) * 2 / plankCount;
+  for (let i = 0; i < plankCount; i++) {
+    const x = (i + 0.5 - plankCount / 2) * pitch;
+    const plank = bevelBox(pitch - 0.012, 0.11, 1.72, 0.012);
+    const p = plank.getAttribute('position'), n = plank.getAttribute('normal'), uv = plank.getAttribute('uv');
+    for (let j = 0; j < p.count; j++) uv.setXY(j, (Math.abs(n.getX(j)) > 0.5 ? p.getY(j) : p.getX(j)) + i * 0.317, (Math.abs(n.getZ(j)) > 0.5 ? p.getY(j) : p.getZ(j)) + i * 0.731);
+    parts.add(root, plank.rotateZ(Math.atan(0.006 * x)).translate(x, deckHeight(x) - 0.055, 0), wood);
+    for (const z of [-0.65, 0.65]) parts.add(root, new THREE.CylinderGeometry(0.012, 0.012, 0.008, 6).translate(x, deckHeight(x) + 0.007, z), alloy);
   }
-  return limbs;
-}
-
-export function blossomTreeCrownHeight(): number {
-  let top = 0;
-  for (const limb of blossomTreeLimbs()) {
-    if (limb.b[1] > top) top = limb.b[1];
-    if (limb.a[1] > top) top = limb.a[1];
-  }
-  return top;
-}
-
-export interface BlossomTreeOptions {
-  palette: Palette;
-  blossom: THREE.ColorRepresentation;
-  bark: THREE.ColorRepresentation;
-  moss: THREE.ColorRepresentation;
-  ember: THREE.ColorRepresentation;
-  name?: string;
-}
-
-export interface BlossomTreeHandle {
-  group: THREE.Group;
-  root: THREE.Object3D;
-  readonly crownHeight: number;
-  readonly blossomCount: number;
-  setState(bloom01: number, time: number): void;
-  setTime(t: number): void;
-  dispose(): void;
-}
-
-export function buildBlossomTree(opts: BlossomTreeOptions): BlossomTreeHandle {
-  const { palette, blossom, bark, moss, ember } = opts;
-  const detail = 1;
-  const radial = Math.max(4, Math.round(7 * detail));
-  const group = new THREE.Group();
-  group.name = opts.name ?? 'blossomTree';
-
-  const root = new THREE.Object3D();
-  root.name = 'blossomTreeRoot';
-  group.add(root);
-
-  const crown = new THREE.Object3D();
-  crown.name = 'blossomTreeCrown';
-  root.add(crown);
-
-  const limbs = blossomTreeLimbs();
-  const barkParts: ColoredPart[] = [];
-  const barkLight = blendTokens(bark, palette.groundB, 0.22);
-  for (const limb of limbs) {
-    barkParts.push({
-      geometry: tubeGeometry(limb.a, limb.b, limb.ra, limb.rb, limb.twig ? Math.max(3, radial - 3) : radial),
-      color: limb.twig ? barkLight : bark,
-    });
-  }
-  {
-    const boss = new THREE.IcosahedronGeometry(0.33, 1);
-    boss.scale(1.05, 0.44, 0.98);
-    boss.translate(0.02, 0.06, 0);
-    barkParts.push({ geometry: boss, color: moss });
-    for (let i = 0; i < (5); i++) {
-      const a = (i / 5) * Math.PI * 2 + 0.4;
-      const rootArm = tubeGeometry(
-        [0.03, 0.2, 0],
-        [Math.cos(a) * 0.31, 0.03, Math.sin(a) * 0.27],
-        0.062,
-        0.026,
-        Math.max(3, radial - 3),
-      );
-      barkParts.push({ geometry: rootArm, color: blendTokens(bark, moss, 0.45) });
+  for (const z of [-0.88, 0.88]) {
+    for (const elevation of [-0.14, 0.52, 0.87]) {
+      const curve = new THREE.CatmullRomCurve3(Array.from({ length: 33 }, (_, i) => {
+        const x = (i / 32 * 2 - 1) * half;
+        return new THREE.Vector3(x, deckHeight(x) + elevation, z);
+      }));
+      parts.add(root, new THREE.TubeGeometry(curve, 48, elevation < 0 ? 0.045 : 0.014, 8, false), frame);
+    }
+    const suspension = new THREE.CatmullRomCurve3(Array.from({ length: 65 }, (_, i) => {
+      const x = (i / 64 * 2 - 1) * half;
+      return new THREE.Vector3(x, cableHeight(x), z);
+    }));
+    parts.add(root, new THREE.TubeGeometry(suspension, 96, 0.025, 8, false), alloy);
+    for (let i = 0; i <= grid.w; i++) {
+      const x = (i / grid.w * 2 - 1) * half;
+      rod(root, alloy, new THREE.Vector3(x, deckHeight(x) - 0.12, z), new THREE.Vector3(x, cableHeight(x), z), 0.011);
+      box(root, frame, x, deckHeight(x) - 0.11, z, 0.11, 0.19, 0.07, 0.006);
+    }
+    for (const sign of [-1, 1]) {
+      const x = sign * half, bed = riverHeight(x, z) - 0.4;
+      box(root, footing, x, bed + 0.3, z, 0.75, 0.65, 0.8, 0.05);
+      box(root, frame, x, (bed + 3.02) / 2, z, 0.16, 3.02 - bed, 0.2, 0.018);
+      box(root, armor, x, 0.85, z + Math.sign(z) * 0.115, 0.19, 0.62, 0.04);
+      box(root, alloy, x, bed + 0.67, z, 0.48, 0.07, 0.52, 0.01);
+      for (const dx of [-0.16, 0.16]) for (const dz of [-0.18, 0.18]) parts.add(root, new THREE.CylinderGeometry(0.025, 0.025, 0.032, 6).translate(x + dx, bed + 0.73, z + dz), frame);
+      const anchorX = x + sign * 2.3, anchorY = riverHeight(anchorX, z * 1.4);
+      box(root, footing, anchorX, anchorY - 0.08, z * 1.4, 0.75, 0.5, 0.7, 0.06);
+      rod(root, alloy, new THREE.Vector3(x, cableHeight(x), z), new THREE.Vector3(anchorX, anchorY + 0.16, z * 1.4), 0.028);
+      disc(root, rubber, x, 2.88, z, 0.115, 0.26);
+      disc(root, alloy, x, 2.88, z + Math.sign(z) * 0.145, 0.072, 0.025);
     }
   }
-  const barkGeometry = mergeColoredParts(barkParts, 'blossomTreeBark');
-  const barkMaterial: OakMaterial = oakMaterial({
-    vertexColors: true,
-    flatShading: true,
-    roughness: 0.92,
-    rimColor: palette.skyHorizon,
-    rimStrength: 0.34,
-    toonSteps: 3,
-    toonSoftness: 0.3,
-    toonFloor: 0.22,
-    name: 'blossomTreeBarkMaterial',
-  });
-  const barkMesh = new THREE.Mesh(barkGeometry, barkMaterial);
-  barkMesh.name = 'blossomTreeBark';
-  barkMesh.castShadow = true;
-  barkMesh.receiveShadow = true;
-  crown.add(barkMesh);
-
-  const perTwig = 16;
-  const twigs = limbs.filter((l) => l.twig);
-  const blossomCount = twigs.length * perTwig;
-  const blossomGeometry = blossomClusterGeometry();
-  const blossomMaterial: OakMaterial = oakMaterial({
-    color: new THREE.Color(blossom).lerp(new THREE.Color(0xffc7d8), 0.36),
-    vertexColors: true,
-    flatShading: true,
-    side: THREE.DoubleSide,
-    roughness: 0.72,
-    rimColor: blendTokens(blossom, palette.sun, 0.5),
-    rimStrength: 0.5,
-    toonSteps: 2,
-    toonSoftness: 0.38,
-    toonFloor: 0.38,
-    name: 'blossomTreePetalMaterial',
-  });
-  const blossoms = new THREE.InstancedMesh(blossomGeometry, blossomMaterial, Math.max(1, blossomCount));
-  blossoms.name = 'blossomTreePetals';
-  blossoms.castShadow = false;
-  blossoms.receiveShadow = false;
-  blossoms.frustumCulled = false;
-  blossoms.count = blossomCount;
-  blossoms.visible = blossomCount > 0;
-  blossoms.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(Math.max(1, blossomCount) * 3), 3);
-  crown.add(blossoms);
-
-  const bloomUniform = { value: 0 };
-  const timeUniform = { value: 0 };
-  const compile = blossomMaterial.onBeforeCompile;
-  const cache = blossomMaterial.customProgramCacheKey();
-  blossomMaterial.onBeforeCompile = (shader, renderer) => {
-    compile.call(blossomMaterial, shader, renderer);
-    shader.uniforms.uBlossomBloom = bloomUniform;
-    shader.uniforms.uBlossomTime = timeUniform;
-    shader.vertexShader = `uniform float uBlossomBloom;\nuniform float uBlossomTime;\n${shader.vertexShader}`.replace('#include <begin_vertex>', `#include <begin_vertex>
-float phase = dot(instanceMatrix[3].xyz, vec3(1.7,3.1,2.3));
-transformed *= .88 + .3*uBlossomBloom + .045*sin(uBlossomTime*1.35+phase);`);
-  };
-  blossomMaterial.customProgramCacheKey = () => `${cache}:blossomBloom`;
-  {
-    const matrix = new THREE.Matrix4();
-    const quaternion = new THREE.Quaternion();
-    const euler = new THREE.Euler();
-    const position = new THREE.Vector3();
-    const scale = new THREE.Vector3();
-    const color = new THREE.Color();
-    let k = 0;
-    for (let t = 0; t < twigs.length; t++) {
-      const twig = twigs[t] as Limb;
-      for (let j = 0; j < perTwig; j++) {
-        const h0 = hash2f(t, j, 0x1f83d9ab);
-        const h1 = hash2f(t, j + 64, 0x5bd1e995);
-        const h2 = hash2f(t, j + 128, 0x27d4eb2f);
-        const point = lerp3(twig.a, twig.b, 0.28 + ((j + h0) / perTwig) * 0.72);
-        position.set(point[0] + (h0 - 0.5) * 0.65, point[1] + (h1 - 0.5) * 0.3, point[2] + (h2 - 0.5) * 0.65);
-        euler.set((h1 - 0.5) * 1.5, h0 * Math.PI * 2, (h2 - 0.5) * 1.5);
-        quaternion.setFromEuler(euler);
-        scale.setScalar(1.45 + h2 * 0.9);
-        matrix.compose(position, quaternion, scale);
-        blossoms.setMatrixAt(k, matrix);
-        color.setRGB(0.9 + h0 * 0.2, 0.9 + h1 * 0.16, 0.92 + h2 * 0.16);
-        blossoms.setColorAt(k++, color);
+  for (const sign of [-1, 1]) box(root, frame, sign * half, 3.01, 0, 0.17, 0.15, 2.03, 0.02);
+  const destination = chainX(grid.goal!.x, grid), beacon = world.own(status.clone());
+  for (const z of [-0.66, 0.66]) {
+    box(root, frame, destination, deckHeight(destination) + 0.36, z, 0.14, 0.72, 0.12);
+    box(root, armor, destination, deckHeight(destination) + 0.36, z + Math.sign(z) * 0.075, 0.17, 0.48, 0.04);
+    box(root, beacon, destination, deckHeight(destination) + 0.69, z, 0.1, 0.025, 0.14, 0.005);
+  }
+  parts.build();
+  const markers = world.own(new THREE.InstancedMesh(world.own(bevelBox(0.32, 0.015, 0.055, 0.005)), status, grid.w * 2));
+  const dummy = new THREE.Object3D(), tint = new THREE.Color();
+  for (let i = 0; i < grid.w; i++) for (let side = 0; side < 2; side++) {
+    const x = chainX(i, grid);
+    dummy.position.set(x, deckHeight(x) + 0.018, side ? 0.73 : -0.73);
+    dummy.updateMatrix(); markers.setMatrixAt(i * 2 + side, dummy.matrix);
+  }
+  markers.computeBoundingSphere(); world.add(markers);
+  let active = -1;
+  return world.seal<WorldCore & { setState(position: number, glow: number): void }>({
+    setState(position: number, glow: number) {
+      if (active !== position) {
+        active = position;
+        for (let i = 0; i < grid.w; i++) {
+          tint.set(i === position ? 0xc8ffec : i < position ? 0x76aa94 : 0x334340);
+          markers.setColorAt(i * 2, tint); markers.setColorAt(i * 2 + 1, tint);
+        }
+        markers.instanceColor!.needsUpdate = true;
       }
-    }
-    blossoms.instanceMatrix.needsUpdate = true;
-    if (blossoms.instanceColor) blossoms.instanceColor.needsUpdate = true;
-  }
-
-  const emberGeometry = new THREE.IcosahedronGeometry(0.1, 1);
-  const emberMaterial: EmissiveMaterial = emissiveMaterial(ember, 0.0, { name: 'blossomTreeHeart' });
-  const emberMesh = new THREE.Mesh(emberGeometry, emberMaterial);
-  emberMesh.name = 'blossomTreeHeart';
-  emberMesh.position.set(FORK[0], FORK[1] + 0.08, FORK[2]);
-  crown.add(emberMesh);
-
-  const crownHeight = blossomTreeCrownHeight();
-  let bloom = 0;
-
-  return {
-    group,
-    root,
-    crownHeight,
-    blossomCount,
-
-    setState(bloom01, time) {
-      bloom = clamp01(bloom01);
-      bloomUniform.value = bloom;
-      timeUniform.value = time;
-      setEmissiveIntensity(emberMaterial, 0.72 * bloom * bloom);
-      emberMesh.scale.setScalar(0.42 + 0.44 * bloom);
+      beacon.emissiveIntensity = 0.2 + glow * 1.4;
     },
-
-    setTime(t) {
-      crown.rotation.z = Math.sin(t * 0.62) * 0.02 * (0.5 + 0.5 * bloom);
-      crown.rotation.x = Math.cos(t * 0.47) * 0.016 * (0.5 + 0.5 * bloom);
-      oakUniforms(barkMaterial)?.setTime(t);
-      oakUniforms(blossomMaterial)?.setTime(t);
-    },
-
-    dispose() {
-      blossoms.dispose();
-      blossomGeometry.dispose();
-      blossomMaterial.dispose();
-      barkGeometry.dispose();
-      barkMaterial.dispose();
-      emberGeometry.dispose();
-      emberMaterial.dispose();
-      group.removeFromParent();
-      group.clear();
-    },
-  };
-}
-
-export function blossomClusterGeometry(): THREE.BufferGeometry {
-  const petals = 5;
-  const heads: readonly { at: Vec3; tilt: number; yaw: number; scale: number }[] =
-    [
-          { at: [0, 0, 0], tilt: 0, yaw: 0, scale: 1 },
-          { at: [0.072, 0.026, -0.03], tilt: 0.5, yaw: 1.1, scale: 0.86 },
-          { at: [-0.052, 0.016, 0.062], tilt: -0.42, yaw: 2.4, scale: 0.78 },
-        ];
-  const inner = 0.02;
-  const outer = 0.088;
-  const cup = 0.028;
-
-  const tris = heads.length * petals * 2;
-  const positions = new Float32Array(tris * 3 * 3);
-  const colors = new Float32Array(tris * 3 * 3);
-  let o = 0;
-  const v = new THREE.Vector3();
-  const q = new THREE.Quaternion();
-  const e = new THREE.Euler(0, 0, 0, 'YXZ');
-
-  for (const head of heads) {
-    e.set(head.tilt, head.yaw, head.tilt * 0.6);
-    q.setFromEuler(e);
-    const place = (x: number, y: number, z: number, g: number): void => {
-      v.set(x * head.scale, y * head.scale, z * head.scale).applyQuaternion(q);
-      positions[o * 3] = v.x + head.at[0];
-      positions[o * 3 + 1] = v.y + head.at[1];
-      positions[o * 3 + 2] = v.z + head.at[2];
-      colors[o * 3] = g;
-      colors[o * 3 + 1] = g * (g > 1 ? 0.97 : 1);
-      colors[o * 3 + 2] = g * (g > 1 ? 0.97 : 1);
-      o++;
-    };
-    for (let i = 0; i < petals; i++) {
-      const a0 = (i / petals) * Math.PI * 2;
-      const a1 = ((i + 1) / petals) * Math.PI * 2;
-      const am = (a0 + a1) * 0.5;
-      const sx = Math.cos(a0) * inner;
-      const sz = Math.sin(a0) * inner;
-      const ex = Math.cos(a1) * inner;
-      const ez = Math.sin(a1) * inner;
-      const lx = Math.cos(a0 + (am - a0) * 0.25) * outer;
-      const lz = Math.sin(a0 + (am - a0) * 0.25) * outer;
-      const rx = Math.cos(a1 - (a1 - am) * 0.25) * outer;
-      const rz = Math.sin(a1 - (a1 - am) * 0.25) * outer;
-      place(sx, 0, sz, 1.24);
-      place(lx, cup, lz, 0.86);
-      place(rx, cup, rz, 0.86);
-      place(sx, 0, sz, 1.24);
-      place(rx, cup, rz, 0.86);
-      place(ex, 0, ez, 1.24);
-    }
-  }
-
-  const g = new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  g.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-  g.computeVertexNormals();
-  g.computeBoundingSphere();
-  g.name = 'blossomCluster';
-  return g;
-}
-
-export const FERRY_SECONDS = 1.55;
-export const FERRY_STAGGER = 0.42;
-
-export interface PetalFerryOptions {
-  palette: Palette;
-  blossom: THREE.ColorRepresentation;
-  from: readonly [number, number, number];
-  to: readonly [number, number, number];
-  name?: string;
-}
-
-export interface PetalFerryHandle {
-  mesh: THREE.InstancedMesh;
-  readonly count: number;
-  fire(now: number): void;
-  clear(): void;
-  setTime(time: number): void;
-  progress(time: number): number;
-  dispose(): void;
-}
-
-export function buildPetalFerry(opts: PetalFerryOptions): PetalFerryHandle {
-  const count = 38;
-  const geometry = petalGeometry();
-  geometry.setAttribute('aPetal', new THREE.InstancedBufferAttribute(Float32Array.from({ length: count }, (_, i) => i), 1));
-  const material = oakMaterial({ color: opts.blossom, vertexColors: true, side: THREE.DoubleSide, roughness: 0.66, rimStrength: 0.35 });
-  const ageUniform = { value: -1 };
-  const compile = material.onBeforeCompile;
-  const cache = material.customProgramCacheKey();
-  material.onBeforeCompile = (shader, renderer) => {
-    compile.call(material, shader, renderer);
-    shader.uniforms.uPetalAge = ageUniform;
-    shader.uniforms.uPetalFrom = { value: new THREE.Vector3(...opts.from) };
-    shader.uniforms.uPetalTo = { value: new THREE.Vector3(...opts.to) };
-    shader.vertexShader = `attribute float aPetal;\nuniform float uPetalAge;\nuniform vec3 uPetalFrom;\nuniform vec3 uPetalTo;\n${shader.vertexShader}`.replace('#include <begin_vertex>', `#include <begin_vertex>
-float u = aPetal/37.;
-float h = fract(sin(aPetal*12.9898)*43758.5453);
-float t = clamp((uPetalAge-u*.42)/1.13,0.,1.);
-float live = smoothstep(0.,.14,t)*(1.-smoothstep(.74,1.,t));
-float a = t*(5.5+h*4.);
-transformed = mat3(cos(a),sin(a),0.,-sin(a),cos(a),0.,0.,0.,1.)*transformed*live*(.75+h*.6);
-vec3 point = mix(uPetalFrom,uPetalTo,t);
-point.x = mix(uPetalFrom.x,uPetalTo.x,pow(t,.82));
-point.y += sin(t*3.14159)*(.42+h*.5);
-point.z += sin(t*4.4+u*6.28)*(.3+.7*h)*(.25+.75*t);
-transformed += point;`);
-  };
-  material.customProgramCacheKey = () => `${cache}:returningPetals`;
-  const mesh = new THREE.InstancedMesh(geometry, material, count);
-  mesh.name = opts.name ?? 'petalFerry';
-  mesh.frustumCulled = false;
-  mesh.visible = false;
-  const matrix = new THREE.Matrix4();
-  for (let i = 0; i < count; i++) mesh.setMatrixAt(i, matrix);
-  mesh.instanceMatrix.needsUpdate = true;
-  let firedAt = -Infinity;
-  return {
-    mesh,
-    count,
-    fire(now) { firedAt = now; },
-    clear() { firedAt = -Infinity; mesh.visible = false; },
-    progress(time) {
-      const age = time - firedAt;
-      return age >= 0 && age <= FERRY_SECONDS ? 1 - age / FERRY_SECONDS : 0;
-    },
-    setTime(time) {
-      const age = time - firedAt;
-      mesh.visible = age >= 0 && age <= FERRY_SECONDS;
-      ageUniform.value = age;
-    },
-    dispose() {
-      mesh.dispose();
-      geometry.dispose();
-      material.dispose();
-      mesh.removeFromParent();
-    },
-  };
-}
-
-export interface FordLanternOptions {
-  palette: Palette;
-  stone: THREE.ColorRepresentation;
-  moss: THREE.ColorRepresentation;
-  offset?: readonly [number, number, number];
-  name?: string;
-}
-
-export const LANTERN_ART_SCALE = 1.45;
-const LANTERN_PLINTH_R = 0.3;
-const LANTERN_PLINTH_H = 0.15;
-export const LANTERN_BASE_RADIUS = LANTERN_PLINTH_R * LANTERN_ART_SCALE;
-export const LANTERN_BASE_HEIGHT = LANTERN_PLINTH_H * LANTERN_ART_SCALE;
-export const LANTERN_OFFSET: readonly [number, number, number] = [-0.45, 0, -2.35];
-
-export interface FordLanternHandle {
-  group: THREE.Group;
-  root: THREE.Object3D;
-  setTime(t: number): void;
-  dispose(): void;
-}
-
-export function buildFordLantern(opts: FordLanternOptions): FordLanternHandle {
-  const { palette, stone, moss } = opts;
-  const offset = opts.offset ?? LANTERN_OFFSET;
-  const detail = 1;
-  const sides = Math.max(5, Math.round(6 * detail));
-  const group = new THREE.Group();
-  group.name = opts.name ?? 'fordLantern';
-
-  const root = new THREE.Object3D();
-  root.name = 'fordLanternRoot';
-  group.add(root);
-
-  const body = new THREE.Object3D();
-  body.name = 'fordLanternBody';
-  body.position.set(offset[0], offset[1], offset[2]);
-  body.rotation.y = 0.38;
-  body.scale.setScalar(LANTERN_ART_SCALE);
-  root.add(body);
-
-  const dark = blendTokens(stone, moss, 0.34);
-  const parts: ColoredPart[] = [];
-  const drum = (r0: number, r1: number, h: number, y: number, color: THREE.ColorRepresentation): void => {
-    const g = new THREE.CylinderGeometry(r1, r0, h, sides, 1);
-    g.translate(0, y + h / 2, 0);
-    parts.push({ geometry: g, color });
-  };
-  drum(LANTERN_PLINTH_R, 0.26, LANTERN_PLINTH_H, 0, dark);
-  drum(0.085, 0.075, 0.62, 0.15, stone);
-  drum(0.24, 0.25, 0.08, 0.77, dark);
-  drum(0.2, 0.21, 0.3, 0.85, stone);
-  drum(0.35, 0.05, 0.27, 1.15, dark);
-  {
-    const finial = new THREE.IcosahedronGeometry(0.065, 1);
-    finial.translate(0, 1.46, 0);
-    parts.push({ geometry: finial, color: stone });
-    const collar = new THREE.CylinderGeometry(0.32, 0.34, 0.06, sides, 1);
-    collar.translate(0, 0.02, 0);
-    parts.push({ geometry: collar, color: moss });
-  }
-
-  const geometry = mergeColoredParts(parts, 'fordLantern');
-  const material: OakMaterial = oakMaterial({
-    vertexColors: true,
-    flatShading: true,
-    roughness: 0.96,
-    rimColor: palette.skyHorizon,
-    rimStrength: 0.36,
-    toonSteps: 3,
-    toonSoftness: 0.3,
-    toonFloor: 0.22,
-    name: 'fordLanternMaterial',
   });
-  const mesh = new THREE.Mesh(geometry, material);
-  mesh.name = 'fordLanternMesh';
-  mesh.castShadow = true;
-  mesh.receiveShadow = true;
-  body.add(mesh);
-
-  return {
-    group,
-    root,
-    setTime(t) {
-      oakUniforms(material)?.setTime(t);
-    },
-    dispose() {
-      geometry.dispose();
-      material.dispose();
-      group.removeFromParent();
-      group.clear();
-    },
-  };
 }
 
-export function petalGeometry(): THREE.BufferGeometry {
-  const pts: readonly (readonly [number, number, number, number])[] = [
-    [0, 0, -0.115, 1.2],
-    [-0.068, 0.021, 0.018, 0.92],
-    [0, 0, 0.125, 0.72],
-    [0.068, 0.021, 0.018, 0.92],
-  ];
-  const tris: readonly (readonly [number, number, number])[] = [
-    [0, 1, 2],
-    [0, 2, 3],
-  ];
-  const positions = new Float32Array(2 * 3 * 3);
-  const colors = new Float32Array(2 * 3 * 3);
-  let o = 0;
-  for (const tri of tris) {
-    for (const idx of tri) {
-      const p = pts[idx] as readonly [number, number, number, number];
-      positions[o * 3] = p[0];
-      positions[o * 3 + 1] = p[1];
-      positions[o * 3 + 2] = p[2];
-      colors[o * 3] = p[3];
-      colors[o * 3 + 1] = p[3];
-      colors[o * 3 + 2] = p[3];
-      o++;
+export function buildRover() {
+  const world = makeWorld('chainSurveyRover'), root = world.add(new THREE.Group());
+  const materials = robotMaterials();
+  Object.values(materials).forEach(material => world.own(material));
+  const { armor, accent, frame, alloy, rubber, status } = materials;
+  const parts = modelParts(world), { box, disc, rod } = parts;
+  box(root, frame, 0, 0.37, 0, 1.02, 0.24, 0.55, 0.05);
+  parts.add(root, engravedPanel(0.62, 0.91, 0.22, 0.055, 0.28).rotateZ(-Math.PI / 2).rotateX(-Math.PI / 2).translate(0, 0.56, 0), armor);
+  for (const sign of [-1, 1]) {
+    box(root, armor, -0.06, 0.5, sign * 0.34, 0.69, 0.16, 0.1, 0.025);
+    box(root, rubber, sign * 0.5, 0.39, 0, 0.08, 0.13, 0.61, 0.025);
+    for (let i = 0; i < 4; i++) box(root, frame, -0.3 + i * 0.034, 0.54, sign * 0.396, 0.022, 0.075, 0.012, 0.003);
+    box(root, status, 0.29, 0.56, sign * 0.365, 0.105, 0.028, 0.024, 0.006);
+    for (const x of [-0.38, 0.38]) {
+      disc(root, alloy, x, 0.55, sign * 0.4, 0.027, 0.016, 6);
+      rod(root, alloy, new THREE.Vector3(x * 0.55, 0.36, sign * 0.22), new THREE.Vector3(x, 0.2, sign * 0.37), 0.028);
     }
   }
-  const g = new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  g.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-  g.computeVertexNormals();
-  g.computeBoundingSphere();
-  g.name = 'chainPetal';
-  return g;
+  box(root, frame, 0.36, 0.81, 0, 0.065, 0.29, 0.075, 0.01);
+  box(root, armor, 0.4, 0.95, 0, 0.23, 0.18, 0.42, 0.035);
+  box(root, rubber, 0.527, 0.95, 0, 0.032, 0.12, 0.34, 0.015);
+  for (const z of [-0.11, 0.11]) {
+    parts.add(root, new THREE.CylinderGeometry(0.052, 0.052, 0.048, 24).rotateZ(Math.PI / 2).translate(0.545, 0.956, z), accent);
+    parts.add(root, new THREE.CylinderGeometry(0.036, 0.036, 0.052, 24).rotateZ(Math.PI / 2).translate(0.555, 0.956, z), status);
+  }
+  rod(root, frame, new THREE.Vector3(-0.34, 0.69, 0.2), new THREE.Vector3(-0.37, 1.09, 0.2), 0.009);
+  parts.add(root, new THREE.SphereGeometry(0.023, 12, 8).translate(-0.37, 1.1, 0.2), status);
+  const wheel = new THREE.Group();
+  parts.add(wheel, new THREE.TorusGeometry(0.145, 0.052, 12, 32), rubber);
+  disc(wheel, frame, 0, 0, 0, 0.151, 0.13);
+  for (const sign of [-1, 1]) {
+    disc(wheel, alloy, 0, 0, sign * 0.08, 0.112, 0.035);
+    disc(wheel, frame, 0, 0, sign * 0.102, 0.082, 0.012);
+    disc(wheel, accent, 0, 0, sign * 0.112, 0.045, 0.022);
+    for (let i = 0; i < 6; i++) {
+      const a = i * Math.PI / 3;
+      disc(wheel, alloy, Math.cos(a) * 0.086, Math.sin(a) * 0.086, sign * 0.114, 0.012, 0.012, 6);
+    }
+  }
+  for (let i = 0; i < 24; i++) {
+    const a = i * Math.PI / 12;
+    parts.add(wheel, bevelBox(0.053, 0.024, 0.145, 0.004).translate(0, 0.19, 0).rotateZ(a), rubber);
+  }
+  parts.build();
+  const wheelPositions = [-0.37, 0, 0.37].flatMap(x => [-0.39, 0.39].map(z => new THREE.Vector3(x, 0.2, z)));
+  const matrix = new THREE.Matrix4();
+  const wheels = wheel.children.map(child => {
+    const mesh = child as THREE.Mesh;
+    const instances = world.own(new THREE.InstancedMesh(mesh.geometry, mesh.material, wheelPositions.length));
+    wheelPositions.forEach((position, i) => instances.setMatrixAt(i, matrix.makeTranslation(position)));
+    instances.castShadow = instances.receiveShadow = true;
+    instances.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    instances.computeBoundingSphere(); root.add(instances);
+    return instances;
+  });
+  let previous = 0, spin = 0;
+  return world.seal<WorldCore & { position: THREE.Vector3; setPosition(x: number, snap: boolean): void }>({
+    position: world.group.position,
+    setPosition(x: number, snap: boolean) {
+      if (!snap) spin -= (x - previous) / 0.2;
+      previous = x;
+      world.group.position.set(x, deckHeight(x), 0);
+      root.rotation.z = Math.atan(0.006 * x);
+      wheelPositions.forEach((position, i) => {
+        matrix.makeRotationZ(spin).setPosition(position);
+        for (const wheel of wheels) wheel.setMatrixAt(i, matrix);
+      });
+      for (const wheel of wheels) wheel.instanceMatrix.needsUpdate = true;
+    },
+  });
 }

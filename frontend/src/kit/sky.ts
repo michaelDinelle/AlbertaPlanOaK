@@ -30,38 +30,7 @@ export interface GradientSkyOptions {
   name?: string;
 }
 
-export interface SkyUniforms {
-  uTop: { value: THREE.Color };
-  uHorizon: { value: THREE.Color };
-  uBottom: { value: THREE.Color };
-  uTopSpread: { value: number };
-  uBottomSpread: { value: number };
-  uSunDir: { value: THREE.Vector3 };
-  uSunColor: { value: THREE.Color };
-  uSunSize: { value: number };
-  uSunHdr: { value: number };
-  uSunGlow: { value: number };
-  uSunGlowPower: { value: number };
-  uStarColor: { value: THREE.Color };
-  uStarDensity: { value: number };
-  uStarSize: { value: number };
-  uStarThreshold: { value: number };
-  uStarTwinkle: { value: number };
-  uStarIntensity: { value: number };
-  uDither: { value: number };
-  uTime: { value: number };
-}
-
-export interface SkyHandle {
-  mesh: THREE.Mesh;
-  material: THREE.ShaderMaterial;
-  uniforms: SkyUniforms;
-  sunDirection: THREE.Vector3;
-  setSunDirection(x: number, y: number, z: number): void;
-  setColors(top: THREE.ColorRepresentation, horizon: THREE.ColorRepresentation, bottom: THREE.ColorRepresentation): void;
-  setTime(t: number): void;
-  dispose(): void;
-}
+export type SkyHandle = ReturnType<typeof makeGradientSky>;
 
 const VERT =  `
 varying vec3 vOakDir;
@@ -71,7 +40,7 @@ void main() {
 }
 `;
 
-const FRAG_HEAD =  `
+const FRAG = `
 #include <common>
 uniform vec3 uTop;
 uniform vec3 uHorizon;
@@ -87,36 +56,37 @@ float oakHash13( vec3 p ) {
 	p += dot( p, p.zyx + 31.32 );
 	return fract( ( p.x + p.y ) * p.z );
 }
-`;
 
-const FRAG_SUN_DECL =  `
+#ifdef HAS_SUN
+
 uniform vec3 uSunDir;
 uniform vec3 uSunColor;
 uniform float uSunSize;
 uniform float uSunHdr;
 uniform float uSunGlow;
 uniform float uSunGlowPower;
-`;
 
-const FRAG_STAR_DECL =  `
+#endif
+#ifdef HAS_STARS
+
 uniform vec3 uStarColor;
 uniform float uStarDensity;
 uniform float uStarSize;
 uniform float uStarThreshold;
 uniform float uStarTwinkle;
 uniform float uStarIntensity;
-`;
 
-const FRAG_MAIN_OPEN =  `
+#endif
+
 void main() {
 	vec3 dir = normalize( vOakDir );
 	float h = clamp( dir.y, -1.0, 1.0 );
 	vec3 col = uHorizon;
 	col = mix( col, uTop, smoothstep( 0.0, max( uTopSpread, 0.001 ), h ) );
 	col = mix( col, uBottom, smoothstep( 0.0, max( uBottomSpread, 0.001 ), -h ) );
-`;
 
-const FRAG_SUN_APPLY =  `
+#ifdef HAS_SUN
+
 	{
 		vec3 sd = normalize( uSunDir );
 		float cosA = dot( dir, sd );
@@ -125,9 +95,10 @@ const FRAG_SUN_APPLY =  `
 		float glow = pow( max( cosA, 0.0 ), max( uSunGlowPower, 1.0 ) );
 		col += uSunColor * ( disc * uSunHdr + glow * uSunGlow );
 	}
-`;
 
-const FRAG_STAR_APPLY =  `
+#endif
+#ifdef HAS_STARS
+
 	{
 		float above = smoothstep( -0.08, 0.12, dir.y );
 		vec3 g = dir * uStarDensity;
@@ -139,9 +110,9 @@ const FRAG_STAR_APPLY =  `
 		float tw = 1.0 - uStarTwinkle * 0.5 * ( 1.0 + sin( uTime * 2.7 + hcell * 63.0 ) );
 		col += uStarColor * ( star * uStarIntensity * tw * above );
 	}
-`;
 
-const FRAG_MAIN_CLOSE =  `
+#endif
+
 	col += ( oakHash13( vec3( gl_FragCoord.xy, 1.0 ) ) - 0.5 ) * uDither;
 	gl_FragColor = vec4( col, 1.0 );
 	#include <tonemapping_fragment>
@@ -149,15 +120,15 @@ const FRAG_MAIN_CLOSE =  `
 }
 `;
 
-function toVec3(v: THREE.Vector3 | readonly [number, number, number] | null | undefined, out: THREE.Vector3): THREE.Vector3 {
-  if (!v) return out.set(0, 1, 0);
-  const asVec = v as THREE.Vector3;
-  if (typeof asVec.x === 'number') return out.set(asVec.x, asVec.y, asVec.z);
-  const a = v as readonly [number, number, number];
-  return out.set(a[0], a[1], a[2]);
+function toVec3(v: THREE.Vector3 | readonly [number, number, number] | null | undefined, out: THREE.Vector3) {
+  if (!v) out.set(0, 1, 0);
+  else if ('x' in v) out.copy(v);
+  else out.fromArray(v);
+  if (out.lengthSq() < 1e-12) out.set(0, 1, 0);
+  return out.normalize();
 }
 
-export function makeGradientSky(opts: GradientSkyOptions): SkyHandle {
+export function makeGradientSky(opts: GradientSkyOptions) {
   const hasSun = opts.sunDir !== null && opts.sunDir !== undefined;
   const stars = opts.stars;
   const starOpts: SkyStarOptions | null = stars === true ? {} : stars ? stars : null;
@@ -165,10 +136,8 @@ export function makeGradientSky(opts: GradientSkyOptions): SkyHandle {
 
   const sunDirection = new THREE.Vector3();
   toVec3(opts.sunDir ?? null, sunDirection);
-  if (sunDirection.lengthSq() < 1e-12) sunDirection.set(0, 1, 0);
-  sunDirection.normalize();
 
-  const uniforms: SkyUniforms = {
+  const uniforms = {
     uTop: { value: new THREE.Color(opts.top) },
     uHorizon: { value: new THREE.Color(opts.horizon) },
     uBottom: { value: new THREE.Color(opts.bottom) },
@@ -190,19 +159,11 @@ export function makeGradientSky(opts: GradientSkyOptions): SkyHandle {
     uTime: { value: 0 },
   };
 
-  const fragment =
-    FRAG_HEAD +
-    (hasSun ? FRAG_SUN_DECL : '') +
-    (hasStars ? FRAG_STAR_DECL : '') +
-    FRAG_MAIN_OPEN +
-    (hasSun ? FRAG_SUN_APPLY : '') +
-    (hasStars ? FRAG_STAR_APPLY : '') +
-    FRAG_MAIN_CLOSE;
-
   const material = new THREE.ShaderMaterial({
     uniforms: uniforms as unknown as Record<string, THREE.IUniform>,
     vertexShader: VERT,
-    fragmentShader: fragment,
+    fragmentShader: FRAG,
+    defines: { ...(hasSun ? { HAS_SUN: 1 } : {}), ...(hasStars ? { HAS_STARS: 1 } : {}) },
     side: THREE.BackSide,
     depthWrite: false,
     depthTest: false,
@@ -227,12 +188,8 @@ export function makeGradientSky(opts: GradientSkyOptions): SkyHandle {
     material,
     uniforms,
     sunDirection,
-    setSunDirection(x: number, y: number, z: number) {
-      sunDirection.set(x, y, z);
-      if (sunDirection.lengthSq() < 1e-12) sunDirection.set(0, 1, 0);
-      sunDirection.normalize();
-    },
-    setColors(top, horizon, bottom) {
+    setSunDirection(x: number, y: number, z: number) { toVec3([x, y, z], sunDirection); },
+    setColors(top: THREE.ColorRepresentation, horizon: THREE.ColorRepresentation, bottom: THREE.ColorRepresentation) {
       uniforms.uTop.value.set(top);
       uniforms.uHorizon.value.set(horizon);
       uniforms.uBottom.value.set(bottom);

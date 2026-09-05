@@ -17,7 +17,7 @@ export { prairieHeight } from './terrain';
 
 export type Landscape = ReturnType<typeof makeLandscape>;
 
-export function makeLandscape(scene: THREE.Scene, name: string, palette: Palette, mood: 'dawn' | 'dusk' | 'night', options: {
+export function makeLandscape(scene: THREE.Scene, name: string, palette: Palette, mood: Parameters<typeof skyFromPalette>[1], options: {
   sky?: Parameters<typeof skyFromPalette>[2];
   light?: Parameters<typeof makeLightRig>[1];
   fogExtent?: number;
