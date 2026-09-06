@@ -1,6 +1,6 @@
 import * as THREE from 'three';
-import { alpineGroundGeometry, alpineGroundMaterial, alpineCliffMaterial, spruce, scatter } from '@kit/alpine';
-import { mountainGeometry, terrainNoise as noise } from '@kit/mountains';
+import { alpineGroundGeometry, alpineMaterial, spruce, scatter } from '@kit/alpine';
+import { makeMountains, terrainNoise as noise } from '@kit/mountains';
 import { rngAt } from '@kit/rng';
 import { makeWater } from '@kit/water';
 import { simulateWater } from '@kit/fluid';
@@ -36,7 +36,6 @@ export interface WorldHandle extends WorldCore {
 }
 
 export async function buildWorld(ctx: SceneContext, scene: THREE.Scene): Promise<WorldHandle> {
-  const mountains = await mountainGeometry('moraine-lake');
   const palette = ctx.tokens.palettes.night;
   const land = makeLandscape(scene, 'alpineLake', palette, 'night', {
     sky: { sunDir: [-0.6, 0.48, 0.64], sunSize: 0.016, sunHdr: 2, sunGlow: 0.045, topSpread: 0.25, stars: { intensity: 2.8, density: 180, threshold: 0.974, size: 0.075, color: 0xdbeaff } },
@@ -52,13 +51,13 @@ export async function buildWorld(ctx: SceneContext, scene: THREE.Scene): Promise
   rig.hemi.groundColor.set(0x485b61);
   rig.hemi.intensity = 1.8;
   rig.setShadowFocus(new THREE.Vector3(0, -1, 0), 7);
-  const ground = alpineGroundMaterial(world, WATER_Y);
+  const ground = alpineMaterial(world);
   const terrain = world.add(new THREE.Mesh(world.own(alpineGroundGeometry(lakeHeight, WATER_Y)), ground));
   terrain.name = 'alpineLakebed';
   terrain.receiveShadow = true;
-  const cliff = alpineCliffMaterial(world);
-  mountains.rotateY(Math.PI - 0.35).translate(490, 10, -2150);
-  const peaks = world.add(new THREE.Mesh(world.own(mountains), cliff));
+  const peaks = await makeMountains(world, palette, 'moraine-lake');
+  peaks.rotation.y = Math.PI - 0.35;
+  peaks.position.set(490, 10, -2150);
   peaks.name = 'canadianRockies';
   const water = world.time(world.own(makeWater({ size: 1024, segments: 256, palette, level: WATER_Y, bedHeight: lakeHeight,
     sky: 0x718bae, amplitude: 0.045, waveScale: 1.3, speed: 0.85, depthFalloff: 3.5, caustics: 0.025, sunDir: sky.sunDirection,
@@ -96,7 +95,7 @@ export async function buildWorld(ctx: SceneContext, scene: THREE.Scene): Promise
     dummy.updateMatrix();
     stones.push(dummy.matrix.clone());
   }
-  const rock = fieldstones(world);
+  const rock = fieldstones();
   scatter(world, world.own(rock.geometry), world.own(rock.material), stones, 'shoreBoulders');
   for (let i = 0; i < 5200; i++) {
     const x = (rng() - 0.5) * 150, z = (rng() - 0.5) * 150, height = lakeHeight(x, z);

@@ -9,15 +9,14 @@ const smooth = THREE.MathUtils.smoothstep;
 export function alpineGroundGeometry(heightAt: (x: number, z: number) => number, waterLevel: number) {
   const geometry = new THREE.PlaneGeometry(2, 2, 256, 256);
   geometry.rotateX(-Math.PI / 2);
-  const positions = geometry.getAttribute('position'), uv = geometry.getAttribute('uv');
+  const positions = geometry.getAttribute('position');
   const colors = new Float32Array(positions.count * 3), color = new THREE.Color();
-  const gravel = new THREE.Color(0xcbd3c8), moss = new THREE.Color(0x687b50), silt = new THREE.Color(0xb2bb9d);
+  const gravel = new THREE.Color(0xc1c7b5), moss = new THREE.Color(0x577e3c), silt = new THREE.Color(0x7e9b80);
   const stretch = (p: number) => Math.sign(p) * (5 * Math.abs(p) + 2043 * Math.abs(p) ** 3);
   for (let i = 0; i < positions.count; i++) {
     const x = stretch(positions.getX(i)), z = stretch(positions.getZ(i)), y = heightAt(x, z);
     positions.setXYZ(i, x, y, z);
-    uv.setXY(i, x * 0.6, z * 0.6);
-    color.copy(gravel).lerp(moss, smooth(y - waterLevel, 0.5, 2.4) * (0.45 + noise(x * 0.09, z * 0.09) * 0.55));
+    color.copy(gravel).lerp(moss, smooth(y - waterLevel, 0.5, 2.4) * (0.9 + noise(x * 0.09, z * 0.09) * 0.1));
     color.lerp(silt, 1 - smooth(y, waterLevel - 8, waterLevel - 2));
     color.multiplyScalar(0.72 + noise(x * 0.18, z * 0.18) * 0.28);
     colors.set([color.r, color.g, color.b], i * 3);
@@ -27,19 +26,10 @@ export function alpineGroundGeometry(heightAt: (x: number, z: number) => number,
   return geometry;
 }
 
-export function alpineTexture(world: WorldBuilder, name: string, wrap: THREE.Wrapping = THREE.MirroredRepeatWrapping) {
-  const map = world.own(new THREE.TextureLoader().load(`/textures/${name}.webp`));
-  map.colorSpace = THREE.SRGBColorSpace;
-  map.wrapS = map.wrapT = wrap;
-  map.anisotropy = 4;
-  return map;
-}
-
 export function spruce(world: WorldBuilder) {
   const wood: THREE.BufferGeometry[] = [], needles: THREE.BufferGeometry[] = [];
   const timber = (top: number, bottom: number, height: number, segments: number) => {
-    const geometry = new THREE.CylinderGeometry(top, bottom, height, segments), uv = geometry.getAttribute('uv');
-    for (let i = 0; i < uv.count; i++) uv.setXY(i, uv.getX(i) * Math.max(1, Math.round(bottom * Math.PI * 2 / 0.7)), uv.getY(i) * height / 0.7);
+    const geometry = new THREE.CylinderGeometry(top, bottom, height, segments);
     wood.push(geometry);
     return geometry;
   };
@@ -67,9 +57,11 @@ export function spruce(world: WorldBuilder) {
   }
   const trunk = world.own(mergeGeometries(wood)), foliage = world.own(mergeGeometries(needles));
   for (const geometry of [...wood, ...needles]) geometry.dispose();
-  const map = alpineTexture(world, 'alpine-spruce', THREE.ClampToEdgeWrapping), barkMap = alpineTexture(world, 'alpine-bark', THREE.RepeatWrapping);
-  const bark = world.own(new THREE.MeshStandardMaterial({ map: barkMap, bumpMap: barkMap, bumpScale: 0.018, roughness: 1 }));
-  const leaf = world.own(new THREE.MeshStandardMaterial({ map, color: 0xffffff, side: THREE.DoubleSide, alphaTest: 0.4, alphaToCoverage: true, roughness: 0.92 }));
+  const coverage = world.own(new THREE.TextureLoader().load('/textures/alpine-spruce.webp'));
+  coverage.anisotropy = 4;
+  const bark = world.own(new THREE.MeshStandardMaterial({ color: 0x746350, roughness: 1 }));
+  const leaf = world.own(new THREE.MeshStandardMaterial({ map: coverage, color: 0x527961, side: THREE.DoubleSide, alphaTest: 0.4, alphaToCoverage: true, roughness: 0.92 }));
+  leaf.onBeforeCompile = shader => { shader.fragmentShader = shader.fragmentShader.replace('#include <map_fragment>', 'diffuseColor.a *= texture2D(map, vMapUv).a;'); };
   return [{ geometry: trunk, material: bark }, { geometry: foliage, material: leaf }];
 }
 
@@ -80,45 +72,6 @@ export function scatter(world: WorldBuilder, geometry: THREE.BufferGeometry, mat
   world.add(instances.group);
 }
 
-export function alpineGroundMaterial(world: WorldBuilder, waterLevel: number) {
-  const map = alpineTexture(world, 'alpine-pebbles');
-  const moss = alpineTexture(world, 'prairie-ground');
-  const ground = world.own(new THREE.MeshStandardMaterial({ map, bumpMap: map, bumpScale: 0.025, vertexColors: true, roughness: 1 }));
-  ground.onBeforeCompile = shader => {
-    shader.uniforms.uForestFloor = { value: moss };
-    shader.vertexShader = shader.vertexShader.replace('#include <common>', '#include <common>\nvarying vec3 vLakeGround; varying vec3 vLakeNormal;')
-      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvLakeGround = position; vLakeNormal = normal;');
-    shader.fragmentShader = shader.fragmentShader.replace('#include <common>', '#include <common>\nuniform sampler2D uForestFloor; varying vec3 vLakeGround; varying vec3 vLakeNormal;')
-      .replace('#include <map_fragment>', `
-vec3 p = vLakeGround, blend = pow(abs(vLakeNormal), vec3(4.0));
-blend /= dot(blend, vec3(1.0));
-vec3 gravel = texture2D(map, p.zy * 0.6).rgb * blend.x + texture2D(map, p.xz * 0.6).rgb * blend.y + texture2D(map, p.xy * 0.6).rgb * blend.z;
-vec3 forest = texture2D(uForestFloor, p.xz * 0.45).rgb * vec3(1.2, 1.55, 0.95);
-float cover = smoothstep(${waterLevel + 0.4}, ${waterLevel + 1.8}, p.y) * smoothstep(0.45, 0.85, vLakeNormal.y);
-diffuseColor.rgb *= mix(gravel, forest, cover);
-`);
-  };
-  return ground;
-}
-
-export function alpineCliffMaterial(world: WorldBuilder) {
-  const stone = alpineTexture(world, 'alpine-limestone');
-  const cliff = world.own(new THREE.MeshStandardMaterial({ map: stone, bumpMap: stone, bumpScale: 0.8, vertexColors: true, roughness: 1 }));
-  cliff.onBeforeCompile = shader => {
-    shader.vertexShader = shader.vertexShader.replace('#include <common>', '#include <common>\nvarying vec3 vCliff; varying vec3 vCliffNormal;')
-      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvCliff = position; vCliffNormal = normal;');
-    shader.fragmentShader = shader.fragmentShader.replace('#include <map_pars_fragment>', `#include <map_pars_fragment>
-varying vec3 vCliff; varying vec3 vCliffNormal;
-vec3 cliffAlbedo(vec2 uv) {
-  return mix(texture2D(map, uv).rgb, texture2D(map, uv * 0.373 + vec2(13.17, 7.81)).rgb, 0.55);
-}`)
-      .replace('#include <map_fragment>', `
-vec3 blend = pow(abs(vCliffNormal), vec3(4.0));
-blend /= dot(blend, vec3(1.0));
-vec3 rock = cliffAlbedo(vCliff.zy * 0.07) * blend.x + cliffAlbedo(vCliff.xz * 0.07) * blend.y + cliffAlbedo(vCliff.xy * 0.07) * blend.z;
-float snow = smoothstep(0.6, 0.86, max(vColor.r, max(vColor.g, vColor.b)));
-diffuseColor.rgb *= mix(rock * 2.6, vec3(1.0), snow * 0.85);
-`);
-  };
-  return cliff;
+export function alpineMaterial(world: WorldBuilder) {
+  return world.own(new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 1 }));
 }

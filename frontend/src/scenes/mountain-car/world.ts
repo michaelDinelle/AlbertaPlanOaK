@@ -12,6 +12,7 @@ import { mergeColoredParts, type ColoredPart } from '@kit/parts';
 import { streamFor } from '@kit/rng';
 import type { SkyHandle } from '@kit/sky';
 import { makeTerrain } from '@kit/terrain';
+import { mountainStyle } from '@kit/mountains';
 import { extendVegetation, makeLandscape, makeSceneTerrain } from '../half-cheetah/world';
 import type { ViewCoverage } from '@kit/view';
 import { valueNoise2 } from '@kit/textures';
@@ -86,10 +87,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   const accent = ctx.tokens.accents['mountain-car'] ?? ctx.tokens.celebrationGold;
   const heightAt = heightResolver(ctx.geometry);
 
-  const cValley = blendTokens(palette.groundA, palette.hemiGround, 0.55);
-  const cMeadow = blendTokens(palette.groundA, TOKENS.palettes.noon.groundA, 0.5);
-  const cSnow = blendTokens(TOKEN_WHITE, palette.hemiSky, 0.3);
-  const cRock = blendTokens(palette.hemiGround, palette.skyTop, 0.38);
+  const { valley: cValley, meadow: cMeadow, snow: cSnow, rock: cRock, material: mountainMaterial } = mountainStyle(palette);
   const woodLight = blendTokens(palette.groundB, palette.groundA, 0.4);
   const woodDark = blendTokens(palette.groundA, palette.hemiGround, 0.62);
   const stone = blendTokens(palette.hemiGround, palette.skyTop, 0.5);
@@ -134,14 +132,14 @@ return mix(local, mountain, smoothstep(5.0, 14.0, length(p)));
     const t = smoothstep01((Math.hypot(x, z) - 5) / 9);
     const mountain = 0.3 + Math.pow(Math.abs(Math.sin(x * 0.07 + Math.sin(z * 0.039)) * Math.cos(z * 0.073)), 1.2) * 14;
     return ridge(x, z) * (1 - t) + mountain * t;
-  }, { rimColor: palette.skyHorizon, rimStrength: 0.24, toonSteps: 3, toonSoftness: 0.32, toonFloor: 0.2 });
+  }, mountainMaterial);
   w.add(terrain.mesh);
   w.time(w.own(terrain));
   const route = w.own(makeTerrain({
     size: [MC_MAX_POS - MC_MIN_POS, 0.42], segments: [256, 4],
     heightFn: (x) => heightAt(x + (MC_MIN_POS + MC_MAX_POS) * 0.5) + 0.003,
     colorRamp: (h) => new THREE.Color(cValley).lerp(cMeadow, smoothstep01((h - 0.08) / 0.46)).lerp(cSnow, smoothstep01((h - 0.65) / 0.22)),
-    materialOptions: { rimColor: palette.skyHorizon, rimStrength: 0.24, toonSteps: 3, toonSoftness: 0.32, toonFloor: 0.2 },
+    materialOptions: mountainMaterial,
     name: 'exactAlpineTrack',
   }));
   route.mesh.position.x = (MC_MIN_POS + MC_MAX_POS) * 0.5;

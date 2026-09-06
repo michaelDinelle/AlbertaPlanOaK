@@ -1,6 +1,5 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
-import { alpineTexture } from '@kit/alpine';
 import { engravedPanel, modelParts, robotMaterials } from '@kit/robot';
 import { makeWorld, type WorldBuilder, type WorldCore } from '@kit/world';
 import { JBW_BANANA, JBW_ONION, JBW_JELLY, JBW_WALL, JBW_TREE, JBW_TRUFFLE, JBW_COLOR, jbwCollectible } from '@sim/envs/jellybeanworld';
@@ -94,7 +93,7 @@ totalEmissiveRadiance += diffuseColor.rgb / max(dot(diffuseColor.rgb, vec3(0.212
   }
   jelly.computeVertexNormals();
   add(JBW_JELLY, jelly, new THREE.MeshPhysicalMaterial({ color: new THREE.Color(...JBW_COLOR[JBW_JELLY]!).convertSRGBToLinear(), roughness: 0.24, clearcoat: 0.55, clearcoatRoughness: 0.26, sheen: 0.25, sheenColor: 0xffb8a4 }));
-  const stone = fieldstones(world);
+  const stone = fieldstones();
   const wall = (base: THREE.BufferGeometry) => {
     const pieces: THREE.BufferGeometry[] = [], centers: THREE.Vector3[] = [];
     for (let y = 0; y < 3; y++) for (const side of [-1, 1]) {
@@ -111,15 +110,13 @@ totalEmissiveRadiance += diffuseColor.rgb / max(dot(diffuseColor.rgb, vec3(0.212
     }
     for (const [y, sx, sy, sz] of [[1.09, 0.51, 0.18, 0.34], [0.025, 0.63, 0.12, 0.51]]) {
       const cap = new THREE.SphereGeometry(1, 24, 12).scale(sx!, sy!, sz!).translate(0, y!, 0);
-      const uv = cap.getAttribute('uv'), colors = new Float32Array(uv.count * 3), snow = new THREE.Color(0xf5f7ff);
-      for (let j = 0; j < uv.count; j++) { uv.setXY(j, -1, -1); snow.toArray(colors, j * 3); }
+      const count = cap.getAttribute('position').count, colors = new Float32Array(count * 3), snow = new THREE.Color(0xf5f7ff);
+      for (let j = 0; j < count; j++) snow.toArray(colors, j * 3);
       cap.setAttribute('color', new THREE.BufferAttribute(colors, 3)); pieces.push(cap);
     }
     const geometry = mergeGeometries(pieces); pieces.forEach(part => part.dispose()); base.dispose();
     return geometry;
   };
-  stone.material.color.set(0xffffff);
-  stone.material.onBeforeCompile = shader => { shader.fragmentShader = shader.fragmentShader.replace('#include <map_fragment>', 'if (vMapUv.x >= 0.0) {\n#include <map_fragment>\n}'); };
   add(JBW_WALL, wall(stone.geometry), stone.material);
   const tree = aspenTree(world, []);
   add(JBW_TREE, tree.geometry, tree.material);
@@ -130,9 +127,7 @@ totalEmissiveRadiance += diffuseColor.rgb / max(dot(diffuseColor.rgb, vec3(0.212
   }
   surface(truffle, (x, y, z) => new THREE.Color().setScalar(0.72 + 0.28 * Math.sin(x * 83) ** 2 * Math.cos(y * 71 + z * 67) ** 2));
   truffle.computeVertexNormals();
-  const truffleMaterial = fruit(JBW_TRUFFLE, 0.92);
-  truffleMaterial.map = truffleMaterial.bumpMap = alpineTexture(world, 'prairie-fieldstone'); truffleMaterial.bumpScale = 0.018;
-  add(JBW_TRUFFLE, truffle, truffleMaterial);
+  add(JBW_TRUFFLE, truffle, fruit(JBW_TRUFFLE, 0.92));
   return models;
 }
 

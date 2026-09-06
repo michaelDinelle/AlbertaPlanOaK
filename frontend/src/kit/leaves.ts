@@ -15,9 +15,7 @@ if (aLeaf.x < -1.9) vColor.rgb /= max(instanceColor, vec3(0.001));
 `);
       shader.fragmentShader = shader.fragmentShader.replace('#include <common>', '#include <common>\nvarying vec2 vLeaf;')
         .replace('#include <map_fragment>', `
-if (vLeaf.x < -1.9) {
-#include <map_fragment>
-} else {
+if (vLeaf.x >= -1.9) {
   vec2 leaf = vec2(vLeaf.x / (0.9 - vLeaf.y * 0.15), vLeaf.y);
   float edge = 1.0 - dot(leaf, leaf);
   ${target === material ? 'float width = max(fwidth(edge), 0.0001); diffuseColor.a = smoothstep(-width, width, edge); if (diffuseColor.a == 0.0) discard;' : 'if (edge < 0.0) discard;'}

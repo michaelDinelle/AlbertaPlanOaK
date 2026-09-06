@@ -1,5 +1,4 @@
 import * as THREE from 'three';
-import { alpineTexture } from '@kit/alpine';
 import { bevelBox, engravedPanel, modelParts, robotMaterials } from '@kit/robot';
 import { CELL } from '@kit/grid';
 import { makeWorld, type WorldCore } from '@kit/world';
@@ -16,16 +15,13 @@ export function buildCrossing(grid: GridGeometry) {
   const { frame, armor, alloy, rubber, status } = materials;
   const parts = modelParts(world), { box, disc, rod } = parts;
   const half = grid.w * CELL / 2 + 0.8;
-  const timber = alpineTexture(world, 'alpine-timber');
-  const wood = world.own(new THREE.MeshStandardMaterial({ map: timber, bumpMap: timber, bumpScale: 0.009, roughness: 0.88, color: 0xc0a987 }));
-  const footing = world.own(new THREE.MeshStandardMaterial({ map: alpineTexture(world, 'alpine-limestone'), color: 0x86968b, roughness: 1 }));
+  const wood = world.own(new THREE.MeshStandardMaterial({ roughness: 0.88, color: 0x99794d }));
+  const footing = world.own(new THREE.MeshStandardMaterial({ color: 0x86968b, roughness: 1 }));
   const cableHeight = (x: number) => 1.05 + 1.8 * (Math.cosh(x / half) - 1) / (Math.cosh(1) - 1);
   const plankCount = Math.ceil((half + 0.65) * 2 / 0.28), pitch = (half + 0.65) * 2 / plankCount;
   for (let i = 0; i < plankCount; i++) {
     const x = (i + 0.5 - plankCount / 2) * pitch;
     const plank = bevelBox(pitch - 0.012, 0.11, 1.72, 0.012);
-    const p = plank.getAttribute('position'), n = plank.getAttribute('normal'), uv = plank.getAttribute('uv');
-    for (let j = 0; j < p.count; j++) uv.setXY(j, (Math.abs(n.getX(j)) > 0.5 ? p.getY(j) : p.getX(j)) + i * 0.317, (Math.abs(n.getZ(j)) > 0.5 ? p.getY(j) : p.getZ(j)) + i * 0.731);
     parts.add(root, plank.rotateZ(Math.atan(0.006 * x)).translate(x, deckHeight(x) - 0.055, 0), wood);
     for (const z of [-0.65, 0.65]) parts.add(root, new THREE.CylinderGeometry(0.012, 0.012, 0.008, 6).translate(x, deckHeight(x) + 0.007, z), alloy);
   }

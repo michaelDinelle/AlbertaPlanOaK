@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { mergeGeometries, mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
 import { applyFog, makeLightRig, type LightRig } from '@kit/lighting';
 import { buildAurora } from '@kit/aurora';
-import { mountainGeometry } from '@kit/mountains';
+import { makeMountains } from '@kit/mountains';
 import { leafSurface } from '@kit/leaves';
 import { oakMaterial, oakUniforms } from '@kit/materials';
 import { rngAt } from '@kit/rng';
@@ -94,27 +94,15 @@ export function prairieGrass(blades = 6) {
 }
 
 export function aspenTree(world: ReturnType<typeof makeWorld>, foliage = ['#8ca357', '#c6ce8a', '#a6bd70', '#d1d28b']) {
-  const canvas = document.createElement('canvas');
-  canvas.width = 128; canvas.height = 256;
-  const ctx = canvas.getContext('2d');
-  if (!ctx) throw new Error('aspen texture canvas unavailable');
-  ctx.fillStyle = '#f7f3df'; ctx.fillRect(0, 0, 128, 256);
-  for (let i = 0; i < 90; i++) {
-    ctx.strokeStyle = i % 4 ? '#bbb6a4' : '#5b5e50'; ctx.lineWidth = i % 4 ? 0.6 : 1.5;
-    ctx.beginPath(); ctx.ellipse((i * 37) % 128, 8 + (i * 71) % 240, 2 + i % 9, 0.6 + i % 3, 0, 0, Math.PI); ctx.stroke();
-  }
-  ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, 8, 8);
-  const map = world.own(new THREE.CanvasTexture(canvas)); map.colorSpace = THREE.SRGBColorSpace;
   const palette = foliage.map(color => new THREE.Color(color));
   const pieces: THREE.BufferGeometry[] = [];
-  const add = (source: THREE.BufferGeometry, color: THREE.Color, leaf = false) => {
-    const geometry = source, uv = geometry.getAttribute('uv');
-    if (!geometry.hasAttribute('aLeaf')) geometry.setAttribute('aLeaf', new THREE.Float32BufferAttribute(new Float32Array(uv.count * 2).fill(-2), 2));
-    const colors = new Float32Array(geometry.getAttribute('position').count * 3);
-    for (let i = 0; i < uv.count; i++) { color.toArray(colors, i * 3); if (leaf) uv.setXY(i, 0.02, 0.985); }
+  const add = (geometry: THREE.BufferGeometry, color: THREE.Color) => {
+    const count = geometry.getAttribute('position').count, colors = new Float32Array(count * 3);
+    if (!geometry.hasAttribute('aLeaf')) geometry.setAttribute('aLeaf', new THREE.Float32BufferAttribute(new Float32Array(count * 2).fill(-2), 2));
+    for (let i = 0; i < count; i++) color.toArray(colors, i * 3);
     geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3)); pieces.push(geometry);
   };
-  add(new THREE.CylinderGeometry(0.018, 0.11, 3.7, 10).translate(0, 1.82, 0), new THREE.Color(0xffffff));
+  add(new THREE.CylinderGeometry(0.018, 0.11, 3.7, 10).translate(0, 1.82, 0), new THREE.Color(0xf0e9d5));
   for (let i = 0; i < 18; i++) {
     const angle = i * 2.39996, y = 1.15 + i * 0.148, spread = Math.sin((i + 2) / 21 * Math.PI) * 0.86;
     const end = new THREE.Vector3(Math.cos(angle) * spread, y + 0.38, Math.sin(angle) * spread);
@@ -123,7 +111,7 @@ export function aspenTree(world: ReturnType<typeof makeWorld>, foliage = ['#8ca3
     if (!palette.length) {
       const snow = new THREE.CapsuleGeometry(0.048, Math.max(0, direction.length() - 0.08), 4, 10);
       snow.applyQuaternion(new THREE.Quaternion().setFromUnitVectors(THREE.Object3D.DEFAULT_UP, direction.clone().normalize())).translate(end.x * 0.5, y + direction.y * 0.5 + 0.045, end.z * 0.5);
-      add(snow, new THREE.Color(0xf3f6ff), true);
+      add(snow, new THREE.Color(0xf3f6ff));
       for (let fork = 0; fork < 4; fork++) {
         const t = 0.45 + fork * 0.15, base = new THREE.Vector3(end.x * t, y + direction.y * t, end.z * t), tip = base.clone().add(new THREE.Vector3(Math.cos(angle + fork - 1.5) * 0.24, 0.2 + fork * 0.035, Math.sin(angle + fork - 1.5) * 0.24));
         const branch = tip.clone().sub(base);
@@ -139,11 +127,11 @@ export function aspenTree(world: ReturnType<typeof makeWorld>, foliage = ['#8ca3
       leaf.setAttribute('uv', new THREE.Float32BufferAttribute(new Float32Array(8), 2));
       leaf.setAttribute('aLeaf', new THREE.Float32BufferAttribute([0, -1.5, 1.5, 0, 0, 1.5, -1.5, 0], 2));
       leaf.applyQuaternion(orientation).translate(center.x, center.y, center.z);
-      leaf.computeVertexNormals(); add(leaf, palette[(i + j) % palette.length]!, true);
+      leaf.computeVertexNormals(); add(leaf, palette[(i + j) % palette.length]!);
     }
   }
   const geometry = mergeGeometries(pieces); pieces.forEach(piece => piece.dispose());
-  const material = new THREE.MeshStandardMaterial({ map, vertexColors: true, roughness: 0.92, side: THREE.DoubleSide });
+  const material = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.92, side: THREE.DoubleSide });
   const depth = world.own(new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking }));
   leafSurface(material, depth);
   return { geometry, material, depth };
@@ -152,7 +140,7 @@ export function aspenTree(world: ReturnType<typeof makeWorld>, foliage = ['#8ca3
 export function fieldstoneGeometry(segments = 20, rings = 12) {
   const geometry = new THREE.SphereGeometry(0.4, segments, rings);
   const position = geometry.getAttribute('position'), colors = new Float32Array(position.count * 3);
-  const stone = new THREE.Color(0xf5f2ec), lichen = new THREE.Color(0xc4c19a), color = new THREE.Color();
+  const stone = new THREE.Color(0xb8b3ae), lichen = new THREE.Color(0xa9ad86), color = new THREE.Color();
   for (let i = 0; i < position.count; i++) {
     const x = position.getX(i), y = position.getY(i), z = position.getZ(i);
     const wear = 0.93 + 0.1 * Math.sin(x * 13 + y * 9) * Math.cos(z * 11 - x * 5);
@@ -166,14 +154,8 @@ export function fieldstoneGeometry(segments = 20, rings = 12) {
   return geometry;
 }
 
-export function fieldstones(world: ReturnType<typeof makeWorld>) {
-  const geometry = fieldstoneGeometry();
-  const map = world.own(new THREE.TextureLoader().load('/textures/prairie-fieldstone.webp'));
-  map.colorSpace = THREE.SRGBColorSpace;
-  map.wrapS = map.wrapT = THREE.MirroredRepeatWrapping;
-  map.repeat.set(2, 1);
-  map.anisotropy = 4;
-  return { geometry, material: new THREE.MeshStandardMaterial({ vertexColors: true, map, bumpMap: map, bumpScale: 0.012, roughness: 1 }) };
+export function fieldstones() {
+  return { geometry: fieldstoneGeometry(), material: new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 1 }) };
 }
 
 function hoodooGeometry(): THREE.BufferGeometry {
@@ -242,7 +224,7 @@ function makeHoodoos(world: ReturnType<typeof makeWorld>, terrainMaterial: THREE
         if (meshes.has(key)) continue;
         const scale = 1.2 + rng() * 0.5, angle = (rng() - 0.5) * 0.4;
         const geometry = source.clone().scale(scale, scale, scale).rotateY(angle);
-        const positions = geometry.getAttribute('position'), uv = geometry.getAttribute('uv'), colors = geometry.getAttribute('color');
+        const positions = geometry.getAttribute('position'), colors = geometry.getAttribute('color');
         const exposure = new Float32Array(positions.count);
         const anchor = prairieGroundHeight(x, z);
         for (let i = 0; i < positions.count; i++) {
@@ -250,7 +232,6 @@ function makeHoodoos(world: ReturnType<typeof makeWorld>, terrainMaterial: THREE
           const ground = prairieGroundHeight(px, pz);
           const y = py + THREE.MathUtils.lerp(ground, anchor, THREE.MathUtils.smoothstep(py / scale, 0.3, 1.8)) - 0.08;
           positions.setXYZ(i, px, y, pz);
-          uv.setXY(i, px * 0.5, pz * 0.5);
           const blend = THREE.MathUtils.smoothstep(py / scale, 0, 0.9);
           exposure[i] = THREE.MathUtils.lerp(prairieRidge(px, pz).exposure, 1, blend);
           colors.setXYZ(i, THREE.MathUtils.lerp(1, colors.getX(i) * 2.2, blend), THREE.MathUtils.lerp(1, colors.getY(i) * 2.5, blend), THREE.MathUtils.lerp(1, colors.getZ(i) * 3.2, blend));
@@ -291,13 +272,8 @@ export async function buildWorld(ctx: SceneContext, scene: THREE.Scene): Promise
   sky.setColors(0x352d65, 0xff9fad, 0xe9ae9c);
   world.time(world.own(buildAurora(sky, 0x95ddd0, 2.6))).setGain(1.5);
   const terrain = makePrairieTerrain(world);
-  const mountainMaterial = world.own(new THREE.MeshStandardMaterial({ vertexColors: true, map: terrain.rock, bumpMap: terrain.rock, bumpScale: 0.6, roughness: 1 }));
-  mountainMaterial.onBeforeCompile = shader => {
-    shader.fragmentShader = shader.fragmentShader.replace('#include <map_fragment>', 'diffuseColor.rgb *= mix(vec3(1.0), texture2D(map, vMapUv).rgb * 2.6, 0.35);');
-  };
-  const mountains = new THREE.Mesh(world.own(await mountainGeometry()), mountainMaterial);
+  const mountains = await makeMountains(world, ctx.tokens.palettes.dusk);
   mountains.name = 'rockyMountainRanges';
-  world.add(mountains);
   rig.sun.color.set(0xffd2ad);
   rig.sun.intensity = 2.5;
   rig.hemi.color.set(0xd7d8ef);
@@ -331,7 +307,7 @@ export async function buildWorld(ctx: SceneContext, scene: THREE.Scene): Promise
   });
   land.scatter({
     name: 'prairieFieldstones', seed: ctx.seed, tileSize: 20, perTile: 4,
-    ...fieldstones(world),
+    ...fieldstones(),
     colorA: 0xd7d1c7, colorB: 0xffffff,
     fill(tx, tz, rng, write) {
       const x = tx * 20 + 4 + rng() * 12, z = tz * 20 + 4 + rng() * 12;

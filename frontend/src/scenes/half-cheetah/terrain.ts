@@ -46,13 +46,12 @@ export function prairiePlacement(x: number, z: number, radius: number, upright =
 function tileGeometry(tx: number, tz: number, segments: number) {
   const geometry = new THREE.PlaneGeometry(128, 128, segments, segments);
   geometry.rotateX(-Math.PI / 2);
-  const positions = geometry.getAttribute('position'), uv = geometry.getAttribute('uv');
+  const positions = geometry.getAttribute('position');
   const exposure = new Float32Array(positions.count);
   for (let i = 0; i < positions.count; i++) {
     const x = positions.getX(i) + tx * 128, z = positions.getZ(i) + tz * 128;
     positions.setY(i, prairieHeight(x, z));
     exposure[i] = prairieRidge(x, z).exposure;
-    uv.setXY(i, x * 0.5, z * 0.5);
   }
   geometry.setAttribute('exposure', new THREE.BufferAttribute(exposure, 1));
   geometry.computeVertexNormals();
@@ -71,7 +70,7 @@ function tileGeometry(tx: number, tz: number, segments: number) {
   for (let i = segments; i > 0; i--) edge.push(segments * row + i);
   for (let i = segments; i > 0; i--) edge.push(i * row);
   const skirted = new THREE.BufferGeometry();
-  for (const name of ['position', 'normal', 'uv', 'exposure']) {
+  for (const name of ['position', 'normal', 'exposure']) {
     const source = geometry.getAttribute(name), data = new Float32Array((positions.count + edge.length) * source.itemSize);
     data.set(source.array);
     for (let i = 0; i < edge.length; i++) for (let k = 0; k < source.itemSize; k++) {
@@ -91,27 +90,17 @@ function tileGeometry(tx: number, tz: number, segments: number) {
 }
 
 export function makePrairieTerrain(world: WorldBuilder) {
-  const map = world.own(new THREE.TextureLoader().load('/textures/prairie-ground.webp'));
-  map.colorSpace = THREE.SRGBColorSpace;
-  map.wrapS = map.wrapT = THREE.MirroredRepeatWrapping;
-  map.anisotropy = 4;
-  const rock = world.own(new THREE.TextureLoader().load('/textures/prairie-sandstone.webp'));
-  rock.colorSpace = THREE.SRGBColorSpace;
-  rock.wrapS = rock.wrapT = THREE.MirroredRepeatWrapping;
-  rock.anisotropy = 4;
-  const material = world.own(new THREE.MeshStandardMaterial({ map, bumpMap: map, bumpScale: 0.025, roughness: 1 }));
+  const material = world.own(new THREE.MeshStandardMaterial({ roughness: 1 }));
   material.onBeforeCompile = shader => {
-    shader.uniforms.uPrairieRock = { value: rock };
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', '#include <common>\nattribute float exposure; varying float vExposure; varying vec3 vPrairiePosition;')
       .replace('#include <begin_vertex>', '#include <begin_vertex>\nvExposure = exposure; vPrairiePosition = (modelMatrix * vec4(position, 1.0)).xyz;');
     shader.fragmentShader = shader.fragmentShader
-      .replace('#include <common>', '#include <common>\nuniform sampler2D uPrairieRock; varying float vExposure; varying vec3 vPrairiePosition;')
+      .replace('#include <common>', '#include <common>\nvarying float vExposure; varying vec3 vPrairiePosition;')
       .replace('#include <map_fragment>', `
 vec3 p = vPrairiePosition;
-vec3 grass = texture2D(map, vMapUv).rgb;
-grass = mix(grass, texture2D(map, vMapUv.yx * 0.173).rgb, 0.18) * vec3(1.18, 1.55, 1.06);
-vec3 stone = mix(texture2D(uPrairieRock, p.xy * 0.35).rgb, texture2D(uPrairieRock, p.zy * 0.35).rgb, 0.35);
+vec3 grass = mix(vec3(0.18, 0.26, 0.09), vec3(0.28, 0.32, 0.13), 0.5 + 0.5 * sin(p.x * 0.017 + sin(p.z * 0.023)));
+vec3 stone = vec3(0.29, 0.20, 0.13);
 float band = sin(p.y * 2.1 + 0.1 * sin(p.x * 0.13));
 stone *= 0.94 + 0.06 * band;
 float track = 1.0 - smoothstep(0.35, 1.1, abs(p.z));
@@ -130,7 +119,7 @@ diffuseColor.rgb *= mix(mix(grass, stone, vExposure), vec3(0.24, 0.17, 0.10), tr
   const bounds = new THREE.Box3(), matrix = new THREE.Matrix4();
   const previous = new THREE.Matrix4();
   return {
-    rock, material,
+    material,
     setView(coverage: ViewCoverage, camera: THREE.Camera) {
       matrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
       if (matrix.equals(previous)) return;

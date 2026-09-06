@@ -1,6 +1,6 @@
 import * as THREE from 'three';
-import { alpineGroundGeometry, alpineGroundMaterial, alpineCliffMaterial, spruce, scatter } from '@kit/alpine';
-import { mountainGeometry, terrainNoise as noise } from '@kit/mountains';
+import { alpineGroundGeometry, alpineMaterial, spruce, scatter } from '@kit/alpine';
+import { makeMountains, terrainNoise as noise } from '@kit/mountains';
 import { rngAt } from '@kit/rng';
 import { makeWater } from '@kit/water';
 import { simulateWater } from '@kit/fluid';
@@ -33,7 +33,6 @@ export interface WorldHandle extends WorldCore {
 }
 
 export async function buildWorld(ctx: SceneContext, scene: THREE.Scene): Promise<WorldHandle> {
-  const mountains = await mountainGeometry();
   const palette = ctx.tokens.palettes.dusk;
   const land = makeLandscape(scene, 'albertaRiver', palette, 'dusk', {
     sky: { sunDir: [-0.45, 0.24, 0.86], sunSize: 0.022, sunHdr: 1.7, sunGlow: 0.18, topSpread: 0.3, stars: { intensity: 1.6, density: 160, threshold: 0.976, size: 0.07, color: 0xffecd7 } },
@@ -48,13 +47,12 @@ export async function buildWorld(ctx: SceneContext, scene: THREE.Scene): Promise
   rig.hemi.groundColor.set(0x6d6958);
   rig.hemi.intensity = 1.8;
   rig.setShadowFocus(new THREE.Vector3(0, 0.3, 0), 13);
-  const ground = world.add(new THREE.Mesh(world.own(alpineGroundGeometry(riverHeight, WATER_LEVEL)), alpineGroundMaterial(world, WATER_LEVEL)));
+  const ground = world.add(new THREE.Mesh(world.own(alpineGroundGeometry(riverHeight, WATER_LEVEL)), alpineMaterial(world)));
   ground.name = 'riverGravelBanks';
   ground.receiveShadow = true;
-  mountains.rotateY(-0.12).translate(-180, -20, 0);
-  const cliff = alpineCliffMaterial(world);
-  cliff.color.set(0xb8d1dc);
-  const peaks = world.add(new THREE.Mesh(world.own(mountains), cliff));
+  const peaks = await makeMountains(world, palette);
+  peaks.rotation.y = -0.12;
+  peaks.position.set(-180, -20, 0);
   peaks.name = 'bowValleyRockies';
   const water = world.time(world.own(makeWater({ size: [320, 4096], segments: 256, palette, level: WATER_LEVEL, bedHeight: riverHeight,
     sky: 0xd5a89c, amplitude: 0.055, waveScale: 1.65, speed: 1.2, depthFalloff: 1.6, caustics: 0.045, sunDir: sky.sunDirection,
@@ -88,7 +86,7 @@ export async function buildWorld(ctx: SceneContext, scene: THREE.Scene): Promise
     const bed = Math.min(y, riverHeight(x - radius, z), riverHeight(x + radius, z), riverHeight(x, z - radius), riverHeight(x, z + radius));
     place(stones, x, bed - 0.1, z, size, 1.15);
   }
-  const rock = fieldstones(world);
+  const rock = fieldstones();
   scatter(world, world.own(rock.geometry), world.own(rock.material), stones, 'riverBoulders');
   for (let i = 0; i < 6500; i++) {
     const x = (rng() - 0.5) * 150, z = (rng() - 0.5) * 180, y = riverHeight(x, z);
