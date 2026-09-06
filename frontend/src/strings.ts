@@ -52,7 +52,7 @@ export const STR = {
     open: 'Choose an environment',
     seed: (n: number) => `seed ${n}`,
     yourPick: 'your pick',
-    bestSeed: 'best seed',
+    bestSeed: 'peak reward',
     none: 'no environment yet',
   },
   wall: {

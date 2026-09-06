@@ -1,12 +1,30 @@
 import { clampPosition } from '../theater/player';
+import type { BinnedRates } from '../tape/derive';
 
 export interface HeroSelection {
-  leader: number | null;
+  leader: { seed: number; step: number } | null;
   promoted: number | null;
 }
 
 export function heroSeed(selection: HeroSelection): number | null {
-  return selection.promoted ?? selection.leader;
+  return selection.promoted ?? selection.leader?.seed ?? null;
+}
+
+export function peakSeed(seeds: readonly number[], recorded: readonly number[], rates: BinnedRates, window: number): HeroSelection['leader'] {
+  let leader: HeroSelection['leader'] = null, peak = -Infinity;
+  for (let lane = 0; lane < seeds.length; lane++) {
+    const seed = seeds[lane]!;
+    if (!recorded.includes(seed)) continue;
+    const values = rates.perLane[lane]!;
+    for (let row = 0; row < values.length; row++) {
+      const rate = values[row];
+      if (rate == null || !Number.isFinite(rate) || rate < peak || (rate === peak && leader !== null && seed >= leader.seed)) continue;
+      peak = rate;
+      leader = { seed, step: rates.x[row]! };
+    }
+  }
+  if (leader !== null) leader.step -= Math.floor(Math.min(leader.step, window) / 2);
+  return leader;
 }
 
 export function promoteSeed(
@@ -22,15 +40,6 @@ export function promoteSeed(
 export function escapeSelection(selection: HeroSelection): HeroSelection {
   if (selection.promoted === null) return selection;
   return { ...selection, promoted: null };
-}
-
-export function setLeader(
-  selection: HeroSelection,
-  leader: number | null,
-  playable: (seed: number) => boolean,
-): HeroSelection {
-  const promoted = selection.promoted !== null && playable(selection.promoted) ? selection.promoted : null;
-  return { leader, promoted };
 }
 
 export const SORT_MODES = ['rate', 'seed', 'retention'] as const;

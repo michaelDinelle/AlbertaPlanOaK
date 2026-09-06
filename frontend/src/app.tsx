@@ -10,7 +10,8 @@ import { baselineDetailQuery, runDetailQuery, runsQuery } from './data/queries';
 import { Panel } from './glass/Panel';
 import { formatStep } from './lib/format';
 import { cycleEnv, keyAction } from './lib/keymap';
-import { envShares, resolveFeaturedRun, runDateLabel, runEnvs, runLabel, runLabelFor, runShortId, sortRuns } from './lib/run';
+import { envLanes, envShares, resolveFeaturedRun, runDateLabel, runEnvs, runLabel, runLabelFor, runShortId, sortRuns } from './lib/run';
+import { peakSeed } from './lib/selection';
 import { CommandPalette } from './panels/CommandPalette';
 import { Hotkey, POLICY_TOKENS } from './panels/charts';
 import { JbwLegend } from './panels/JbwLegend';
@@ -31,7 +32,8 @@ import {
   useSelection,
 } from './state/selectionStore';
 import { STR } from './strings';
-import { setLive, useTapeProgress } from './tape/store';
+import { retentionWindow } from './tape/derive';
+import { setLive, useTapeProgress, useTapeSnapshot, type DeriveSpec } from './tape/store';
 import { setTransport, transportSnapshot } from './playback/store';
 import { resetCamera, setTheaterInputs, stepBySteps, useStageMeta } from './theater/controller';
 import { seedsFor } from './theater/loader';
@@ -161,6 +163,15 @@ export function App() {
   const progress = useTapeProgress(sel.runId);
   const stride = Math.max(1, progress?.windowSteps ?? 1);
   const live = entry?.inFlight === true;
+  const candidates = useMemo(() => active === null || sel.envId === null ? null : {
+    ...envLanes(active.meta, sel.envId), recorded: seedsFor(active.recordings, sel.envId),
+  }, [active, sel.envId]);
+  const peakSpec = useMemo<(DeriveSpec & { mode: 'windowedRates' }) | null>(() => active === null || candidates === null ? null : {
+    mode: 'windowedRates', lanes: candidates.lanes, win: retentionWindow(active.meta.steps),
+  }, [active, candidates]);
+  const peakRates = useTapeSnapshot(active?.id ?? null, sel.envId, 'windowedRates', peakSpec);
+  const leader = useMemo(() => candidates === null || peakRates === null || peakSpec === null ? null : peakSeed(candidates.seeds, candidates.recorded, peakRates, peakSpec.win), [candidates, peakRates, peakSpec]);
+  const leaderPending = sel.selection.promoted === null && candidates !== null && candidates.recorded.length > 0 && (peakRates === null || (live && peakRates.x.length === 0));
 
   const [view, setView] = useState<PanelView>('reward');
   const [wallOpen, setWallOpen] = useState(false);
@@ -206,19 +217,19 @@ export function App() {
   }, [detail, envList, sel.envId]);
 
   useEffect(() => {
-    if (active === null || sel.envId === null || baselinePending) return;
-    electLeader(seedsFor(active.recordings, sel.envId));
-  }, [active, sel.envId, baselinePending]);
+    if (candidates === null || baselinePending || peakRates === null) return;
+    electLeader(leader, candidates.recorded);
+  }, [candidates, baselinePending, peakRates, leader, sel.selection.leader]);
 
   useEffect(() => {
     setTheaterInputs({
       active,
       policy: sel.policy,
       baselineId,
-      baselinePending,
+      baselinePending: baselinePending || leaderPending,
       live: sel.policy === 'oak' && live,
     });
-  }, [active, sel.policy, baselineId, baselinePending, live, setTheaterInputs]);
+  }, [active, sel.policy, baselineId, baselinePending, leaderPending, live, setTheaterInputs]);
 
   useEffect(() => {
     const runId = sel.runId;
