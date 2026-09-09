@@ -1,7 +1,10 @@
 #pragma METAL fp math_mode(safe)
 
 constant uint OAK_SIMD_WIDTH = 32u;
-constant uint OAK_SPL = 1u;
+constant uint OAK_THREADGROUP_LANES = 4u;
+static_assert(OAK_THREADGROUP_LANES > 0u && OAK_THREADGROUP_LANES <= OAK_SIMD_WIDTH
+              && (OAK_THREADGROUP_LANES & (OAK_THREADGROUP_LANES - 1u)) == 0u,
+              "packed environment steps must fit one wave");
 
 constant uint OAK_CANDIDATES_PER_SLOT = 7u;
 constant uint OAK_CONSTRUCTED_PER_PERCEPT = 2u;

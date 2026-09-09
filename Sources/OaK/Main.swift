@@ -204,7 +204,7 @@ struct ShapeProbe {
   var stAlphaAct, stBetaAct, uOptFeature, uParentA, uParentB, uKind, uNurParentA: UInt32
   var invFeatureTimeScale, invOptionCount, metaEta, sampleSigma, sampleInv2S2, actorAlphaDenom: Float
   var stKeep0, stKeep0n, stKeep1, stKeep1n, uKeep0, uKeep0n: UInt32
-  var simdWidth, spl, candidatesPerSlot, constructedPerPercept, planPeriod: UInt32
+  var simdWidth, threadgroupLanes, pModel, pAux, modelRows: UInt32
   var activeFeatures, featureTimeScale, optionsPerThread: UInt32
 }
 struct RewardSlices {
@@ -483,9 +483,6 @@ final class Engine {
       let percepts = Int(sp.perceptCount)
       precondition(
         percepts % Int(sp.simdWidth) == 0, "perception budget must tile the simd width")
-      precondition(
-        Int(sp.featureCount) == percepts * (1 + Int(sp.constructedPerPercept) * Int(sp.candidatesPerSlot)),
-        "constructed-feature identity broken")
       precondition(Int(sp.stateStride) % 4 == 0, "stateStride must stay 16B-aligned")
       let cfgB = Shared(dev, 1, KernelConfig(
           obsDim: UInt32(naturalO), featureCount: sp.featureCount, optionCount: sp.optionCount,
@@ -615,8 +612,18 @@ final class Engine {
     }
     let kd = kind(of: lane)
     let slices = RewardSlices(kd.off)
+    let words = UnsafeRawBufferPointer(start: paramPtr(lane), count: kd.paramTotal * 4).bindMemory(to: UInt32.self)
+    var ordered = Array(words)
+    let model = Int(kd.off.pModel), auxiliary = Int(kd.off.pAux), rows = Int(kd.off.modelRows)
+    for i in 0..<rows {
+      ordered[auxiliary + i] = words[model + 4 * i]
+      ordered[auxiliary + rows + i] = words[model + 4 * i + 1]
+      ordered[auxiliary + 2 * rows + i] = words[auxiliary + i]
+      ordered[auxiliary + 3 * rows + i] = words[model + 4 * i + 2]
+      ordered[auxiliary + 4 * rows + i] = words[model + 4 * i + 3]
+    }
     return [
-      "params": hex(paramPtr(lane), kd.paramTotal * MemoryLayout<Float>.stride),
+      "params": ordered.withUnsafeBytes { sha256Hex($0) },
       "state": hex(statePtr(lane), kd.stateTotal * MemoryLayout<Float>.stride),
       "uints": hex(uintPtr(lane), kd.uintTotal * MemoryLayout<UInt32>.stride),
       "scalars": hex(scalars + lane, MemoryLayout<KernelScalars>.stride),
@@ -1369,7 +1376,7 @@ final class TapeWriter {
         laneCount: UInt32(B), recordCapacity: UInt32(recordCapacity),
         persistentMask: environment.mask, invObsFloor: 1 / Float(64))
     }
-    func bind(_ enc: MTLComputeCommandEncoder, _ pipe: MTLComputePipelineState, _ resources: [MTLBuffer]) {
+    func bind(_ enc: MTLComputeCommandEncoder, _ pipe: MTLComputePipelineState, _ resources: [MTLBuffer], kind: Engine.Kind? = nil) {
       enc.setComputePipelineState(pipe)
       for (j, buffer) in resources.enumerated() { enc.setBuffer(buffer, offset: 0, index: j) }
       for (j, buffer) in [(6, laneBuf), (7, seedsBuf), (14, envStateBuf), (15, envOffBuf),
@@ -1377,6 +1384,13 @@ final class TapeWriter {
         enc.setBuffer(buffer, offset: 0, index: j)
       }
       var config = ecfg
+      if let kind {
+        for (j, base) in [kind.paramBase, kind.stateBase, kind.uintBase].enumerated() {
+          enc.setBuffer(resources[j], offset: base * 4, index: j)
+        }
+        enc.setBuffer(kind.configB, offset: 0, index: OakBuf.config.rawValue)
+        config.invObsFloor = 1 / Float(2 * Int(kind.off.perceptCount))
+      }
       enc.setBytes(&config, length: MemoryLayout<FleetEnvCfg>.stride, index: OakBuf.envCfg.rawValue)
     }
     init(
@@ -1469,17 +1483,10 @@ final class TapeWriter {
     guard core == declared else {
       throw err("simd width \(core) is not the \(declared) the kernel is compiled for.")
     }
-    let megaG = [32, 16, 8, 4, 2, 1].first {
-      candidate in engine.kinds.allSatisfy {
-        $0.count % candidate == 0 && $0.firstLane % candidate == 0
-      }
-    }!
     let stageMask = try stageMaskEnv(e)
     func baseConstants() -> MTLFunctionConstantValues {
       let c = MTLFunctionConstantValues()
       ablations.apply(to: c)
-      var megaG32 = UInt32(megaG)
-      c.setConstantValue(&megaG32, type: .uint, index: OakConst.megaG.rawValue)
       if e["OAK_PROBE_FIXEDIDX"] == "1" {
         var b = true
         c.setConstantValue(&b, type: .bool, index: OakConst.probeFixedIdx.rawValue)
@@ -1490,7 +1497,6 @@ final class TapeWriter {
       }
       return c
     }
-    var envRuns: [(kindIdx: Int, kind: UInt32, tgStart: Int, tgCount: Int)] = []
     var variantPipes: [MTLComputePipelineState] = []
     var kindMegaG: [Int] = []
     let tgOptionCount = Int(engine.kinds[0].off.optionCount)
@@ -1519,10 +1525,11 @@ final class TapeWriter {
     func laneSlotBytes(_ gk: Int) -> Int {
       (5 * tgOptionCount + 1) * gk * MemoryLayout<Float>.stride
     }
-    for (ki, kd) in engine.kinds.enumerated() {
-      var gk = megaG
+    for kd in engine.kinds {
+      var gk = Int(kd.off.threadgroupLanes)
       while gk > 1,
-        gk * Int(kd.off.perceptCount) > core * core
+        kd.firstLane % gk != 0 || kd.count % gk != 0
+          || gk * Int(kd.off.perceptCount) > core * core
           || laneSlotBytes(gk) > dev.maxThreadgroupMemoryLength
       { gk /= 2 }
       guard kd.firstLane % gk == 0, kd.count % gk == 0 else {
@@ -1538,10 +1545,10 @@ final class TapeWriter {
       c.setConstantValue(&g32, type: .uint, index: OakConst.megaG.rawValue)
       let desc = MTLComputePipelineDescriptor()
       desc.computeFunction = try lib.makeFunction(name: "oak_megastep", constantValues: c)
+      desc.maxTotalThreadsPerThreadgroup = core * gk
       desc.label = "oak_megastep \(Main.envIdsByKind[Int(kd.kind)])"
       variantPipes.append(try dev.makeComputePipelineState(descriptor: desc, options: []).0)
       kindMegaG.append(gk)
-      envRuns.append((ki, kd.kind, kd.firstLane / gk, (kd.count + gk - 1) / gk))
     }
     guard variantPipes.allSatisfy({ $0.threadExecutionWidth == core }) else {
       throw err("simd width \(core) differs across specialized pipelines.")
@@ -1574,14 +1581,7 @@ final class TapeWriter {
       label: "oak",
       encodeInit: { enc in
         for kd in engine.kinds {
-          bufs.bind(enc, initPipe, res)
-          enc.setBuffer(engine.params.b, offset: kd.paramBase * 4, index: OakBuf.params.rawValue)
-          enc.setBuffer(engine.state.b, offset: kd.stateBase * 4, index: OakBuf.state.rawValue)
-          enc.setBuffer(engine.uints.b, offset: kd.uintBase * 4, index: OakBuf.uints.rawValue)
-          enc.setBuffer(kd.configB, offset: 0, index: OakBuf.config.rawValue)
-          var ce = bufs.ecfg
-          ce.invObsFloor = 1 / Float(2 * Int(kd.off.perceptCount))
-          enc.setBytes(&ce, length: MemoryLayout<FleetEnvCfg>.stride, index: OakBuf.envCfg.rawValue)
+          bufs.bind(enc, initPipe, res, kind: kd)
           enc.setBuffer(bufs.envKindsBuf, offset: 0, index: OakBuf.aux0.rawValue)
           var off = UInt32(kd.firstLane)
           enc.setBytes(&off, length: 4, index: OakBuf.aux1.rawValue)
@@ -1590,37 +1590,24 @@ final class TapeWriter {
       },
       encodeMegastep: { cb, n, base in
         guard let enc = cb.makeComputeCommandEncoder(dispatchType: .concurrent) else { return }
-        for run in envRuns {
-          let kd = engine.kinds[run.kindIdx]
-          bufs.bind(enc, variantPipes[run.kindIdx], res)
-          enc.setBuffer(engine.params.b, offset: kd.paramBase * 4, index: OakBuf.params.rawValue)
-          enc.setBuffer(engine.state.b, offset: kd.stateBase * 4, index: OakBuf.state.rawValue)
-          enc.setBuffer(engine.uints.b, offset: kd.uintBase * 4, index: OakBuf.uints.rawValue)
-          enc.setBuffer(kd.configB, offset: 0, index: OakBuf.config.rawValue)
-          var ce = bufs.ecfg
-          ce.invObsFloor = 1 / Float(2 * Int(kd.off.perceptCount))
-          enc.setBytes(&ce, length: MemoryLayout<FleetEnvCfg>.stride, index: OakBuf.envCfg.rawValue)
+        for (ki, kd) in engine.kinds.enumerated() {
+          let gk = kindMegaG[ki]
+          bufs.bind(enc, variantPipes[ki], res, kind: kd)
           enc.setBuffer(bufs.recordSlotBuf, offset: 0, index: OakBuf.aux0.rawValue)
           enc.setBuffer(bufs.recordBuf, offset: 0, index: OakBuf.aux1.rawValue)
-          var span = SIMD3<UInt32>(UInt32(n), UInt32(base), UInt32(run.tgStart))
+          var span = SIMD3<UInt32>(UInt32(n), UInt32(base), UInt32(kd.firstLane / gk))
           enc.setBytes(&span, length: MemoryLayout<SIMD3<UInt32>>.stride, index: OakBuf.aux2.rawValue)
           enc.setBuffer(bufs.diagAccumBuf, offset: 0, index: OakBuf.diagAccum.rawValue)
-          let gk = kindMegaG[run.kindIdx]
           enc.setThreadgroupMemoryLength(laneSlotBytes(gk), index: 0)
           enc.dispatchThreadgroups(
-            MTLSize(width: run.tgCount, height: 1, depth: 1),
+            MTLSize(width: kd.count / gk, height: 1, depth: 1),
             threadsPerThreadgroup: mtlSize(core * gk))
         }
         enc.endEncoding()
       },
       encodeSnapshot: { enc, half in
-        var fullScan: UInt32 = 1
         for kd in engine.kinds {
-          bufs.bind(enc, snapPipe, res)
-          enc.setBuffer(engine.params.b, offset: kd.paramBase * 4, index: OakBuf.params.rawValue)
-          enc.setBuffer(engine.state.b, offset: kd.stateBase * 4, index: OakBuf.state.rawValue)
-          enc.setBuffer(engine.uints.b, offset: kd.uintBase * 4, index: OakBuf.uints.rawValue)
-          enc.setBuffer(kd.configB, offset: 0, index: OakBuf.config.rawValue)
+          bufs.bind(enc, snapPipe, res, kind: kd)
           enc.setBuffer(bufs.snapBuf, offset: 0, index: OakBuf.aux0.rawValue)
           let ki = engine.kinds.firstIndex { $0.kind == kd.kind }!
           var ctl = SIMD4<UInt32>(
@@ -1628,7 +1615,6 @@ final class TapeWriter {
             UInt32(half * diagHalf + diagBase[ki]),
             UInt32(Diag.oakFloats(Int(kd.off.featureCount))))
           enc.setBytes(&ctl, length: MemoryLayout<SIMD4<UInt32>>.stride, index: OakBuf.aux1.rawValue)
-          enc.setBytes(&fullScan, length: 4, index: OakBuf.aux2.rawValue)
           enc.setBuffer(bufs.diagAccumBuf, offset: 0, index: OakBuf.diagAccum.rawValue)
           enc.setBuffer(bufs.diagOutBuf, offset: 0, index: OakBuf.diagOut.rawValue)
           enc.dispatchThreadgroups(mtlSize(kd.count), threadsPerThreadgroup: mtlSize(core))
