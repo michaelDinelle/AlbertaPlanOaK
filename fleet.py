@@ -6,10 +6,12 @@ import hashlib
 import json
 import math
 import os
-import struct
 import subprocess
 import sys
-import zlib
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -24,6 +26,19 @@ from statsmodels.stats.proportion import proportion_confint
 REPO = Path(__file__).resolve().parent
 BENCH = REPO / ".oak-benchmarks"
 BASELINE_STORE = BENCH / "baselines"
+OAK = REPO / ".build/release/OaK"
+PORT = int(os.environ.get("OAK_PORT", "5174"))
+DAEMON_LOG = BENCH / "oak.log"
+PAYLOAD_PARTS = 10
+FLEET_SCHEDULE = (
+    ("HalfCheetah-v4", 0), ("FourRooms-cont-v0", 64), ("DeepSea-cont-v0", 128),
+    ("KeyCorridor-cont-v0", 192), ("Acrobot-cont-v0", 256), ("MountainCar-cont-v0", 320),
+    ("Pendulum-cont-v0", 448), ("Chain-cont-v0", 512), ("LargeDeepSea-cont-v0", 576),
+    ("MultiKeyCorridor-cont-v0", 640), ("MemoryChain-cont-v0", 704), ("ProceduralMaze-cont-v0", 768),
+    ("HighDimMaze-cont-v0", 832), ("POMaze-cont-v0", 896), ("DelayedChain-cont-v0", 960),
+    ("JellyBeanWorld-cont-v0", 1024))
+FLEET_SEEDS_PER_ENV = 64
+FLEET_STEPS = 1_000_000
 ENVIRONMENT_SOURCES = ("Sources/EnvCore.metal", "Sources/Env.metal", "Sources/Baseline.metal",
                        "Sources/envs", "Sources/OaK/Resources")
 
@@ -51,12 +66,12 @@ def baseline_identity(meta: dict) -> str:
 
 def stored_baseline(meta: dict, policy: str) -> Path | None:
     root = BASELINE_STORE / baseline_identity(meta) / policy
-    if not (root / ".done").is_file():
+    if not (root / "summary.json").is_file():
         return None
     run = load(root)
     if run["meta"]["policy"] != policy or not same_run_shape({"meta": meta}, run):
         raise SystemExit(f"{root}: stored baseline does not match the schedule it is filed under")
-    if int(run["tape"]["ends"][-1]) < run["meta"]["steps"]:
+    if not complete(run):
         raise SystemExit(f"{root}: stored baseline is incomplete")
     return root
 
@@ -80,50 +95,95 @@ PLASTICITY_FIELDS = {
     "random": [],
 }
 
-FILE_MAGIC = 0x544B414F
+def api(path: str, body: dict | None = None) -> bytes:
+    data = None if body is None else json.dumps(body).encode()
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{PORT}{path}", data=data,
+        headers={"content-type": "application/json"} if data else {},
+        method="POST" if data else "GET")
+    with urllib.request.urlopen(req, timeout=600) as response:
+        return response.read()
 
 
-def read_tape(path: Path) -> dict:
-    data = path.read_bytes()
-    magic, lanes, json_len = struct.unpack_from("<3I", data, 0)
-    if magic != FILE_MAGIC:
-        raise SystemExit(f"{path}: not an OAKT tape")
-    fields = json.loads(data[12:12 + json_len])["fields"]
-    n_f = len(fields)
-    off = 12 + json_len
-    rows = []
-    while off + 16 <= len(data):
-        ss, sc, ws, cl = struct.unpack_from("<IIfI", data, off)
-        if off + 16 + cl > len(data):
-            break
-        block = zlib.decompress(data[off + 16:off + 16 + cl], -15)
-        off += 16 + cl
-        if len(block) != n_f * lanes * 4:
-            raise SystemExit(f"{path}: tape row block size {len(block)} != {n_f * lanes * 4}")
-        rows.append((ss + sc, ws, np.frombuffer(block, np.float32).reshape(n_f, lanes)))
-    if not rows:
-        raise SystemExit(f"{path}: no complete tape rows yet")
-    ends, wall, blocks = zip(*rows)
-    return {"fields": fields, "lanes": lanes, "ends": np.asarray(ends, np.int64),
-            "wall": np.asarray(wall, np.float64), "data": np.stack(blocks)}
+def identity_of_daemon() -> dict | None:
+    try:
+        return json.loads(api("/api/identity"))
+    except (urllib.error.URLError, ConnectionError, TimeoutError):
+        return None
+
+
+def daemon() -> dict:
+    if not OAK.is_file():
+        raise SystemExit(f"release executable missing: {OAK}; run ./setup.sh")
+    binary = file_sha256(OAK)
+    current = identity_of_daemon()
+    if current is not None and current["binary"] == binary:
+        return current
+    if current is not None:
+        if current["running"] is not None:
+            raise SystemExit(f"OaK is running {current['running']} on a different build; wait for it")
+        api("/api/stop", {})
+        for _ in range(100):
+            if identity_of_daemon() is None:
+                break
+            time.sleep(0.1)
+    BENCH.mkdir(exist_ok=True)
+    with open(DAEMON_LOG, "a") as log:
+        subprocess.Popen([str(OAK)], cwd=REPO, stdout=log, stderr=subprocess.STDOUT,
+                         stdin=subprocess.DEVNULL, start_new_session=True)
+    for _ in range(300):
+        time.sleep(0.1)
+        current = identity_of_daemon()
+        if current is not None:
+            if current["binary"] != binary:
+                raise SystemExit("OaK came up with a different binary")
+            return current
+    raise SystemExit(f"OaK did not come up on port {PORT}; see {DAEMON_LOG}")
+
+
+def run_id(root: Path) -> str:
+    rel = root.resolve().relative_to(BENCH.resolve()).parts
+    if len(rel) == 3 and rel[1] == "baselines":
+        return f"{rel[0]}:{rel[2]}"
+    return "/".join(rel)
+
+
+def read_series(root: Path, column: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    raw = api(f"/api/runs/{urllib.parse.quote(run_id(root), safe='')}/series/{column}")
+    w, l = (int(v) for v in np.frombuffer(raw, "<u4", 2))
+    ends = np.frombuffer(raw, "<u4", w, 8).astype(np.int64)
+    wall = np.frombuffer(raw, "<f4", w, 8 + 4 * w).astype(np.float64)
+    values = np.frombuffer(raw, "<f4", w * l, 8 + 8 * w).reshape(w, l)
+    return ends, wall, values
 
 
 def load(root: Path) -> dict:
     meta = json.loads((root / "meta.json").read_text())
     if "policy" not in meta:
         raise SystemExit(f"{root}: meta.json has no policy")
-    tp = root / "tape.bin"
-    if not tp.exists():
-        raise SystemExit(f"{root}: no tape.bin")
-    tape = read_tape(tp)
-    ds = tape["data"][-1, tape["fields"].index("deathStep"), :]
-    db = ds.view(np.uint32)
-    deaths = {int(lane): int(db[lane]) for lane in np.nonzero(np.isfinite(ds))[0]}
-    return {"meta": meta, "tape": tape, "deaths": deaths, "root": root}
+    daemon()
+    ends, wall, reward_sum = read_series(root, "rewardSum")
+    if ends.size == 0:
+        raise SystemExit(f"{root}: no complete windows yet")
+    cache = {"rewardSum": reward_sum}
+
+    def series_of(field: str) -> np.ndarray:
+        if field not in cache:
+            cache[field] = read_series(root, field)[2]
+        return cache[field]
+
+    death = series_of("deathStep")[-1]
+    deaths = {int(lane): int(death[lane]) for lane in np.nonzero(np.isfinite(death))[0]}
+    return {"meta": meta, "root": root, "ends": ends, "wall": wall,
+            "lanes": int(reward_sum.shape[1]), "series": series_of, "deaths": deaths}
+
+
+def complete(run: dict) -> bool:
+    return "finishedAt" in run["meta"] and int(run["ends"][-1]) >= run["meta"]["steps"]
 
 
 def series(run: dict, field: str) -> np.ndarray:
-    return run["tape"]["data"][:, run["tape"]["fields"].index(field), :]
+    return run["series"](field)
 
 
 def last_finite(mat: np.ndarray) -> np.ndarray:
@@ -152,7 +212,7 @@ def env_slices(run: dict) -> dict[str, np.ndarray]:
 
 
 def window_ctx(run: dict) -> tuple[np.ndarray, np.ndarray]:
-    ends = run["tape"]["ends"]
+    ends = run["ends"]
     win = max(run["meta"]["steps"] // 5, 1)
     j = np.searchsorted(ends, ends - win, side="right") - 1
     return ends, j
@@ -217,8 +277,8 @@ def death_vectors(run: dict, lanes: np.ndarray,
 
 
 def lane_vectors(run: dict) -> dict[str, np.ndarray]:
-    max_step = int(run["tape"]["ends"][-1])
-    lanes = np.arange(run["tape"]["lanes"])
+    max_step = int(run["ends"][-1])
+    lanes = np.arange(run["lanes"])
     delivered = last_finite(series(run, "rewardSum")) / max_step
     blind = ~np.isfinite(delivered)
     worst = min(0.0, float(np.min(delivered[~blind]))) if (~blind).any() else 0.0
@@ -377,9 +437,11 @@ def baseline_runs(run: dict) -> dict[str, dict]:
     out = {}
     for policy in ("ppo", "random"):
         root = run["root"] / "baselines" / policy
-        if not (root / ".done").exists():
+        if not (root / "summary.json").exists():
             raise SystemExit(f"{run['root']}: missing complete {policy} baseline")
         base = load(root)
+        if not complete(base):
+            raise SystemExit(f"{root}: baseline incomplete")
         if base["meta"]["policy"] != policy:
             raise SystemExit(f"{root}: policy is {base['meta']['policy']}, expected {policy}")
         if not same_run_shape(run, base):
@@ -419,22 +481,19 @@ def cmd_report(args) -> int:
         raise SystemExit(f"{args.root}: uneven env slices {sorted(per_env_counts)}")
     meta = run["meta"]
     horizon = meta["steps"]
-    ends = run["tape"]["ends"]
+    ends = run["ends"]
     max_step = int(ends[-1])
     if max_step < horizon:
         raise SystemExit(f"{args.root}: incomplete at {max_step:,} of {horizon:,} steps")
-    n_lanes = run["tape"]["lanes"]
+    n_lanes = run["lanes"]
     started = datetime.strptime(meta["startedAt"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-    generated_at = (started + timedelta(seconds=float(run["tape"]["wall"][-1]))).strftime(
+    generated_at = (started + timedelta(seconds=float(run["wall"][-1]))).strftime(
         "%Y-%m-%dT%H:%M:%SZ")
     rates = full_window_rates(run)
     final_rate = last_finite(rates)
     peak_rate = peak_finite(rates)
     env_ids = sorted(slices)
     plast_fields = PLASTICITY_FIELDS[meta["policy"]]
-    missing = [f for f in plast_fields if f not in run["tape"]["fields"]]
-    if missing:
-        raise SystemExit(f"{args.root}: tape lacks plasticity fields {missing}")
     plast_rows = np.unique(np.linspace(0, len(ends) - 1, 100).astype(int))
     plast_series = {f: series(run, f) for f in plast_fields}
     envs_out = {}
@@ -461,7 +520,7 @@ def cmd_report(args) -> int:
         "seedsPerEnv": per_env_counts.pop(),
         "bootstrap": {"reps": BOOT_REPS, "baseSeed": BOOT_BASE_SEED},
         "curveSteps": [int(s) for s in ends],
-        "curveSeconds": fl_list(run["tape"]["wall"]),
+        "curveSeconds": fl_list(run["wall"]),
         "plasticitySteps": [int(ends[r]) for r in plast_rows] if plast_fields else [],
         "envs": envs_out,
         "aggregate": {"divergence": divergence_block(run, np.arange(n_lanes), max_step)},
@@ -532,7 +591,7 @@ def gate(best: dict, candidate: dict) -> int:
     for label, run in (("best", best), ("candidate", candidate)):
         if run["meta"]["policy"] != "oak":
             return _fail(f"GATE ERROR: {label} policy is {run['meta']['policy']}")
-        if int(run["tape"]["ends"][-1]) < run["meta"]["steps"]:
+        if not complete(run):
             return _fail(f"GATE ERROR: {label} incomplete")
     if not same_run_shape(best, candidate):
         return _fail("GATE ERROR: environment, seed, horizon, or lane schedule differs")
@@ -584,27 +643,35 @@ def gate(best: dict, candidate: dict) -> int:
     return 0
 
 
-def best_hash() -> str:
+def best_hash() -> str | None:
     try:
         name = (REPO / "best").read_text().strip()
     except OSError as error:
         raise SystemExit("best pointer missing") from error
-    if not name:
-        raise SystemExit("best pointer empty")
-    return name
+    return name or None
 
 
-def best_run() -> dict:
+def best_run() -> dict | None:
     name = best_hash()
+    if name is None:
+        return None
     root = BENCH / name
     if not root.is_dir():
-        raise SystemExit(f"best artifact missing: {root}")
+        raise SystemExit(f"best artifact missing: {root}; run ./fleet.py fetch")
     run = load(root)
     if run["meta"]["policy"] != "oak":
         raise SystemExit(f"best policy is {run['meta']['policy']}")
-    if int(run["tape"]["ends"][-1]) < run["meta"]["steps"]:
+    if not complete(run):
         raise SystemExit(f"best incomplete: {root}")
     return run
+
+
+def fleet_schedule() -> dict:
+    schedule = [{"envId": env, "seedStart": start, "seedEnd": start + FLEET_SEEDS_PER_ENV - 1}
+                for env, start in FLEET_SCHEDULE]
+    seeds = [seed for entry in schedule for seed in range(entry["seedStart"], entry["seedEnd"] + 1)]
+    return {"steps": FLEET_STEPS, "batch": len(seeds), "seeds": seeds, "envSchedule": schedule,
+            "ablationLabel": "none"}
 
 
 def write_best(name: str) -> None:
@@ -612,7 +679,10 @@ def write_best(name: str) -> None:
 
 
 def cmd_gate(args) -> int:
-    return gate(best_run(), load(args.candidate))
+    best = best_run()
+    if best is None:
+        raise SystemExit("no best to gate against")
+    return gate(best, load(args.candidate))
 
 
 def env_schedule(meta: dict) -> str:
@@ -666,24 +736,39 @@ def artifact_identity() -> dict:
     }
 
 
-def benchmark_env(meta: dict, policy: str, root: Path) -> dict[str, str]:
-    env = dict(os.environ)
-    env.pop("OAK_ABLATE", None)
-    env.update(
-        OAK_BENCH_POLICY=policy,
-        OAK_BENCH_STEPS=str(meta["steps"]),
-        OAK_BENCH_SEED_COUNT=str(meta["batch"]),
-        OAK_BENCH_SEEDS=",".join(map(str, meta["seeds"])),
-        OAK_BENCH_ENVS=env_schedule(meta),
-        OAK_FLEET_TIMING="1",
-        OAK_METRICS_STORAGE=str(root),
-    )
-    if policy == "oak":
-        env["OAK_ABLATE"] = meta["ablationLabel"]
-    return env
+def benchmark_request(meta: dict, policy: str, root: Path) -> dict:
+    return {"policy": policy, "steps": meta["steps"], "seeds": meta["seeds"],
+            "envs": env_schedule(meta), "root": str(root), "timing": True,
+            "ablation": meta["ablationLabel"] if policy == "oak" else "none"}
+
+
+def run_benchmark(meta: dict, policy: str, root: Path) -> None:
+    current = daemon()
+    if current["running"] is not None:
+        raise SystemExit(f"OaK is already running {current['running']}")
+    started = json.loads(api("/api/benchmark", benchmark_request(meta, policy, root)))
+    rid = started["id"]
+    while True:
+        time.sleep(5)
+        current = identity_of_daemon()
+        if current is None:
+            raise SystemExit(f"OaK went away during {rid}; see {DAEMON_LOG}")
+        if current["running"] is None:
+            break
+    meta_path = root / "meta.json"
+    if not meta_path.is_file() or "finishedAt" not in json.loads(meta_path.read_text()):
+        raise SystemExit(f"{rid} did not finish; see {DAEMON_LOG}")
+
+
+def recorded(root: Path) -> bool:
+    meta_path = root / "meta.json"
+    return meta_path.is_file() and "finishedAt" in json.loads(meta_path.read_text())
 
 
 def record_policy(candidate: dict, policy: str, identity: dict) -> dict:
+    if policy == "oak" and recorded(candidate["root"]):
+        print("[fleet] oak already recorded", flush=True)
+        return load(candidate["root"])
     if policy != "oak":
         stored = stored_baseline(candidate["meta"], policy)
         if stored is not None:
@@ -694,42 +779,24 @@ def record_policy(candidate: dict, policy: str, identity: dict) -> dict:
         root.mkdir(parents=True)
     else:
         root = candidate["root"]
-    if file_sha256(REPO / ".build/release/OaK") != identity["binary"]:
+    if file_sha256(OAK) != identity["binary"]:
         raise SystemExit("release executable changed during the science run")
-    output = None
-    log = None
-    if policy != "oak":
-        log = open(root.parent / f"{policy}.log", "w")
-        output = log
-    try:
-        rc = subprocess.run(
-            ["caffeinate", "-dimsu", str(REPO / ".build/release/OaK"), "benchmark"],
-            env=benchmark_env(candidate["meta"], policy, root), cwd=REPO,
-            stdout=output, stderr=subprocess.STDOUT if output else None).returncode
-    finally:
-        if log is not None:
-            log.close()
-    if rc != 0:
-        raise SystemExit(f"{policy} benchmark exit={rc}")
+    run_benchmark(candidate["meta"], policy, root)
     run = load(root)
     if run["meta"]["policy"] != policy:
         raise SystemExit(f"{root}: policy is {run['meta']['policy']}, expected {policy}")
     if not same_run_shape(candidate, run):
         raise SystemExit(f"{root}: run shape differs from {candidate['root']}")
-    if int(run["tape"]["ends"][-1]) < run["meta"]["steps"]:
+    if not complete(run):
         raise SystemExit(f"{root}: incomplete")
     if policy != "oak":
         cmd_report(argparse.Namespace(root=root))
-        (root / ".done").touch()
         link_baseline(candidate["root"], policy, root)
     print(f"[fleet] {policy} complete", flush=True)
     return run
 
 
 def cmd_run(args) -> int:
-    best_run()
-    if os.environ.get("OAK_BENCH_POLICY", "oak") != "oak":
-        raise SystemExit("science runs use the oak policy")
     if args.preset:
         subprocess.run([str(REPO / "setup.sh"), "--preset", args.preset], cwd=REPO, check=True)
     subprocess.run(["swift", "build", "-c", "release"], cwd=REPO, check=True)
@@ -737,6 +804,11 @@ def cmd_run(args) -> int:
     name = identity["id"]
     if name == best_hash():
         raise SystemExit(f"{name} is already the best")
+    if best_run() is None:
+        print("[fleet] no best exists: this run bootstraps the best and publishes it", flush=True)
+    current = daemon()
+    if current["running"] is not None:
+        raise SystemExit(f"OaK is already running {current['running']}")
     root = BENCH / name
     if root.exists():
         raise SystemExit(f"artifact already exists: {root}")
@@ -751,7 +823,7 @@ def cmd_run(args) -> int:
             + (["--steps", str(args.steps)] if args.steps else []),
             stdout=output, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
             start_new_session=True, cwd=REPO)
-    print(f"DETACHED PID {process.pid}\n  {log}\n  {root}/.done")
+    print(f"DETACHED PID {process.pid}\n  {log}\n  {root}/summary.json")
     return 0
 
 
@@ -761,7 +833,7 @@ def cmd_job(args) -> int:
     if identity != artifact_identity() or identity["id"] != args.name:
         raise SystemExit("science identity changed before the run started")
     best = best_run()
-    meta = dict(best["meta"])
+    meta = dict(best["meta"]) if best is not None else fleet_schedule()
     if args.steps:
         meta["steps"] = int(args.steps)
     candidate = {"root": root, "meta": meta}
@@ -774,23 +846,109 @@ def cmd_job(args) -> int:
     record_policy(candidate, "random", identity)
     cmd_report(argparse.Namespace(root=root))
     completed = load(root)
+    if best is None:
+        if meta["steps"] != FLEET_STEPS:
+            print(f"[fleet] {meta['steps']:,} steps is a prefix: recorded without becoming the best", flush=True)
+            print("[fleet] DONE", flush=True)
+            return 0
+        write_best(args.name)
+        publish(args.name, candidate["meta"])
+        print(f"[fleet] best {args.name} (bootstrap)", flush=True)
+        print("[fleet] DONE", flush=True)
+        return 0
     if (meta["steps"], completed["meta"]["preset"]) != (best["meta"]["steps"], best["meta"]["preset"]):
         print(f"[fleet] {completed['meta']['preset']} at {meta['steps']:,} steps is not the best's"
               f" {best['meta']['preset']} at {best['meta']['steps']:,}: recorded without a gate", flush=True)
-        (root / ".done").touch()
         print("[fleet] DONE", flush=True)
         return 0
     result = gate(best, completed)
     if result == 0:
         write_best(args.name)
+        publish(args.name, candidate["meta"])
         print(f"[fleet] best {args.name}", flush=True)
     elif result == 1:
         print(f"[fleet] best stays {best_hash()}", flush=True)
     else:
         raise SystemExit("gate could not compare the completed run")
-    (root / ".done").touch()
     print("[fleet] DONE", flush=True)
     return result
+
+
+def gh(*args: str, check: bool = True) -> subprocess.CompletedProcess:
+    return subprocess.run(["gh", *args], cwd=REPO, check=check, capture_output=True, text=True)
+
+
+def release_tags(name: str, meta: dict) -> list[tuple[str, Path]]:
+    identity = baseline_identity(meta)
+    return [(f"run-{name}", BENCH / name)] + [
+        (f"baseline-{identity}-{policy}", BASELINE_STORE / identity / policy)
+        for policy in ("ppo", "random")]
+
+
+def payload_files(root: Path) -> list[Path]:
+    return [root / f"payload.{part}" for part in range(PAYLOAD_PARTS)]
+
+
+def publish(name: str, meta: dict) -> None:
+    for tag, root in release_tags(name, meta):
+        files = payload_files(root)
+        missing = [f.name for f in files if not f.is_file()]
+        if missing:
+            raise SystemExit(f"{root}: cannot publish without {missing}")
+        if gh("release", "view", tag, check=False).returncode != 0:
+            gh("release", "create", tag, "--title", tag, "--notes", "")
+        gh("release", "upload", tag, "--clobber", *map(str, files))
+        print(f"[fleet] published {tag}", flush=True)
+    print("[fleet] commit: best " + " ".join(
+        str(root.relative_to(REPO) / item) for _, root in release_tags(name, meta)
+        for item in ("meta.json", "summary.json", "headers")), flush=True)
+
+
+def cmd_publish(args) -> int:
+    name = best_hash()
+    if name is None:
+        raise SystemExit("no best to publish")
+    publish(name, json.loads((BENCH / name / "meta.json").read_text()))
+    return 0
+
+
+def origin() -> str:
+    url = subprocess.check_output(["git", "remote", "get-url", "origin"], cwd=REPO).decode().strip()
+    path = url.split("github.com")[-1].lstrip(":/")
+    return path[:-4] if path.endswith(".git") else path
+
+
+def fetch_release(tag: str, root: Path) -> None:
+    files = payload_files(root)
+    if all(f.is_file() for f in files):
+        return
+    root.mkdir(parents=True, exist_ok=True)
+    if subprocess.run(["which", "gh"], capture_output=True).returncode == 0:
+        gh("release", "download", tag, "--dir", str(root), "--pattern", "payload.*", "--clobber")
+    else:
+        for f in files:
+            subprocess.run(
+                ["curl", "-fL", "-o", str(f),
+                 f"https://github.com/{origin()}/releases/download/{tag}/{f.name}"], check=True)
+    missing = [f.name for f in files if not f.is_file()]
+    if missing:
+        raise SystemExit(f"{tag}: release lacks {missing}")
+    print(f"[fleet] fetched {tag}", flush=True)
+
+
+def cmd_fetch(args) -> int:
+    name = best_hash()
+    if name is None:
+        print("[fleet] no best yet; nothing to fetch", flush=True)
+        return 0
+    meta = json.loads((BENCH / name / "meta.json").read_text())
+    for tag, root in release_tags(name, meta):
+        if not (root / "headers").is_file():
+            raise SystemExit(f"{root}: headers missing from the checkout")
+        fetch_release(tag, root)
+    for policy in ("ppo", "random"):
+        link_baseline(BENCH / name, policy, BASELINE_STORE / baseline_identity(meta) / policy)
+    return 0
 
 
 def main() -> int:
@@ -806,9 +964,11 @@ def main() -> int:
     pp.add_argument("root", type=Path)
     gp = sub.add_parser("gate")
     gp.add_argument("candidate", type=Path)
+    sub.add_parser("publish")
+    sub.add_parser("fetch")
     args = ap.parse_args()
     return {"run": cmd_run, "job": cmd_job, "report": cmd_report,
-            "gate": cmd_gate}[args.cmd](args)
+            "gate": cmd_gate, "publish": cmd_publish, "fetch": cmd_fetch}[args.cmd](args)
 
 
 if __name__ == "__main__":

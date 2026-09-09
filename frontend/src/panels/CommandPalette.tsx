@@ -1,8 +1,8 @@
 import { useMemo, type ReactNode } from 'react';
 import { Command } from 'cmdk';
-import type { EnvId } from '@shared/envs';
+import type { EnvId } from '../data/envs';
 import { nameOf, slugOf } from '../scenes/table';
-import type { Policy, RunDetail, RunIndexEntry } from '@shared/types';
+import type { Policy, RunDetail, RunIndexEntry } from '../data/types';
 import { Panel } from '../glass/Panel';
 import { runLabel, sortRuns } from '../lib/run';
 import { setTransport, transportSnapshot } from '../playback/store';

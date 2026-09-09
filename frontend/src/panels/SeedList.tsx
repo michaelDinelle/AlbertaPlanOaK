@@ -1,7 +1,7 @@
 import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { clsx } from 'clsx';
 import { ArrowUpDown } from 'lucide-react';
-import type { RunDetail } from '@shared/types';
+import type { RunDetail } from '../data/types';
 import { formatCount, formatSigned } from '../lib/format';
 import { heroSeed, sortPermutation } from '../lib/selection';
 import { cycleSortMode, promote, unpromote, useSelection } from '../state/selectionStore';

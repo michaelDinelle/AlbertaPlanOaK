@@ -1,4 +1,4 @@
-import type { EnvId } from '@shared/envs';
+import type { EnvId } from '../data/envs';
 import type { EnvDecoder } from './types';
 
 import { halfCheetahDecoder } from './envs/halfcheetah';

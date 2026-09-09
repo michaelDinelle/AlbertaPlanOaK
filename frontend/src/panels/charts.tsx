@@ -4,7 +4,7 @@ import { motion, useReducedMotion } from 'motion/react';
 import { clsx } from 'clsx';
 import { CartesianGrid, ComposedChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import type { TooltipPayload } from 'recharts/types/state/tooltipSlice';
-import type { Policy } from '@shared/types';
+import type { Policy } from '../data/types';
 import { formatRate, formatStep } from '../lib/format';
 import { currentPosition, subscribePosition, throttled } from '../playback/store';
 

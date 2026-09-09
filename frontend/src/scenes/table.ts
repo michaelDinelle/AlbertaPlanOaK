@@ -1,5 +1,5 @@
-import type { EnvId } from '@shared/envs';
-import { ENV_IDS } from '@shared/envs';
+import type { EnvId } from '../data/envs';
+import { ENV_IDS } from '../data/envs';
 import type { SceneRegistry } from '@kit/types';
 import type { Palette, PaletteName } from '@kit/tokens';
 

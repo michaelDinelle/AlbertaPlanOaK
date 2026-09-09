@@ -1,8 +1,8 @@
-import type { Policy } from '@shared/types';
+import type { Policy } from '../data/types';
 import { currentPosition, subscribePosition } from '../playback/store';
 import type { CumulativeReward } from './derive';
 import { penCurves, type PenCurves } from './pen';
-import type { RewardStream } from './rewardStream';
+import type { RewardsCache } from '../data/rewards';
 
 export type PenKey = Policy | 'best';
 export const PEN_KEYS: readonly PenKey[] = ['oak', 'ppo', 'random', 'best'];
@@ -13,7 +13,7 @@ const AXIS_TOLERANCE = 0.04;
 
 export interface PenSource {
   cumulative: CumulativeReward;
-  stream: RewardStream | null;
+  stream: RewardsCache | null;
 }
 
 export interface PenInputs {

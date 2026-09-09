@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useSyncExternalStore, type RefObject } from 'react';
 import { clsx } from 'clsx';
 import { Area, Line } from 'recharts';
-import type { Policy, RunDetail } from '@shared/types';
+import type { Policy, RunDetail } from '../data/types';
 import { formatStep } from '../lib/format';
 import { envLanes } from '../lib/run';
 import { heroSeed } from '../lib/selection';
@@ -11,9 +11,8 @@ import { STR } from '../strings';
 import { retentionWindow, type CumulativeReward } from '../tape/derive';
 import type { PenCurves } from '../tape/pen';
 import { PEN_KEYS, penStore, type PenKey, type PenSource } from '../tape/penStore';
-import { RewardStream } from '../tape/rewardStream';
-import { rewardUrl } from '../data/api';
-import { useTapeSnapshot, type DeriveSpec } from '../tape/store';
+import { RewardsCache } from '../data/rewards';
+import { useTapeProgress, useTapeSnapshot, type DeriveSpec } from '../tape/store';
 import {
   AXIS_WIDTH,
   CHART_MARGIN,
@@ -50,19 +49,19 @@ const TRAIL_WINDOWS = 100;
 const PEN_SAMPLES = 192;
 const CHIP_INTERVAL_MS = 100;
 
-const rewardStreams = new Map<string, RewardStream>();
+const rewardCaches = new Map<string, RewardsCache>();
 
-function useRewardStream(runId: string | null, envId: string | null): RewardStream | null {
+function useRewardStream(run: RunDetail | null, envId: string | null, windowSteps: number): RewardsCache | null {
   return useMemo(() => {
-    if (runId === null || envId === null) return null;
-    const url = rewardUrl(runId, envId, 'pack');
-    let have = rewardStreams.get(url);
+    if (run === null || envId === null) return null;
+    const key = `${run.id}|${envId}`;
+    let have = rewardCaches.get(key);
     if (have === undefined) {
-      have = new RewardStream(url, rewardUrl(runId, envId, 'idx'));
-      rewardStreams.set(url, have);
+      have = new RewardsCache(run.id, envId, envLanes(run.meta, envId).lanes.length, windowSteps);
+      rewardCaches.set(key, have);
     }
     return have;
-  }, [runId, envId]);
+  }, [run, envId, windowSteps]);
 }
 
 function sparseOrigin(points: readonly { x: number }[], horizon: number): number {
@@ -422,11 +421,12 @@ export function RewardView({
     random: useTapeSnapshot(randomSpec === null ? null : runs.random?.id ?? null, envId, 'cumulativeReward', randomSpec),
     best: useTapeSnapshot(bestSpec === null ? null : best?.id ?? null, envId, 'cumulativeReward', bestSpec),
   };
-  const streams: Record<PenKey, RewardStream | null> = {
-    oak: useRewardStream(slicing ? runs.oak?.id ?? null : null, envId),
-    ppo: useRewardStream(slicing ? runs.ppo?.id ?? null : null, envId),
-    random: useRewardStream(slicing ? runs.random?.id ?? null : null, envId),
-    best: useRewardStream(slicing ? best?.id ?? null : null, envId),
+  const windowSteps = Math.max(1, useTapeProgress(active?.id ?? null)?.windowSteps ?? 1024);
+  const streams: Record<PenKey, RewardsCache | null> = {
+    oak: useRewardStream(slicing ? runs.oak : null, envId, windowSteps),
+    ppo: useRewardStream(slicing ? runs.ppo : null, envId, windowSteps),
+    random: useRewardStream(slicing ? runs.random : null, envId, windowSteps),
+    best: useRewardStream(slicing ? best : null, envId, windowSteps),
   };
 
   const hero = heroSeed(sel.selection);

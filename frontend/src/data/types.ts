@@ -40,7 +40,6 @@ export interface RunMeta {
   geometry?: RunGeometry[];
 }
 
-export const TAPE_MAGIC = 0x544b414f;
 export const DEATH_DETECTORS: readonly string[] = [
   'alive', 'envReward', 'policyMean', 'envObs', 'paramNonFinite',
   'paramExplosion', 'kernelRho', 'envError',

@@ -10,7 +10,6 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "paths": {
-      "@shared/*": ["./shared/*"],
       "@sim/*": ["./src/sim/*"],
       "@kit/*": ["./src/kit/*"]
     }

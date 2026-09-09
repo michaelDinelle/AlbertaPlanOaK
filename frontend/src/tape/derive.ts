@@ -1,7 +1,18 @@
-import type { RunMeta } from '@shared/types';
-import { DEATH_DETECTORS } from '@shared/types';
+import type { RunMeta } from '../data/types';
+import { DEATH_DETECTORS } from '../data/types';
 import { envLanes } from '../lib/run';
-import { fieldIndex, tapeStep, tapeValue, type Tape } from './parse';
+
+export interface Tape {
+  rows: number;
+  laneCount: number;
+  stepEnd: Float64Array;
+  wallSeconds: Float32Array;
+  column(name: string): Float32Array;
+}
+
+function tapeValue(tape: Tape, column: Float32Array, row: number, lane: number): number {
+  return column[row * tape.laneCount + lane] ?? NaN;
+}
 
 export function percentileSorted(sorted: readonly number[], q: number): number {
   const n = sorted.length;
@@ -38,14 +49,14 @@ export interface LaneDeath {
 
 export function laneDeath(tape: Tape, lane: number): LaneDeath | null {
   if (tape.rows === 0) return null;
-  const step = tapeStep(tape, fieldIndex(tape, 'deathStep'), tape.rows - 1, lane);
+  const step = tapeValue(tape, tape.column('deathStep'), tape.rows - 1, lane);
   if (!Number.isFinite(step)) return null;
-  const code = tapeValue(tape, fieldIndex(tape, 'deathDetector'), tape.rows - 1, lane);
+  const code = tapeValue(tape, tape.column('deathDetector'), tape.rows - 1, lane);
   return { step, detector: DEATH_DETECTORS[code] ?? 'envError' };
 }
 
 export function lastFiniteReward(tape: Tape, lane: number): { value: number; step: number } | null {
-  const f = fieldIndex(tape, 'rewardSum');
+  const f = tape.column('rewardSum');
   for (let r = tape.rows - 1; r >= 0; r--) {
     const v = tapeValue(tape, f, r, lane);
     if (Number.isFinite(v)) return { value: v, step: tape.stepEnd[r] ?? 0 };
@@ -103,7 +114,7 @@ function binnedRates(
 }
 
 export function windowedRates(tape: Tape, lanes: readonly number[], win: number): BinnedRates {
-  const f = fieldIndex(tape, 'rewardSum');
+  const f = tape.column('rewardSum');
   const priorRow = new Int32Array(tape.rows);
   const spans = new Float64Array(tape.rows);
   let j = 0;
@@ -129,7 +140,7 @@ export interface CumulativeReward {
 }
 
 export function cumulativeReward(tape: Tape, lanes: readonly number[]): CumulativeReward {
-  const f = fieldIndex(tape, 'rewardSum');
+  const f = tape.column('rewardSum');
   const x: number[] = [];
   for (let r = 0; r < tape.rows; r++) x.push(tape.stepEnd[r] ?? 0);
   const perLane = lanes.map((lane) => {
@@ -141,7 +152,7 @@ export function cumulativeReward(tape: Tape, lanes: readonly number[]): Cumulati
 }
 
 export function rhoBinned(tape: Tape, lanes: readonly number[]): BinnedRates {
-  const f = fieldIndex(tape, 'rho');
+  const f = tape.column('rho');
   return binnedRates(tape, lanes, (row, lane) => tapeValue(tape, f, row, lane));
 }
 
@@ -152,7 +163,7 @@ export interface RetentionResult {
 }
 
 export function laneRetention(tape: Tape, lane: number, horizon: number): RetentionResult | null {
-  const f = fieldIndex(tape, 'rewardSum');
+  const f = tape.column('rewardSum');
   const win = retentionWindow(horizon);
   let peak = -Infinity;
   let end: number | null = null;
@@ -181,7 +192,7 @@ export interface SurvivalSeries {
 }
 
 export function survivalSeries(tape: Tape, lanes: readonly number[]): SurvivalSeries {
-  const f = fieldIndex(tape, 'rewardSum');
+  const f = tape.column('rewardSum');
   const deaths = lanes.map((lane) => laneDeath(tape, lane)?.step ?? Infinity);
   const x: number[] = [];
   const surviving: number[] = [];
@@ -235,16 +246,3 @@ export function buildSeedRows(
   })).sort((a, b) => a.seed - b.seed);
 }
 
-export function tapeWindowSteps(tape: Pick<Tape, 'stepStart' | 'stepEnd'>): number {
-  const window = (tape.stepEnd[0] ?? 0) - (tape.stepStart[0] ?? 0);
-  return window > 0 ? window : 1;
-}
-
-export function nextRowDueMs(tape: Pick<Tape, 'rows' | 'wallSeconds'> | null): number {
-  if (tape === null || tape.rows < 2) return 0;
-  const last = tape.wallSeconds[tape.rows - 1];
-  const prev = tape.wallSeconds[tape.rows - 2];
-  if (last === undefined || prev === undefined) return 0;
-  const perRow = (last - prev) * 1000;
-  return Number.isFinite(perRow) && perRow > 0 ? perRow : 0;
-}

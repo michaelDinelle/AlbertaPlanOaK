@@ -4,11 +4,10 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "bun dev.ts",
+    "dev": "vite --host",
     "build": "vite build",
-    "start": "NODE_ENV=production bun server/server.ts",
     "test": "bun test",
-    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p server/tsconfig.json"
+    "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
     "@tanstack/react-query": "5",

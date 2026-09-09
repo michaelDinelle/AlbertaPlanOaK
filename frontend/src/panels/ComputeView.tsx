@@ -1,9 +1,9 @@
 import { useMemo } from 'react';
 import { clsx } from 'clsx';
 import { Line } from 'recharts';
-import { isEnvId } from '@shared/envs';
+import { isEnvId } from '../data/envs';
 import { nameOf } from '../scenes/table';
-import type { Policy, RunDetail } from '@shared/types';
+import type { Policy, RunDetail } from '../data/types';
 import { useSelection } from '../state/selectionStore';
 import { STR } from '../strings';
 import { Chip, Label, POLICY_ORDER, POLICY_TOKENS, TXT, TimeChart, lineProps, seriesRows } from './charts';

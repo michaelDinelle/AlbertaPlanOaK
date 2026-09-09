@@ -1,4 +1,4 @@
-import type { Policy } from '@shared/types';
+import type { Policy } from './data/types';
 
 export const STR = {
   app: 'OaK',
@@ -195,7 +195,7 @@ export const STR = {
   },
   notices: {
     apiDown: 'Could not reach the server',
-    apiHint: 'Start it with bun run dev — the page talks to it at /api.',
+    apiHint: 'Start OaK from the repo root — the page talks to it at /api.',
     noRun: 'No run to show yet',
     noRunHint: 'The stage plays recorded seeds and none were found.',
     loadFailed: (id: string) => `Could not load ${id}`,

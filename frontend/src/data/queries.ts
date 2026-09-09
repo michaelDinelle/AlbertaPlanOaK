@@ -1,5 +1,5 @@
 import { queryOptions } from '@tanstack/react-query';
-import { fetchRunDetail, fetchRuns } from './api';
+import { fetchRunDetail, fetchRuns } from './oak';
 
 export const RUN_POLL_MS = 5000;
 

@@ -1,4 +1,4 @@
-import type { EnvId } from '@shared/envs';
+import type { EnvId } from '../data/envs';
 import type { EnvFrame, EnvGeometry, EventStream, SimEvent } from '@sim/types';
 import type { FrameState } from '@kit/types';
 

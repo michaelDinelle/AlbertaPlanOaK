@@ -1,8 +1,8 @@
 import { useMemo } from 'react';
 import { clsx } from 'clsx';
-import { isEnvId } from '@shared/envs';
+import { isEnvId } from '../data/envs';
 import { nameOf } from '../scenes/table';
-import type { Ci95, Policy, RunDetail } from '@shared/types';
+import type { Ci95, Policy, RunDetail } from '../data/types';
 import { formatPercent, formatRate } from '../lib/format';
 import { selectEnv, useSelection } from '../state/selectionStore';
 import { STR } from '../strings';

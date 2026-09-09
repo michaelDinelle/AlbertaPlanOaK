@@ -1,6 +1,6 @@
 import { clsx } from 'clsx';
 import { Info, PanelRightClose } from 'lucide-react';
-import type { Policy, RunDetail } from '@shared/types';
+import type { Policy, RunDetail } from '../data/types';
 import { Panel } from '../glass/Panel';
 import { Hotkey } from './charts';
 import { STR } from '../strings';

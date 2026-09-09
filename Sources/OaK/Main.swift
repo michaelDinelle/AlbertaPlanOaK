@@ -126,16 +126,13 @@ struct AblationSpec {
   ]
   let names: [String]
   var label: String { names.isEmpty ? "none" : names.joined(separator: ",") }
-  static func fromEnv(_ env: [String: String] = ProcessInfo.processInfo.environment) throws
-    -> AblationSpec
-  {
-    let raw = env["OAK_ABLATE"] ?? "none"
+  static func parse(_ raw: String) throws -> AblationSpec {
     var seen = Set<String>()
     for item in raw.split(separator: ",") {
       let name = String(item).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
       if name.isEmpty || name == "none" { continue }
       guard ordered.contains(name) else {
-        throw err("Unknown OAK_ABLATE entry '\(name)'. Known: none,\(ordered.joined(separator: ","))")
+        throw err("Unknown ablation '\(name)'. Known: none,\(ordered.joined(separator: ","))")
       }
       seen.insert(name)
     }
@@ -147,6 +144,63 @@ struct AblationSpec {
       constants.setConstantValue(
         &enabled, type: .bool, index: Self.functionConstantIndex[name]!)
     }
+  }
+}
+
+struct BenchmarkRequest {
+  let policy: String
+  let seeds: [Int]
+  let steps: Int
+  let envs: String
+  let ablation: String
+  let root: URL
+  let timing: Bool
+
+  let resume: URL?
+
+  init(json: Data) throws {
+    guard let obj = try JSONSerialization.jsonObject(with: json) as? [String: Any],
+      let root = obj["root"] as? String
+    else { throw err("benchmark request needs root") }
+    self.root = URL(fileURLWithPath: root, isDirectory: true)
+    timing = obj["timing"] as? Bool ?? false
+    if let resumePath = obj["resume"] as? String {
+      let checkpoint = URL(fileURLWithPath: resumePath)
+      let parent = try RunMeta(root: checkpoint.deletingLastPathComponent())
+      resume = checkpoint
+      policy = parent.policy
+      seeds = parent.seeds
+      steps = parent.steps
+      envs = parent.envLanes.map { "\($0.envId):\($0.lanes.count)" }.joined(separator: ",")
+      ablation = parent.raw["ablationLabel"] as? String ?? "none"
+      return
+    }
+    guard let policy = obj["policy"] as? String, let seeds = obj["seeds"] as? [Int],
+      let steps = obj["steps"] as? Int, let envs = obj["envs"] as? String
+    else { throw err("benchmark request needs policy, seeds, steps, envs, root") }
+    resume = nil
+    self.policy = policy
+    self.seeds = seeds
+    self.steps = steps
+    self.envs = envs
+    ablation = obj["ablation"] as? String ?? "none"
+  }
+
+  static func fromEnvironment(_ env: [String: String] = ProcessInfo.processInfo.environment) throws -> BenchmarkRequest {
+    let seed0 = env["OAK_BENCH_SEED_START"].flatMap(Int.init) ?? 0
+    let count = env["OAK_BENCH_SEED_COUNT"].flatMap(Int.init) ?? 1024
+    let seeds = env["OAK_BENCH_SEEDS"]?.split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
+    guard let envs = env["OAK_BENCH_ENVS"], let storage = env["OAK_METRICS_STORAGE"] else {
+      throw err("OAK_BENCH_ENVS and OAK_METRICS_STORAGE are required to start a run from the environment")
+    }
+    let obj: [String: Any] = [
+      "policy": env["OAK_BENCH_POLICY"] ?? "oak",
+      "seeds": (seeds?.isEmpty == false ? seeds! : Array(seed0..<(seed0 + count))),
+      "steps": env["OAK_BENCH_STEPS"].flatMap(Int.init) ?? 1_000_000,
+      "envs": envs, "ablation": env["OAK_ABLATE"] ?? "none",
+      "root": (storage as NSString).expandingTildeInPath, "timing": env["OAK_FLEET_TIMING"] == "1",
+    ]
+    return try BenchmarkRequest(json: try JSONSerialization.data(withJSONObject: obj))
   }
 }
 
@@ -315,6 +369,30 @@ final class EnvironmentStorage {
   }
 
   func needsCapacity(through step: Int) -> Bool { step > safeThroughStep }
+
+  private let shape = UnsafeMutablePointer<UInt64>.allocate(capacity: 2)
+  var checkpointRegions: [CheckpointRegion] {
+    shape[0] = UInt64(slots)
+    shape[1] = UInt64(safeThroughStep)
+    return [
+      CheckpointRegion(name: "envShape", base: UnsafeMutableRawPointer(shape), bytes: 16),
+      CheckpointRegion(name: "envOffsets", base: offsets.b.contents(), bytes: offsets.b.length),
+      CheckpointRegion(name: "envArena", base: arena.b.contents(), bytes: arena.b.length),
+    ]
+  }
+
+  func restore(_ saved: [String: Data]) throws {
+    guard let shapeData = saved["envShape"], shapeData.count == 16 else { throw err("checkpoint lacks envShape") }
+    let words = shapeData.withUnsafeBytes { Array($0.bindMemory(to: UInt64.self)) }
+    let savedSlots = Int(words[0])
+    if savedSlots != slots {
+      let (_, count) = try Self.layout(fixed, entries, savedSlots)
+      arena = Shared<UInt32>(arena.b.device, count, 0)
+      slots = savedSlots
+    }
+    safeThroughStep = Int(words[1])
+    try Checkpoint.restore(saved, into: Array(checkpointRegions.dropFirst()))
+  }
 
   private static func slot(_ high: UInt32, _ low: UInt32, _ mask: Int) -> Int {
     var key = UInt64(high) << 32 | UInt64(low)
@@ -639,20 +717,6 @@ func jsonLine(_ obj: [String: Any]) throws -> Data {
   d.append(0x0A)
   return d
 }
-func metricsRoot() -> URL {
-  if let r = ProcessInfo.processInfo.environment["OAK_METRICS_STORAGE"],
-    !r.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-  {
-    return URL(fileURLWithPath: (r as NSString).expandingTildeInPath, isDirectory: true)
-  }
-  let id =
-    ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
-    + "-\(ProcessInfo.processInfo.processIdentifier)"
-  return URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent(
-    ".oak-benchmarks/\(id)", isDirectory: true)
-}
-
-
 struct RecordField {
   let idx: Int
   let scale: Double
@@ -733,10 +797,11 @@ final class RecordWriter: @unchecked Sendable {
 
   let codec: RecordCodec
   private var buf: [UInt8] = []
-  private(set) var closed = false
+  private(set) var closed: Bool
 
-  init(envKind: UInt32) throws {
+  init(envKind: UInt32, closed: Bool) throws {
     self.codec = try RecordCodec.table(envKind)
+    self.closed = closed
   }
 
   func encodeChunk(
@@ -981,151 +1046,6 @@ final class RecordWriter: @unchecked Sendable {
   }
 }
 
-final class RewardStreamWriter {
-  static let packMagic: UInt32 = 0x4B50_5752
-  static let idxMagic: UInt32 = 0x5849_5752
-  private final class Block {
-    let pack: FileHandle
-    let idx: FileHandle
-    let firstLane: Int
-    let laneCount: Int
-    var packBytes: Int
-    init(pack: FileHandle, idx: FileHandle, firstLane: Int, laneCount: Int, packBytes: Int) {
-      self.pack = pack
-      self.idx = idx
-      self.firstLane = firstLane
-      self.laneCount = laneCount
-      self.packBytes = packBytes
-    }
-  }
-  private let blocks: [Block]
-
-  init(root: URL, laneEnvKinds: [UInt32], envIdsByKind: [String]) throws {
-    let dir = root.appendingPathComponent("reward")
-    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-    var blocks: [Block] = []
-    var lane = 0
-    while lane < laneEnvKinds.count {
-      let kind = laneEnvKinds[lane]
-      var end = lane
-      while end < laneEnvKinds.count && laneEnvKinds[end] == kind { end += 1 }
-      let name = envIdsByKind[Int(kind)]
-      let packURL = dir.appendingPathComponent("\(name).pack")
-      let idxURL = dir.appendingPathComponent("\(name).idx")
-      FileManager.default.createFile(atPath: packURL.path, contents: nil)
-      FileManager.default.createFile(atPath: idxURL.path, contents: nil)
-      let pack = try FileHandle(forWritingTo: packURL)
-      let idx = try FileHandle(forWritingTo: idxURL)
-      var packHead = Data()
-      packHead.appendLE(Self.packMagic)
-      try pack.write(contentsOf: packHead)
-      var idxHead = Data()
-      for v: UInt32 in [Self.idxMagic, UInt32(end - lane)] { idxHead.appendLE(v) }
-      try idx.write(contentsOf: idxHead)
-      blocks.append(Block(pack: pack, idx: idx, firstLane: lane, laneCount: end - lane, packBytes: packHead.count))
-      lane = end
-    }
-    self.blocks = blocks
-  }
-
-  func appendWindow(_ rp: UnsafePointer<Float>, capacity: Int, stepStart: Int, stepCount: Int, laneCount: Int) throws {
-    for block in blocks {
-      var rows = [Float](repeating: 0, count: stepCount * block.laneCount)
-      for i in 0..<stepCount {
-        let plane = rp + ((stepStart + i) % capacity) * recordFloats * laneCount + recordRewardField * laneCount
-        for l in 0..<block.laneCount { rows[i * block.laneCount + l] = plane[block.firstLane + l] }
-      }
-      let compressed = try rows.withUnsafeBufferPointer { try (Data(buffer: $0) as NSData).compressed(using: .zlib) as Data }
-      try block.pack.write(contentsOf: compressed)
-      var record = Data()
-      record.appendLE(UInt32(stepStart))
-      record.appendLE(UInt32(stepCount))
-      record.appendLE(UInt64(block.packBytes))
-      record.appendLE(UInt32(compressed.count))
-      try block.idx.write(contentsOf: record)
-      block.packBytes += compressed.count
-    }
-  }
-
-  func close() throws {
-    for block in blocks {
-      try block.pack.close()
-      try block.idx.close()
-    }
-  }
-}
-
-final class PoseTapeWriter {
-  static let packMagic: UInt32 = 0x504B_414F
-  static let idxMagic: UInt32 = 0x494B_414F
-  private let pack: FileHandle
-  private let idx: FileHandle
-  private let encoders: [RecordWriter]
-  private(set) var bytesWritten: Int
-
-  init(root: URL, laneEnvKinds: [UInt32], seeds: [Int]) throws {
-    encoders = try laneEnvKinds.map { try RecordWriter(envKind: $0) }
-    let packURL = root.appendingPathComponent("pose.pack")
-    let idxURL = root.appendingPathComponent("pose.idx")
-    FileManager.default.createFile(atPath: packURL.path, contents: nil)
-    FileManager.default.createFile(atPath: idxURL.path, contents: nil)
-    pack = try FileHandle(forWritingTo: packURL)
-    idx = try FileHandle(forWritingTo: idxURL)
-    var head = Data()
-    for v: UInt32 in [Self.packMagic, UInt32(laneEnvKinds.count)] { head.appendLE(v) }
-    for lane in 0..<laneEnvKinds.count {
-      head.appendLE(laneEnvKinds[lane])
-      head.appendLE(Int64(seeds[lane]))
-    }
-    try pack.write(contentsOf: head)
-    bytesWritten = head.count
-    var ih = Data()
-    for v: UInt32 in [Self.idxMagic, UInt32(laneEnvKinds.count)] { ih.appendLE(v) }
-    try idx.write(contentsOf: ih)
-  }
-
-  func encodeWindow(
-    _ rp: UnsafePointer<Float>, capacity: Int, stepStart: Int, stepCount: Int,
-    onError: (Error) -> Void
-  ) throws {
-    let lanes = encoders.count
-    var chunks: [Data?] = Array(repeating: nil, count: lanes)
-    chunks.withUnsafeMutableBufferPointer { out in
-      let base = out.baseAddress!
-      DispatchQueue.concurrentPerform(iterations: lanes) { slot in
-        do {
-          base[slot] = try encoders[slot].encodeChunk(
-            rp, slot: slot, capacity: capacity, laneCount: lanes,
-            stepStart: stepStart, stepCount: stepCount)
-        } catch {
-          onError(error)
-        }
-      }
-    }
-    var body = Data()
-    var rows = Data()
-    var chunkCount: UInt32 = 0
-    for lane in 0..<chunks.count {
-      guard let c = chunks[lane] else { continue }
-      chunkCount += 1
-      body.append(c)
-      for v: UInt32 in [UInt32(lane), UInt32(c.count)] { rows.appendLE(v) }
-    }
-    var head = Data()
-    for v: UInt32 in [UInt32(stepStart), chunkCount] { head.appendLE(v) }
-    head.appendLE(UInt64(bytesWritten))
-    head.append(rows)
-    try pack.write(contentsOf: body)
-    bytesWritten += body.count
-    try idx.write(contentsOf: head)
-  }
-
-  func close() throws {
-    try pack.close()
-    try idx.close()
-  }
-}
-
 enum DiagMath {
   static func quantile(_ sorted: [Double], _ p: Double) -> Double {
     let n = sorted.count
@@ -1209,65 +1129,20 @@ final class OakDiagHost: @unchecked Sendable {
   }
 }
 
-final class TapeWriter {
-  static let fileMagic: UInt32 = 0x544B_414F
-  static let baseFields = ["rewardSum", "rho", "deathStep", "deathDetector"]
-  let fields: [String]
-  private let handle: FileHandle
-  private let laneCount: Int
-  private let diagCount: Int
-  private var block: [Float]
-
-  init(url: URL, laneCount: Int, diagFields: [String]) throws {
-    FileManager.default.createFile(atPath: url.path, contents: nil)
-    self.handle = try FileHandle(forWritingTo: url)
-    self.laneCount = laneCount
-    self.diagCount = diagFields.count
-    self.fields = Self.baseFields + diagFields
-    self.block = [Float](repeating: 0, count: (Self.baseFields.count + diagCount) * laneCount)
-    let json = try JSONSerialization.data(withJSONObject: ["fields": fields])
-    var head = Data()
-    for v: UInt32 in [Self.fileMagic, UInt32(laneCount), UInt32(json.count)] { head.appendLE(v) }
-    head.append(json)
-    try handle.write(contentsOf: head)
-  }
-
-  func append(snap: UnsafeMutablePointer<LaneSnapshot>, half: Int,
-              deadStep: [Int?], deadDetector: [UInt32?], diag: [Float],
-              stepStart: Int, stepCount: Int, wallSeconds: Double) throws {
-    precondition(diag.count == diagCount * laneCount, "diag matrix shape drifted from the field list")
-    var out = Data(capacity: 12 + fields.count * laneCount * 4)
-    for v: UInt32 in [UInt32(stepStart), UInt32(stepCount)] { out.appendLE(v) }
-    out.appendLE(Float(wallSeconds).bitPattern)
-    var field = 0
-    func push(_ get: (Int, LaneSnapshot) -> Float) {
-      for l in 0..<laneCount { block[field * laneCount + l] = get(l, snap[half * laneCount + l]) }
-      field += 1
-    }
-    push { _, s in s.rewardSum }
-    push { _, s in s.rho }
-    push { l, _ in deadStep[l].map { Float(bitPattern: UInt32($0)) } ?? Float.nan }
-    push { l, _ in deadDetector[l].map { Float($0) } ?? Float.nan }
-    for f in 0..<diagCount {
-      push { l, _ in diag[l * diagCount + f] }
-    }
-    let comp = try block.withUnsafeBufferPointer {
-      try (Data(buffer: $0) as NSData).compressed(using: .zlib) as Data
-    }
-    out.appendLE(UInt32(comp.count))
-    out.append(comp)
-    try handle.write(contentsOf: out)
-  }
-}
-
 @main struct Main {
   static func main() {
     _ = pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0)
     do {
       switch CommandLine.arguments.dropFirst().first {
-      case "benchmark": try benchmark()
+      case nil:
+        let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+        let port = UInt16(ProcessInfo.processInfo.environment["OAK_PORT"] ?? "") ?? 5174
+        try Daemon(
+          bench: cwd.appendingPathComponent(".oak-benchmarks", isDirectory: true),
+          dist: cwd.appendingPathComponent("frontend/dist", isDirectory: true), port: port
+        ).run()
       case "compare-hashes": try compareHashes()
-      default: throw err("Use `OaK benchmark`.")
+      default: throw err("Run `OaK` with no arguments.")
       }
     } catch {
       fputs("\(error)\n", stderr)
@@ -1343,6 +1218,7 @@ final class TapeWriter {
   }
   struct FleetPipes {
     let label: String
+    let checkpointRegions: [CheckpointRegion]
     let encodeInit: (MTLComputeCommandEncoder) -> Void
     let encodeMegastep: (MTLCommandBuffer, Int, Int) -> Void
     let encodeSnapshot: (MTLComputeCommandEncoder, Int) -> Void
@@ -1375,6 +1251,12 @@ final class TapeWriter {
       FleetEnvCfg(
         laneCount: UInt32(B), recordCapacity: UInt32(recordCapacity),
         persistentMask: environment.mask, invObsFloor: 1 / Float(64))
+    }
+    var checkpointRegions: [CheckpointRegion] {
+      [
+        CheckpointRegion(name: "lanes", base: laneBuf.contents(), bytes: laneBuf.length),
+        CheckpointRegion(name: "diagAccum", base: diagAccumBuf.contents(), bytes: diagAccumBuf.length),
+      ] + environment.checkpointRegions
     }
     func bind(_ enc: MTLComputeCommandEncoder, _ pipe: MTLComputePipelineState, _ resources: [MTLBuffer], kind: Engine.Kind? = nil) {
       enc.setComputePipelineState(pipe)
@@ -1577,8 +1459,18 @@ final class TapeWriter {
     }
     precondition(2 * diagHalf * 4 <= bufs.diagOutBuf.length, "diagOut arena undersized")
     let diagPtr = bufs.diagOutBuf.contents().bindMemory(to: Float.self, capacity: 2 * diagHalf)
+    let oakRegions = [
+      CheckpointRegion(name: "params", base: engine.params.b.contents(), bytes: engine.params.b.length),
+      CheckpointRegion(name: "state", base: engine.state.b.contents(), bytes: engine.state.b.length),
+      CheckpointRegion(name: "uints", base: engine.uints.b.contents(), bytes: engine.uints.b.length),
+      CheckpointRegion(name: "scalars", base: engine.scalarsB.contents(), bytes: engine.scalarsB.length),
+      CheckpointRegion(name: "diagPrevAge", base: UnsafeMutableRawPointer(diagHost.prevAge), bytes: max(laneRanks.reduce(0, +), 1) * 4),
+      CheckpointRegion(name: "diagPrevBirths", base: UnsafeMutableRawPointer(diagHost.prevBirths), bytes: laneRanks.count * 4),
+      CheckpointRegion(name: "diagHasPrev", base: UnsafeMutableRawPointer(diagHost.hasPrev), bytes: laneRanks.count),
+    ]
     return FleetPipes(
       label: "oak",
+      checkpointRegions: oakRegions,
       encodeInit: { enc in
         for kd in engine.kinds {
           bufs.bind(enc, initPipe, res, kind: kd)
@@ -1704,7 +1596,7 @@ final class TapeWriter {
   }
   static func fleetGPU(
     _ policy: String, _ seeds: [Int], _ steps: Int, _ root: URL, _ laneEnvs: [String],
-    _ ablations: AblationSpec
+    _ ablations: AblationSpec, timing: Bool, control: LiveControl, resume: URL?
   ) throws {
     guard laneEnvs.count == seeds.count else {
       throw err("laneEnvs (\(laneEnvs.count)) must match seed count (\(seeds.count)).")
@@ -1759,9 +1651,22 @@ final class TapeWriter {
     } else {
       pipes = try baselinePipes(policy, lib, dev, bufs, envTable, laneEnvKinds, e)
     }
+    var restore: LoopRestore? = nil
+    if let resume {
+      let saved = try Checkpoint.load(resume)
+      guard saved.laneCount == seeds.count else {
+        throw err("checkpoint holds \(saved.laneCount) lanes, the run has \(seeds.count)")
+      }
+      try bufs.environment.restore(saved.regions)
+      try Checkpoint.restore(saved.regions, into: bufs.checkpointRegions.filter { !$0.name.hasPrefix("env") } + pipes.checkpointRegions)
+      restore = try LoopRestore(step: saved.step, laneCount: seeds.count, regions: saved.regions)
+      Self.pendingMeta["parent"] = resume.deletingLastPathComponent().lastPathComponent
+      Self.pendingMeta["startStep"] = saved.step
+      try Self.writeRunMeta(root, envTable)
+    }
     let gpuSeconds = try runFleetLoop(
       q, bufs, pipes, seeds: seeds, steps: steps, root: root,
-      laneEnvKinds: laneEnvKinds)
+      laneEnvKinds: laneEnvKinds, timing: timing, control: control, restore: restore)
     Self.pendingMeta["environmentMemoryBytes"] = bufs.envStateBuf.length
     Self.pendingMeta["gpuSeconds"] = gpuSeconds
     Self.pendingMeta["stepsPerSecond"] = gpuSeconds > 0
@@ -1837,8 +1742,12 @@ final class TapeWriter {
       return 2 * spec.naturalO * Diag.k + 3 * Diag.k + Diag.k * spec.actionCount
         + spec.actionCount + 1 + (box ? spec.actionCount : 0)
     }
+    let ppoRegions = zip(["ppoParams", "ppoAdam", "ppoRollout", "ppoScratch", "ppoState"], ppoBufs).map {
+      CheckpointRegion(name: $0, base: $1.contents(), bytes: $1.length)
+    }
     return FleetPipes(
       label: policy,
+      checkpointRegions: ppoRegions,
       encodeInit: { enc in
         bufs.bind(enc, initPipe, ppoBufs)
         enc.setBuffer(bufs.envKindsBuf, offset: 0, index: OakBuf.aux0.rawValue)
@@ -1906,15 +1815,17 @@ final class TapeWriter {
   }
   static func runFleetLoop(
     _ q: MTLCommandQueue, _ bufs: FleetBuffers, _ pipes: FleetPipes,
-    seeds: [Int], steps: Int, root: URL, laneEnvKinds: [UInt32]
+    seeds: [Int], steps: Int, root: URL, laneEnvKinds: [UInt32], timing: Bool, control: LiveControl,
+    restore: LoopRestore?
   ) throws -> Double {
     let e = ProcessInfo.processInfo.environment
     let fm = FileManager.default
     let B = bufs.B
     let dev = q.device
     pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0)
-    let poseTape = try PoseTapeWriter(root: root, laneEnvKinds: laneEnvKinds, seeds: seeds)
-    let rewardStream = try RewardStreamWriter(root: root, laneEnvKinds: laneEnvKinds, envIdsByKind: Main.envIdsByKind)
+    let runWriter = try RunWriter(
+      root: root, laneCount: B, steps: steps, laneEnvKinds: laneEnvKinds,
+      diagFields: pipes.diagFields, closed: restore?.closed)
     let maxChunkSteps = bufs.maxChunkSteps
     let windowSteps = bufs.windowSteps
     let recordCapacity = bufs.recordCapacity
@@ -1927,16 +1838,12 @@ final class TapeWriter {
       fm.createFile(atPath: url.path, contents: nil)
       hashHandle = try FileHandle(forWritingTo: url)
     }
-    let tape = try TapeWriter(
-      url: root.appendingPathComponent("tape.bin"), laneCount: B, diagFields: pipes.diagFields)
     defer {
       try? hashHandle?.close()
-      try? poseTape.close()
-      try? rewardStream.close()
+      try? runWriter.close()
       staging.deallocate()
     }
-    let timing = e["OAK_FLEET_TIMING"] == "1"
-    do {
+    if restore == nil {
       guard let cb = q.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() else {
         throw err("Failed to encode Metal command.")
       }
@@ -1950,7 +1857,6 @@ final class TapeWriter {
       var deadStep: [Int?]
       var deadDetector: [UInt32?]
       var deadCount = 0
-      var lastDrainStep = 0
       var gpuSeconds = 0.0
       private let errLock = NSLock()
       private var failure: Error?
@@ -1969,6 +1875,29 @@ final class TapeWriter {
       }
     }
     let st = WriterState(B)
+    if let restore {
+      st.deadStep = restore.deadStep
+      st.deadDetector = restore.deadDetector
+      st.deadCount = restore.deadStep.filter { $0 != nil }.count
+    }
+    func saveCheckpoint(_ name: String, step: Int) throws {
+      var dead = st.deadStep.map { $0.map(UInt32.init) ?? UInt32.max }
+      var detector = st.deadDetector.map { $0 ?? UInt32.max }
+      var closed = runWriter.closed.map { UInt8($0 ? 1 : 0) }
+      try dead.withUnsafeMutableBytes { d in
+        try detector.withUnsafeMutableBytes { t in
+          try closed.withUnsafeMutableBytes { c in
+            try Checkpoint.save(
+              root.appendingPathComponent(name), step: step, laneCount: B,
+              regions: bufs.checkpointRegions + pipes.checkpointRegions + [
+                CheckpointRegion(name: "deadStep", base: d.baseAddress!, bytes: d.count),
+                CheckpointRegion(name: "deadDetector", base: t.baseAddress!, bytes: t.count),
+                CheckpointRegion(name: "closed", base: c.baseAddress!, bytes: c.count),
+              ])
+          }
+        }
+      }
+    }
     let writer = DispatchQueue(label: "oak.fleet.gpu.writer")
     let wallStart = DispatchTime.now().uptimeNanoseconds
     func now() -> Double { Double(DispatchTime.now().uptimeNanoseconds - wallStart) / 1e9 }
@@ -1981,29 +1910,6 @@ final class TapeWriter {
           staging + (r % windowSteps) * rowStride,
           rp + (r % recordCapacity) * rowStride,
           rowStride * 4)
-      }
-    }
-    func drainRecords(step: Int) throws {
-      guard step > st.lastDrainStep else { return }
-      let t0 = DispatchTime.now().uptimeNanoseconds
-      let start = st.lastDrainStep
-      let count = step - start
-      let before = timing ? poseTape.bytesWritten : 0
-      try poseTape.encodeWindow(
-        UnsafePointer(staging), capacity: windowSteps, stepStart: start, stepCount: count
-      ) { st.error = $0 }
-      if st.didFail, let e = st.error { throw e }
-      try rewardStream.appendWindow(UnsafePointer(staging), capacity: windowSteps, stepStart: start, stepCount: count, laneCount: B)
-      st.lastDrainStep = step
-      if timing {
-        let ms = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1e6
-        let wrote = poseTape.bytesWritten - before
-        let raw = B * count * recordFloats * 4
-        fputs(
-          String(
-            format: "[record] step %d | %d lanes x %d rows | %.1f ms | %.2f MiB -> %.2f MiB (%.1fx)\n",
-            step, B, count, ms, Double(raw) / 1_048_576,
-            Double(wrote) / 1_048_576, wrote > 0 ? Double(raw) / Double(wrote) : 0), stderr)
       }
     }
     func latchDeaths(half: Int, step: Int) {
@@ -2042,10 +1948,26 @@ final class TapeWriter {
           }
         }
       }
-      try tape.append(
-        snap: snapPtr, half: half, deadStep: st.deadStep, deadDetector: st.deadDetector,
-        diag: diag, stepStart: stepStart, stepCount: step - stepStart, wallSeconds: now())
-      try drainRecords(step: step)
+      let t0 = DispatchTime.now().uptimeNanoseconds
+      let before = runWriter.payload.bytesWritten
+      try runWriter.writeWindow(
+        stepStart: stepStart, stepCount: step - stepStart, wallSeconds: now(),
+        snap: UnsafePointer(snapPtr + half * B), deadStep: st.deadStep,
+        deadDetector: st.deadDetector, diag: diag,
+        records: UnsafePointer(staging), capacity: windowSteps
+      ) { st.error = $0 }
+      if st.didFail, let e = st.error { throw e }
+      if timing {
+        let ms = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1e6
+        let wrote = runWriter.payload.bytesWritten - before
+        let raw = B * (step - stepStart) * recordFloats * 4
+        fputs(
+          String(
+            format: "[record] step %d | %d lanes x %d rows | %.1f ms | %.2f MiB -> %.2f MiB (%.1fx)\n",
+            step, B, step - stepStart, ms, Double(raw) / 1_048_576,
+            Double(wrote) / 1_048_576, wrote > 0 ? Double(raw) / Double(wrote) : 0), stderr)
+      }
+      control.onWindow?(step)
       if timing {
         let alive = B - st.deadCount
         let wall = now()
@@ -2077,8 +1999,8 @@ final class TapeWriter {
     let inflight = DispatchSemaphore(value: 2)
     let windowSlots = DispatchSemaphore(value: 1)
     var snapHalf = 0
-    var lastWindowStep = 0
-    var step = 0
+    var lastWindowStep = restore?.step ?? 0
+    var step = restore?.step ?? 0
     while step < steps {
       tuneLock.lock()
       let n = tunedN
@@ -2088,12 +2010,19 @@ final class TapeWriter {
       let target = min(boundary, step + n)
       let isWindow = target % windowSteps == 0 || target == steps
       let isDump = dumpEvery > 0 && target % dumpEvery == 0
-      if bufs.environment.needsCapacity(through: target) {
+      if bufs.environment.needsCapacity(through: target) || control.pending {
         inflight.wait()
         inflight.wait()
         writer.sync {}
         if let error = st.error { throw error }
-        try bufs.environment.prepare(completedStep: step, throughStep: target)
+        if bufs.environment.needsCapacity(through: target) {
+          try bufs.environment.prepare(completedStep: step, throughStep: target)
+        }
+        let taken = control.take(allowSave: step % windowSteps == 0)
+        for s in taken.signals where s.lane >= 0 && s.lane < B {
+          bufs.environment.arena.p[Int(bufs.environment.offsets.p[s.lane]) + s.word] = s.value
+        }
+        if taken.save { try saveCheckpoint("checkpoint.\(step)", step: step) }
         inflight.signal()
         inflight.signal()
       }
@@ -2160,6 +2089,7 @@ final class TapeWriter {
     inflight.signal()
     inflight.signal()
     if let err = st.error { throw err }
+    try saveCheckpoint("checkpoint", step: step)
     return st.gpuSeconds
   }
   static func compareHashes() throws {
@@ -2238,33 +2168,22 @@ final class TapeWriter {
     print(
       "compare-hashes: \(keys.count) rows match on \(required.joined(separator: ",")).")
   }
-  static func benchmark() throws {
-    let env = ProcessInfo.processInfo.environment
-    let ablations = try AblationSpec.fromEnv(env)
-    let policy = env["OAK_BENCH_POLICY"] ?? "oak"
+  static func benchmark(_ request: BenchmarkRequest, control: LiveControl) throws {
+    let ablations = try AblationSpec.parse(request.ablation)
+    let policy = request.policy
     guard ["oak", "random", "ppo"].contains(policy) else {
-      throw err("OAK_BENCH_POLICY must be one of oak,random,ppo (got \(policy)).")
+      throw err("policy must be one of oak,random,ppo (got \(policy)).")
     }
     guard policy == "oak" || ablations.label == "none" else {
       throw err("Ablations apply only to the oak policy.")
     }
     let fm = FileManager.default
-    let seed0 = env["OAK_BENCH_SEED_START"].flatMap(Int.init) ?? 0
-    let seedValues: [Int]
-    if let explicitSeeds = env["OAK_BENCH_SEEDS"] {
-      let parsed = explicitSeeds.split(separator: ",").compactMap {
-        Int(String($0).trimmingCharacters(in: .whitespaces))
-      }
-      seedValues = parsed.isEmpty
-        ? Array(seed0..<(seed0 + (env["OAK_BENCH_SEED_COUNT"].flatMap(Int.init) ?? 1408)))
-        : parsed
-    } else {
-      seedValues = Array(seed0..<(seed0 + (env["OAK_BENCH_SEED_COUNT"].flatMap(Int.init) ?? 1408)))
-    }
-    let steps = max(env["OAK_BENCH_STEPS"].flatMap(Int.init) ?? 500_000, 1)
-    let raw = (env["OAK_BENCH_ENVS"] ?? "").trimmingCharacters(in: .whitespaces)
+    let seedValues = request.seeds
+    guard !seedValues.isEmpty else { throw err("seeds are required.") }
+    let steps = max(request.steps, 1)
+    let raw = request.envs.trimmingCharacters(in: .whitespaces)
     guard !raw.isEmpty else {
-      throw err("OAK_BENCH_ENVS is required (EnvId:count,... covering every lane).")
+      throw err("envs is required (EnvId:count,... covering every lane).")
     }
     var laneEnvs = [String](repeating: "", count: seedValues.count)
     var entries: [(envId: String, seedStart: Int, seedEnd: Int)] = []
@@ -2274,23 +2193,22 @@ final class TapeWriter {
       guard parts.count == 2, let count = Int(parts[1].trimmingCharacters(in: .whitespaces)),
         count > 0
       else {
-        throw err("Bad OAK_BENCH_ENVS entry '\(item)' (expected EnvId:count).")
+        throw err("Bad envs entry '\(item)' (expected EnvId:count).")
       }
       let name = String(parts[0]).trimmingCharacters(in: .whitespaces)
       _ = try Main.envKind(name)
       guard offset + count <= seedValues.count else {
         throw err(
-          "OAK_BENCH_ENVS schedule overflows the fleet: \(offset + count) lanes > B=\(seedValues.count)."
-        )
+          "envs schedule overflows the fleet: \(offset + count) lanes > B=\(seedValues.count).")
       }
       for i in 0..<count { laneEnvs[offset + i] = name }
       entries.append((name, seedValues[offset], seedValues[offset + count - 1]))
       offset += count
     }
     guard offset == seedValues.count else {
-      throw err("OAK_BENCH_ENVS schedule covers \(offset) of B=\(seedValues.count) lanes.")
+      throw err("envs schedule covers \(offset) of B=\(seedValues.count) lanes.")
     }
-    var dir = metricsRoot()
+    let dir = request.root
     let lockDir = URL(fileURLWithPath: fm.currentDirectoryPath).appendingPathComponent(
       ".oak-benchmarks", isDirectory: true)
     try fm.createDirectory(at: lockDir, withIntermediateDirectories: true)
@@ -2305,15 +2223,10 @@ final class TapeWriter {
     }
     if fm.fileExists(atPath: dir.path),
       !(try fm.contentsOfDirectory(atPath: dir.path).filter {
-        $0 != ".DS_Store" && $0 != "identity.json" && $0 != "baselines"
+        $0 != ".DS_Store" && $0 != "identity.json" && $0 != "baselines" && $0 != "run.log"
       }).isEmpty
     {
-      if env["OAK_METRICS_STORAGE"] != nil {
-        throw err("OAK_METRICS_STORAGE points at non-empty \(dir.path); refusing to write beside existing data.")
-      }
-      dir = URL(
-        fileURLWithPath: "\(dir.path)-\(ProcessInfo.processInfo.processIdentifier)",
-        isDirectory: true)
+      throw err("\(dir.path) is not empty; refusing to write beside existing data.")
     }
     try fm.createDirectory(at: dir, withIntermediateDirectories: true)
     Self.pendingMeta = [
@@ -2330,6 +2243,8 @@ final class TapeWriter {
     fputs(
       "OaK fleet: policy=\(policy) B=\(seedValues.count) lanes × \(steps) steps on \(envDesc) (ablation=\(ablations.label), dir=\(dir.path))\n",
       stderr)
-    try fleetGPU(policy, seedValues, steps, dir, laneEnvs, ablations)
+    try fleetGPU(
+      policy, seedValues, steps, dir, laneEnvs, ablations, timing: request.timing, control: control,
+      resume: request.resume)
   }
 }

@@ -1,6 +1,18 @@
 import { useMemo, useSyncExternalStore } from 'react';
-import type { EnvScheduleEntry } from '@shared/types';
-import type { BinnedRates, CumulativeReward, SeedRow, SurvivalSeries } from './derive';
+import type { EnvScheduleEntry } from '../data/types';
+import { fetchSeries, follow } from '../data/oak';
+import {
+  buildSeedRows,
+  cumulativeReward,
+  rhoBinned,
+  survivalSeries,
+  windowedRates,
+  type BinnedRates,
+  type CumulativeReward,
+  type SeedRow,
+  type SurvivalSeries,
+  type Tape,
+} from './derive';
 
 export interface DeriveResults {
   rates: BinnedRates;
@@ -27,29 +39,107 @@ export type DeriveSpec =
 
 export interface TapeProgress {
   rows: number;
-  byteLength: number;
   lastStep: number;
-  nextRowDueMs: number;
   windowSteps: number;
 }
 
-export type WorkerCall =
-  | { op: 'tail'; runId: string }
-  | { op: 'derive'; runId: string; spec: DeriveSpec };
+export const TAPE_COLUMNS = ['rewardSum', 'rho', 'deathStep', 'deathDetector'] as const;
 
-export type WorkerRequest = WorkerCall & { id: number };
+interface SeriesCache {
+  runId: string;
+  tape: Tape | null;
+  columns: Map<string, number[]>;
+  ends: number[];
+  wall: number[];
+  loading: Promise<void> | null;
+  error: string | null;
+  columnOrder: string[] | null;
+}
 
-export type WorkerResponse =
-  | { id: number; ok: true; progress: TapeProgress; result?: DeriveResults[DeriveMode] }
-  | { id: number; ok: false; error: string };
+const caches = new Map<string, SeriesCache>();
+
+function cacheFor(runId: string): SeriesCache {
+  let cache = caches.get(runId);
+  if (cache === undefined) {
+    cache = { runId, tape: null, columns: new Map(), ends: [], wall: [], loading: null, error: null, columnOrder: null };
+    caches.set(runId, cache);
+  }
+  return cache;
+}
+
+function rebuildTape(cache: SeriesCache): void {
+  const rows = cache.ends.length;
+  const first = cache.columns.get(TAPE_COLUMNS[0]);
+  if (first === undefined || rows === 0) {
+    cache.tape = null;
+    return;
+  }
+  const laneCount = first.length / rows;
+  const columns = new Map<string, Float32Array>();
+  for (const [name, values] of cache.columns) columns.set(name, Float32Array.from(values));
+  cache.tape = {
+    rows,
+    laneCount,
+    stepEnd: Float64Array.from(cache.ends),
+    wallSeconds: Float32Array.from(cache.wall),
+    column(name: string) {
+      const c = columns.get(name);
+      if (c === undefined) throw new Error(`run has no column ${name}`);
+      return c;
+    },
+  };
+  recordProgress(cache.runId, {
+    rows,
+    lastStep: cache.ends[rows - 1] ?? 0,
+    windowSteps: rows > 1 ? (cache.ends[rows - 1] ?? 0) - (cache.ends[rows - 2] ?? 0) : cache.ends[0] ?? 1,
+  });
+}
+
+function load(cache: SeriesCache): Promise<void> {
+  if (cache.loading !== null) return cache.loading;
+  cache.loading = (async () => {
+    try {
+      const series = await Promise.all(TAPE_COLUMNS.map((column) => fetchSeries(cache.runId, column)));
+      const head = series[0]!;
+      cache.ends = Array.from(head.ends);
+      cache.wall = Array.from(head.wall);
+      cache.columns.clear();
+      TAPE_COLUMNS.forEach((column, i) => cache.columns.set(column, Array.from(series[i]!.values)));
+      cache.error = null;
+      rebuildTape(cache);
+    } catch (error) {
+      cache.error = error instanceof Error ? error.message : String(error);
+    } finally {
+      cache.loading = null;
+    }
+    refreshRun(cache.runId);
+  })();
+  return cache.loading;
+}
+
+function appendWindow(cache: SeriesCache, end: number, wall: number, values: Float32Array): void {
+  const order = cache.columnOrder;
+  if (order === null || cache.tape === null) return;
+  if (end <= (cache.ends[cache.ends.length - 1] ?? -1)) return;
+  const laneCount = cache.tape.laneCount;
+  if (values.length !== order.length * laneCount) return;
+  if (TAPE_COLUMNS.some((column) => order.indexOf(column) < 0 || !cache.columns.has(column))) return;
+  cache.ends.push(end);
+  cache.wall.push(wall);
+  for (const column of TAPE_COLUMNS) {
+    const f = order.indexOf(column);
+    const dst = cache.columns.get(column)!;
+    for (let lane = 0; lane < laneCount; lane++) dst.push(values[f * laneCount + lane] ?? NaN);
+  }
+  rebuildTape(cache);
+  refreshRun(cache.runId);
+}
 
 interface Slot {
   runId: string;
   spec: DeriveSpec;
   data: DeriveResults[DeriveMode] | null;
   error: string | null;
-  inflight: boolean;
-  stale: boolean;
   listeners: Set<() => void>;
 }
 
@@ -59,29 +149,25 @@ export function snapshotKey(runId: string, envId: string | null, mode: DeriveMod
   return `${runId}|${envId ?? ''}|${mode}`;
 }
 
-let worker: Worker | null = null;
-let nextRequestId = 1;
-const pending = new Map<number, (response: WorkerResponse) => void>();
-
-function ensureWorker(): Worker {
-  if (worker !== null) return worker;
-  worker = new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' });
-  worker.onmessage = (event: MessageEvent<WorkerResponse>) => {
-    const resolve = pending.get(event.data.id);
-    if (resolve === undefined) return;
-    pending.delete(event.data.id);
-    resolve(event.data);
-  };
-  return worker;
-}
-
-function rpc(request: WorkerCall): Promise<WorkerResponse> {
-  const target = ensureWorker();
-  const id = nextRequestId++;
-  return new Promise((resolve) => {
-    pending.set(id, resolve);
-    target.postMessage({ ...request, id });
-  });
+function derive(tape: Tape, spec: DeriveSpec): DeriveResults[DeriveMode] {
+  switch (spec.mode) {
+    case 'rates':
+    case 'windowedRates':
+      return windowedRates(tape, spec.lanes, spec.win);
+    case 'rho':
+      return rhoBinned(tape, spec.lanes);
+    case 'survival':
+      return survivalSeries(tape, spec.lanes);
+    case 'cumulativeReward':
+      return cumulativeReward(tape, spec.lanes);
+    case 'rows':
+      return buildSeedRows(
+        tape,
+        { envSchedule: spec.envSchedule, seeds: spec.seeds, steps: spec.steps },
+        spec.envId,
+        new Set(spec.recorded),
+      );
+  }
 }
 
 function notify(slot: Slot): void {
@@ -91,24 +177,22 @@ function notify(slot: Slot): void {
 function runDerive(key: string): void {
   const slot = slots.get(key);
   if (slot === undefined) return;
-  if (slot.inflight) {
-    slot.stale = true;
+  const cache = cacheFor(slot.runId);
+  if (cache.tape === null) {
+    if (cache.error !== null && slot.error !== cache.error) {
+      slot.error = cache.error;
+      notify(slot);
+    }
+    void load(cache);
     return;
   }
-  slot.inflight = true;
-  slot.stale = false;
-  void rpc({ op: 'derive', runId: slot.runId, spec: slot.spec }).then((response) => {
-    slot.inflight = false;
-    if (response.ok) {
-      slot.data = response.result ?? null;
-      slot.error = null;
-      recordProgress(slot.runId, response.progress);
-    } else {
-      slot.error = response.error;
-    }
-    notify(slot);
-    if (slot.stale) runDerive(key);
-  });
+  try {
+    slot.data = derive(cache.tape, slot.spec);
+    slot.error = null;
+  } catch (error) {
+    slot.error = error instanceof Error ? error.message : String(error);
+  }
+  notify(slot);
 }
 
 export function subscribeSnapshot(
@@ -121,13 +205,13 @@ export function subscribeSnapshot(
   const key = snapshotKey(runId, envId, mode);
   let slot = slots.get(key);
   if (slot === undefined) {
-    slot = { runId, spec, data: null, error: null, inflight: false, stale: false, listeners: new Set() };
+    slot = { runId, spec, data: null, error: null, listeners: new Set() };
     slots.set(key, slot);
   } else {
     slot.spec = spec;
   }
   slot.listeners.add(listener);
-  if (slot.data === null && !slot.inflight) runDerive(key);
+  if (slot.data === null) runDerive(key);
   return () => {
     slot.listeners.delete(listener);
   };
@@ -183,58 +267,29 @@ export function subscribeProgress(runId: string, listener: () => void): () => vo
   };
 }
 
-interface TailState {
-  live: boolean;
-  timer: ReturnType<typeof setTimeout> | null;
-  backoffMs: number;
-  lastRows: number;
-  ticking: boolean;
-}
-
-const tails = new Map<string, TailState>();
+const follows = new Map<string, () => void>();
 
 export function setLive(runId: string, live: boolean): void {
-  let tail = tails.get(runId);
-  if (tail === undefined) {
-    tail = { live: false, timer: null, backoffMs: 0, lastRows: 0, ticking: false };
-    tails.set(runId, tail);
+  const current = follows.get(runId);
+  if (live === (current !== undefined)) return;
+  if (!live) {
+    current?.();
+    follows.delete(runId);
+    return;
   }
-  if (tail.live === live) return;
-  tail.live = live;
-  if (live) {
-    if (tail.timer === null && !tail.ticking) void tick(runId);
-  } else if (tail.timer !== null) {
-    clearTimeout(tail.timer);
-    tail.timer = null;
-  }
-}
-
-async function tick(runId: string): Promise<void> {
-  const tail = tails.get(runId);
-  if (tail === undefined || !tail.live) return;
-  tail.ticking = true;
-  tail.timer = null;
-  const startedAt = performance.now();
-  const response = await rpc({ op: 'tail', runId });
-  tail.ticking = false;
-  if (!tail.live) return;
-  let dueMs = 0;
-  if (response.ok) {
-    dueMs = response.progress.nextRowDueMs;
-    recordProgress(runId, response.progress);
-    if (response.progress.rows > tail.lastRows) {
-      tail.lastRows = response.progress.rows;
-      tail.backoffMs = 0;
-      refreshRun(runId);
-    } else {
-      tail.backoffMs = Math.max(performance.now() - startedAt, tail.backoffMs * 2);
-    }
-  } else {
-    tail.backoffMs = Math.max(1000, tail.backoffMs * 2);
-  }
-  tail.timer = setTimeout(() => {
-    void tick(runId);
-  }, Math.max(dueMs, tail.backoffMs));
+  const cache = cacheFor(runId);
+  follows.set(runId, follow(runId, -1, {
+    columns(names) {
+      cache.columnOrder = names;
+    },
+    window(_index, end, wall, values) {
+      if (cache.tape === null) {
+        void load(cache);
+        return;
+      }
+      appendWindow(cache, end, wall, values);
+    },
+  }));
 }
 
 const noopSubscribe = (): (() => void) => () => {};

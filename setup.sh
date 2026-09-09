@@ -28,4 +28,7 @@ xcrun -sdk macosx metal -fno-fast-math "-DOAK_PRESET_$(printf '%s' "$PRESET" | t
 xcrun -sdk macosx metallib "$ROOT/.build/OakKernel.air" -o "$ROOT/.build/OakKernel.metallib"
 printf '%s\n' "$PRESET" > "$PRESET_FILE"
 swift build -c release
-echo "Setup complete: OaK $PRESET. Run: ./fleet.py run"
+command -v bun >/dev/null || { echo "bun not found." >&2; exit 1; }
+(cd "$ROOT/frontend" && bun install --frozen-lockfile && bun run build)
+"$PY" "$ROOT/fleet.py" fetch
+echo "Setup complete: OaK $PRESET. Run: ./fleet.py run, then open http://127.0.0.1:5174"

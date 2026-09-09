@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { MeshoptSimplifier } from 'meshoptimizer/simplifier';
-import type { EnvId } from '@shared/envs';
+import type { EnvId } from '../data/envs';
 import { makePlaybackClock, sampleFrame, type PlaybackSource, type PlaybackClock } from './playbackSource';
 import { celebrationPulse } from '@kit/celebrate';
 import { buildComposer, type ComposerHandle } from '@kit/post';

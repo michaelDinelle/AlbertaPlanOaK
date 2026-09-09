@@ -1,16 +1,9 @@
 import type { EnvEntry } from '@sim/catalog';
-import type { EnvId } from '@shared/envs';
-import type { RecordingRef } from '@shared/types';
+import type { EnvId } from '../data/envs';
+import type { RecordingRef } from '../data/types';
 import type { LiveEdge, PlaybackSource } from './playbackSource';
-import { recordingUrl } from '../data/api';
+import { FRAME_FLOATS, fetchFrames, follow } from '../data/oak';
 import { lensRecording, type RecordingLens } from '@sim/decode';
-import {
-  RECORD_FLOATS,
-  decodeChunkPayload,
-  inflateChunk,
-  codecFromEntry,
-  scanNextChunk,
-} from '@sim/record';
 import { decoders } from '@sim/registry';
 import { EMPTY_EVENT_STREAM, NO_EVENTS, type EnvDecoder } from '@sim/types';
 
@@ -119,6 +112,7 @@ export class TheaterLoadError extends Error {
 
 export interface HeroOptions extends TheaterTarget {
   entry: EnvEntry;
+  lane: number;
   horizonSteps: number;
   live: boolean;
   startedAt: number | null;
@@ -138,8 +132,10 @@ export interface HeroHandle {
   destroy(): void;
 }
 
+const PAGE_STEPS = 65536;
+
 export function loadHero(options: HeroOptions): HeroHandle {
-  const { runId, envId, seed } = options;
+  const { runId, envId, seed, lane } = options;
   const decoder = decoders[envId] as EnvDecoder;
   if (decoder === undefined) throw new TheaterLoadError(`no @sim decoder registered for ${envId}`);
   const st = decoder.initStatic(seed);
@@ -151,15 +147,11 @@ export function loadHero(options: HeroOptions): HeroHandle {
   const raw = {
     envId,
     seed,
-    data: new Float32Array(capacitySteps * RECORD_FLOATS),
+    data: new Float32Array(capacitySteps * FRAME_FLOATS),
     steps: 0,
   };
 
-  let bytes = new Uint8Array(64 * 1024);
-  let byteLength = 0;
-  let scanOffset = 0;
   let decodedSteps = 0;
-  const desc = codecFromEntry(options.entry);
   let fullyFetched = false;
   let destroyed = false;
   let lens: RecordingLens | null = null;
@@ -185,6 +177,8 @@ export function loadHero(options: HeroOptions): HeroHandle {
   let onUpdate = options.onUpdate ?? null;
   let onError = options.onError ?? null;
   const abort = new AbortController();
+  let unfollow: (() => void) | null = null;
+  let pulling = false;
 
   const wrapMask = options.entry.fields.reduce(
     (mask, field) => (field.wrap ? mask | (1 << field.slot) : mask),
@@ -232,71 +226,47 @@ export function loadHero(options: HeroOptions): HeroHandle {
     }
   };
 
-  const append = async (chunk: Uint8Array): Promise<void> => {
-    if (byteLength + chunk.byteLength > bytes.byteLength) {
-      let capacity = bytes.byteLength;
-      while (capacity < byteLength + chunk.byteLength) capacity *= 2;
-      const grown = new Uint8Array(capacity);
-      grown.set(bytes.subarray(0, byteLength));
-      bytes = grown;
+  const append = (from: number, values: Float32Array): boolean => {
+    if (from !== decodedSteps) return false;
+    const rows = Math.floor(values.length / FRAME_FLOATS);
+    if (rows === 0) return false;
+    if (decodedSteps + rows > capacitySteps) {
+      throw new TheaterLoadError(
+        `recording exceeds its declared ${capacitySteps} steps — refusing to decode past the horizon`,
+      );
     }
-    bytes.set(chunk, byteLength);
-    byteLength += chunk.byteLength;
-
-    let decodedAny = false;
-    for (;;) {
-      const view = bytes.subarray(0, byteLength);
-      const next = scanNextChunk(view, scanOffset, decodedSteps, 0);
-      if (next === null) break;
-      if (decodedSteps + next.stepCount > capacitySteps) {
-        throw new TheaterLoadError(
-          `recording exceeds its declared ${capacitySteps} steps — refusing to decode past the horizon`,
-        );
-      }
-      const payload = await inflateChunk(view, next);
-      decodeChunkPayload(payload, desc, next.stepCount, raw.data, decodedSteps * RECORD_FLOATS);
-      decodedSteps += next.stepCount;
-      if (next.stepCount > edge.chunkFrames) edge.chunkFrames = next.stepCount;
-      scanOffset = next.byteOffset + next.byteLength;
-      decodedAny = true;
-    }
-    if (decodedAny) grow();
+    raw.data.set(values.subarray(0, rows * FRAME_FLOATS), decodedSteps * FRAME_FLOATS);
+    decodedSteps += rows;
+    if (rows > edge.chunkFrames) edge.chunkFrames = rows;
+    grow();
+    return true;
   };
 
-  const fetchFrom = async (offset: number): Promise<'grew' | 'done'> => {
-    const headers: Record<string, string> = {};
-    if (offset > 0) headers['range'] = `bytes=${offset}-`;
-    const res = await fetch(recordingUrl(runId, envId, seed), {
-      headers,
-      signal: abort.signal,
-    });
-    if (res.status === 416) return 'done';
-    if (!res.ok && res.status !== 206) {
-      throw new TheaterLoadError(`${res.status} — recording unavailable for ${envId} seed ${seed}`);
-    }
-    if (offset > 0 && res.status === 200) {
-      throw new TheaterLoadError(`the server ignored a range request for ${envId} seed ${seed}`);
-    }
-    const body = res.body;
-    if (body === null) {
-      await append(new Uint8Array(await res.arrayBuffer()));
-      return 'grew';
-    }
-    const reader = body.getReader();
+  const pull = async (): Promise<void> => {
+    if (pulling || destroyed) return;
+    pulling = true;
     try {
-      for (;;) {
-        const step = await reader.read();
-        if (step.done) break;
-        if (step.value) await append(step.value);
+      while (!destroyed && decodedSteps < capacitySteps) {
+        const from = decodedSteps;
+        const values = await fetchFrames(runId, lane, from, Math.min(PAGE_STEPS, capacitySteps - from), abort.signal);
+        if (!append(from, values) || values.length < PAGE_STEPS * FRAME_FLOATS) break;
       }
     } finally {
-      reader.releaseLock();
+      pulling = false;
     }
-    return 'grew';
+  };
+
+  const startFollow = (): void => {
+    if (unfollow !== null || destroyed) return;
+    unfollow = follow(runId, lane, {
+      frames(_lane, from, values) {
+        if (!append(from, values)) void pull();
+      },
+    });
   };
 
   const run = async (): Promise<void> => {
-    await fetchFrom(0);
+    await pull();
     fullyFetched = true;
     edgeAt = performance.now();
     edgeSteps = decodedSteps;
@@ -304,27 +274,7 @@ export function loadHero(options: HeroOptions): HeroHandle {
       edge.framesPerSecond = decodedSteps / Math.max(1, (Date.now() - options.startedAt) / 1000);
     }
     onUpdate?.();
-    let lastGrewAt = performance.now();
-    let intervalMs = 0;
-    let backoffMs = 0;
-    while (live && !destroyed) {
-      const dueIn = intervalMs > 0
-        ? Math.max(0, lastGrewAt + intervalMs - performance.now())
-        : 0;
-      await new Promise((res) => setTimeout(res, Math.max(dueIn, backoffMs)));
-      if (!live || destroyed) break;
-      const startedAt = performance.now();
-      const result = await fetchFrom(byteLength);
-      if (result === 'grew') {
-        const at = performance.now();
-        intervalMs = at - lastGrewAt;
-        lastGrewAt = at;
-        backoffMs = 0;
-      } else {
-        backoffMs = Math.max(performance.now() - startedAt, backoffMs * 2);
-      }
-    }
-    onUpdate?.();
+    if (live) startFollow();
   };
 
   void run().catch((error: unknown) => {
@@ -344,13 +294,18 @@ export function loadHero(options: HeroOptions): HeroHandle {
       return Math.max(source.frameCount - 1, 1);
     },
     get bytes() {
-      return byteLength;
+      return decodedSteps * FRAME_FLOATS * 4;
     },
     ticks() {
       return lens !== null ? ticksFromLens(lens) : [];
     },
     setLive(next) {
       live = next;
+      if (live && fullyFetched) startFollow();
+      if (!live && unfollow !== null) {
+        unfollow();
+        unfollow = null;
+      }
     },
     setCallbacks(update, error) {
       onUpdate = update;
@@ -360,6 +315,8 @@ export function loadHero(options: HeroOptions): HeroHandle {
     destroy() {
       destroyed = true;
       abort.abort();
+      unfollow?.();
+      unfollow = null;
       if (updateTimer !== null) cancelAnimationFrame(updateTimer);
     },
   };

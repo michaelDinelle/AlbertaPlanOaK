@@ -1,5 +1,5 @@
 import { toast } from 'sonner';
-import type { RunIndexEntry } from '@shared/types';
+import type { RunIndexEntry } from './data/types';
 import { runLabel } from './lib/run';
 import { STR } from './strings';
 

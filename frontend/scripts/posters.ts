@@ -1,7 +1,7 @@
 import { mkdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { ENV_IDS } from '../shared/envs';
+import { ENV_IDS } from '../src/data/envs';
 import { SCENES, nameOf } from '../src/scenes/table';
 
 const origin = process.argv[2] ?? 'http://localhost:5173';

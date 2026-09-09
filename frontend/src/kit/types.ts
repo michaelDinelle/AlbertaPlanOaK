@@ -1,5 +1,5 @@
 import type * as THREE from 'three';
-import type { EnvId } from '@shared/envs';
+import type { EnvId } from '../data/envs';
 import type { EnvGeometry, EventStream, SimEvent } from '@sim/types';
 import type { DesignTokens } from './tokens';
 

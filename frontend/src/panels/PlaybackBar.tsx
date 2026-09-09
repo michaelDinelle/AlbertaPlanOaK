@@ -12,7 +12,7 @@ import {
   ScanEye,
   Scissors,
 } from 'lucide-react';
-import type { Policy, RunDetail, RunIndexEntry } from '@shared/types';
+import type { Policy, RunDetail, RunIndexEntry } from '../data/types';
 import { Panel } from '../glass/Panel';
 import { Hotkey, Label, POLICY_ORDER } from './charts';
 import { formatCount, formatStep } from '../lib/format';

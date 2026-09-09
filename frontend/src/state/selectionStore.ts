@@ -1,5 +1,5 @@
-import type { EnvId } from '@shared/envs';
-import type { Policy } from '@shared/types';
+import type { EnvId } from '../data/envs';
+import type { Policy } from '../data/types';
 import {
   escapeSelection,
   heroSeed,

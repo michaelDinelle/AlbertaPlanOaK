@@ -14,7 +14,7 @@ export default defineConfig({
   ],
   server: {
     port: 5173,
-    proxy: { '/api': `http://127.0.0.1:${process.env['OAK_FRONTEND_PORT'] ?? '5174'}` },
+    proxy: { '/api': { target: `http://127.0.0.1:${process.env['OAK_PORT'] ?? '5174'}`, ws: true } },
   },
   build: {
     target: 'es2022',
@@ -28,7 +28,6 @@ export default defineConfig({
   },
   resolve: {
     alias: {
-      '@shared': r('./shared'),
       '@sim': r('./src/sim'),
       '@kit': r('./src/kit'),
     },

@@ -1,5 +1,5 @@
-import { isEnvId, type EnvId } from '@shared/envs';
-import type { Policy } from '@shared/types';
+import { isEnvId, type EnvId } from '../data/envs';
+import type { Policy } from '../data/types';
 import { isSortMode, type SortMode } from '../lib/selection';
 
 export const SPEEDS = [1, 4, 16, 64, 256, 1024] as const;

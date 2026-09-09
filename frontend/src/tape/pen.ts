@@ -1,6 +1,6 @@
 import type { CumulativeReward } from './derive';
 import { iqmSorted, percentileSorted } from './derive';
-import type { RewardDetail } from './rewardStream';
+import type { RewardDetail } from '../data/rewards';
 
 export interface PenCurves {
   x: number[];

@@ -1,4 +1,4 @@
-import { POSE_LEN } from '../record';
+import { POSE_LEN } from '../../data/oak';
 import { philox4x32_10 } from '../philox';
 import { NO_EVENTS, type EnvDecoder, type EnvFrame, type SimEvent } from '../types';
 

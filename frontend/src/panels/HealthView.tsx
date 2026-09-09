@@ -1,7 +1,7 @@
 import { useMemo } from 'react';
 import { clsx } from 'clsx';
 import { Area, Line } from 'recharts';
-import type { Policy, RunDetail } from '@shared/types';
+import type { Policy, RunDetail } from '../data/types';
 import { formatCount, formatPercent, formatRate, formatStep } from '../lib/format';
 import { envLanes } from '../lib/run';
 import { useSelection } from '../state/selectionStore';

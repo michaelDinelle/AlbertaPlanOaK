@@ -1,5 +1,5 @@
-import type { RunDetail, RunIndexEntry, RunMeta } from '@shared/types';
-import { ENV_IDS, isEnvId, type EnvId } from '@shared/envs';
+import type { RunDetail, RunIndexEntry, RunMeta } from '../data/types';
+import { ENV_IDS, isEnvId, type EnvId } from '../data/envs';
 
 export interface EnvShare {
   envId: EnvId;

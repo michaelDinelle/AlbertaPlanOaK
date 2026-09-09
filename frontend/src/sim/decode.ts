@@ -1,5 +1,5 @@
-import { isEnvId } from '@shared/envs';
-import { OFF_DONE, OFF_POSE, POSE_LEN, RECORD_FLOATS } from './record';
+import { isEnvId } from '../data/envs';
+import { FRAME_FLOATS, OFF_DONE, OFF_POSE, POSE_LEN } from '../data/oak';
 import {
   NO_EVENTS,
   type EnvDecoder,
@@ -18,7 +18,7 @@ export class DecodeError extends Error {
 }
 
 function checkRow(row: Float32Array, i: number): void {
-  for (let j = 0; j < RECORD_FLOATS; j++) {
+  for (let j = 0; j < OFF_POSE + POSE_LEN; j++) {
     if (!Number.isFinite(row[j])) {
       throw new DecodeError(
         `row ${i} carries a non-finite value — recordings end at the last finite row, so this file is corrupt`,
@@ -36,7 +36,7 @@ function checkIds<St>(raw: RawRecording, decoder: EnvDecoder<St>): void {
       `decoder envId ${decoder.envId} does not match recording envId ${raw.envId}`,
     );
   }
-  const available = Math.floor(raw.data.length / RECORD_FLOATS);
+  const available = Math.floor(raw.data.length / FRAME_FLOATS);
   if (available < raw.steps) {
     throw new DecodeError(
       `recording claims ${raw.steps} steps but data holds only ${available}`,
@@ -75,7 +75,7 @@ export function lensRecording<St>(
   const frameAt = (i: number): EnvFrame => {
     const clamped = Math.max(0, Math.min(processed, Math.floor(i)));
     if (clamped === 0) return init;
-    const at = (clamped - 1) * RECORD_FLOATS;
+    const at = (clamped - 1) * FRAME_FLOATS;
     return {
       step: clamped - 1,
       done: raw.data[at + OFF_DONE] ?? 0,
@@ -92,7 +92,7 @@ export function lensRecording<St>(
   const advance = (): void => {
     while (processed < raw.steps) {
       const row = processed;
-      checkRow(raw.data.subarray(row * RECORD_FLOATS, (row + 1) * RECORD_FLOATS), row);
+      checkRow(raw.data.subarray(row * FRAME_FLOATS, (row + 1) * FRAME_FLOATS), row);
       processed = row + 1;
       for (const event of eventsAt(processed)) {
         if (stream.count === stream.steps.length) {

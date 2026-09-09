@@ -1,7 +1,8 @@
-import type { EnvId } from '@shared/envs';
-import type { Policy, RecordingRef, RunDetail } from '@shared/types';
+import type { EnvId } from '../data/envs';
+import type { Policy, RecordingRef, RunDetail } from '../data/types';
 import { entryFor, parseCatalog } from '@sim/catalog';
 import { nameOf } from '../scenes/table';
+import { envLanes } from '../lib/run';
 import { createStore } from '../state/store';
 import { frameFromStep, heroSeed, stepFromFrame } from '../lib/selection';
 import { publishPosition, setTransport, subscribeTransport, transportSnapshot } from '../playback/store';
@@ -326,6 +327,7 @@ function mountHero(): void {
       runId: run.id,
       envId: env,
       seed,
+      lane: envLanes(run.meta, env).lanes[envLanes(run.meta, env).seeds.indexOf(seed)] ?? -1,
       horizonSteps: run.meta.steps,
       live: inp.live,
       startedAt: run.meta.startedAt === undefined ? null : Date.parse(run.meta.startedAt),

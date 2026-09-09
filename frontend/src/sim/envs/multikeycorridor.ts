@@ -1,4 +1,4 @@
-import { POSE_LEN } from '../record';
+import { POSE_LEN } from '../../data/oak';
 import { NO_EVENTS, type EnvDecoder, type EnvFrame, type EnvGeometry, type GridCell, type SimEvent } from '../types';
 
 export const MKC_W = 17;

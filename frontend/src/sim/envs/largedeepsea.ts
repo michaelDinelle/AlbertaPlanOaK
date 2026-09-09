@@ -1,5 +1,5 @@
 import { philoxDraw, STREAM_RESET } from '../philox';
-import { POSE_LEN } from '../record';
+import { POSE_LEN } from '../../data/oak';
 import { NO_EVENTS, type EnvDecoder, type EnvFrame, type EnvGeometry, type SimEvent } from '../types';
 
 export const LARGE_DEEPSEA_N = 16;
