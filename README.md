@@ -22,3 +22,16 @@ Keeper: `ca6221ed5f7d374c3bba4974c310f5e66a91b4df`. Full-run reward per step ove
 | POMaze-cont-v0 | 0.00404928 | 0.00404331 | 0.0333905 | 0.0268092 | 0.00153345 | 0.00153422 | 51.56% | 70.31% | 48.44% |
 | Pendulum-cont-v0 | -0.371727 | -0.140029 | -0.0671477 | -0.0109328 | -3.89198 | -3.88951 | 25.00% | 98.44% | 100.00% |
 | ProceduralMaze-cont-v0 | 0.000249766 | 0.000171281 | 7.25e-06 | 4.125e-06 | 0.000730344 | 0.000734781 | 100.00% | 3.12% | 0.00% |
+
+## Setup and run
+
+Requires macOS 26+, Xcode with Metal tools, Python 3.11, and Bun for the frontend. From the repo root: `./setup.sh --preset base`, then `./fleet.py run` (requires matching best fleet data and baselines). Frontend: `cd frontend && bun install && bun run dev`, then open http://localhost:5173.
+
+Geometry is agent capacity, declared in `Sources/Geometry.metal`; larger presets use more compute and memory. Wide streams increase percept and feature counts above these declared sizes.
+
+| Preset | Percepts | Features | Active per step | Options |
+| --- | ---: | ---: | ---: | ---: |
+| base | 32 | 480 | 96 | 32 |
+| pro | 64 | 960 | 192 | 64 |
+| max | 128 | 1920 | 384 | 128 |
+| ultra | 160 | 2400 | 480 | 160 |
