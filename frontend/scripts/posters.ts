@@ -14,7 +14,7 @@ const VIEW_H = 720;
 const POSTER_W = 320;
 const CAPTURE_AT_STEP = Number(process.argv[5] ?? '200000');
 const SETTLE_MS = 3000;
-const READY_TIMEOUT_MS = 30000;
+const READY_TIMEOUT_MS = 120000;
 
 const chromeBin = process.env['CHROME'] ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const profileDir = join(tmpdir(), 'oak-posters-chrome');
@@ -39,17 +39,33 @@ async function connect(): Promise<CdpClient> {
           ws.onopen = res;
           ws.onerror = rej;
         });
-        const pending = new Map<number, (v: any) => void>();
+        const pending = new Map<number, { resolve(value: any): void; reject(error: Error): void }>();
         let nextId = 1;
         ws.onmessage = (event) => {
           const msg = JSON.parse(String(event.data));
-          if (msg.id !== undefined) pending.get(msg.id)?.(msg);
+          if (msg.id !== undefined) {
+            const request = pending.get(msg.id);
+            pending.delete(msg.id);
+            if (msg.error !== undefined) request?.reject(new Error(msg.error.message));
+            else request?.resolve(msg);
+          }
+        };
+        ws.onclose = () => {
+          for (const request of pending.values()) request.reject(new Error('capture browser disconnected'));
+          pending.clear();
         };
         return {
           send: (method, params = {}) =>
-            new Promise((res) => {
+            new Promise((resolve, reject) => {
               const id = nextId++;
-              pending.set(id, res);
+              const timer = setTimeout(() => {
+                pending.delete(id);
+                reject(new Error(`${method} timed out`));
+              }, READY_TIMEOUT_MS);
+              pending.set(id, {
+                resolve: (value) => { clearTimeout(timer); resolve(value); },
+                reject: (error) => { clearTimeout(timer); reject(error); },
+              });
               ws.send(JSON.stringify({ id, method, params }));
             }),
           close: () => ws.close(),
@@ -77,10 +93,19 @@ async function waitForStage(cdp: CdpClient, envName: string): Promise<void> {
   for (;;) {
     const ready = await evaluate(
       cdp,
-      `(() => {
+      `(async () => {
+        const { stageMetaSnapshot } = await import('/src/theater/controller.ts');
+        const { currentPosition, setTransport } = await import('/src/playback/store.ts');
+        const meta = stageMetaSnapshot();
+        if (meta.status === 'error') throw new Error(meta.noteDetail ?? meta.note);
         const canvas = document.querySelector('canvas.theater-canvas');
         const tile = [...document.querySelectorAll('button')].find((el) => el.title === ${JSON.stringify('Choose an environment')});
-        return canvas !== null && tile !== undefined && tile.textContent.includes(${JSON.stringify(envName)});
+        const ready = canvas !== null && canvas.width > 0 && meta.status === 'ready'
+          && meta.envName === ${JSON.stringify(envName)} && meta.loadedSteps >= ${CAPTURE_AT_STEP}
+          && currentPosition() >= ${CAPTURE_AT_STEP}
+          && tile !== undefined && tile.textContent.includes(${JSON.stringify(envName)});
+        if (ready) setTransport({ playing: false });
+        return ready;
       })()`,
     ).catch(() => false);
     if (ready === true) return;
@@ -89,28 +114,31 @@ async function waitForStage(cdp: CdpClient, envName: string): Promise<void> {
   }
 }
 
-const chrome = Bun.spawn(
-  [
-    chromeBin,
-    '--headless=new',
-    `--user-data-dir=${profileDir}`,
-    `--remote-debugging-port=${CDP_PORT}`,
-    '--no-first-run',
-    '--no-default-browser-check',
-    `--window-size=${VIEW_W},${VIEW_H}`,
-    '--force-device-scale-factor=1',
-    '--hide-scrollbars',
-    'about:blank',
-  ],
-  { stdout: 'ignore', stderr: 'ignore' },
-);
+for (const envId of ENV_IDS) {
+  if (only !== '' && envId !== only) continue;
+  const chrome = Bun.spawn(
+    [
+      chromeBin,
+      '--headless=new',
+      `--user-data-dir=${profileDir}`,
+      `--remote-debugging-port=${CDP_PORT}`,
+      '--no-first-run',
+      '--no-default-browser-check',
+      `--window-size=${VIEW_W},${VIEW_H}`,
+      '--force-device-scale-factor=1',
+      '--hide-scrollbars',
+      'about:blank',
+    ],
+    { stdout: 'ignore', stderr: 'ignore' },
+  );
 
-try {
-  const cdp = await connect();
-  await cdp.send('Page.enable');
-  await mkdir(outDir, { recursive: true });
-  for (const envId of ENV_IDS) {
-    if (only !== '' && envId !== only) continue;
+  try {
+    const cdp = await connect();
+    await cdp.send('Page.enable');
+    await cdp.send('Emulation.setDeviceMetricsOverride', {
+      width: VIEW_W, height: VIEW_H, deviceScaleFactor: 1, mobile: false,
+    });
+    await mkdir(outDir, { recursive: true });
     const info = SCENES[envId];
     const runQuery = run !== '' ? `run=${run}&` : '';
     await cdp.send('Page.navigate', { url: `${origin}/?${runQuery}env=${envId}&at=${CAPTURE_AT_STEP}` });
@@ -133,9 +161,10 @@ try {
     const file = resolve(outDir, `${info.slug}.webp`);
     await Bun.write(file, Buffer.from(shot.result.data, 'base64'));
     console.log(`${info.slug}.webp`);
+    cdp.close();
+  } finally {
+    chrome.kill();
+    await chrome.exited;
+    await rm(profileDir, { recursive: true, force: true });
   }
-  cdp.close();
-} finally {
-  chrome.kill();
-  await rm(profileDir, { recursive: true, force: true });
 }
