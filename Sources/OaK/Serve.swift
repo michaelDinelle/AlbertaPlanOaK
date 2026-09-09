@@ -364,14 +364,6 @@ final class Daemon: @unchecked Sendable {
     for name in names {
       guard let r = try? reader(name), !r.windows.isEmpty else { continue }
       entries.append((name, entry(name, r, best: best)))
-      guard r.meta.policy == "oak" else { continue }
-      for policy in ["ppo", "random"] {
-        let id = "\(name):\(policy)"
-        guard let b = try? reader(id), b.complete,
-          fm.fileExists(atPath: b.root.appendingPathComponent("summary.json").path)
-        else { continue }
-        entries.append((id, entry(id, b, best: best)))
-      }
     }
     entries.sort { a, b in
       let sa = a.1["startedAt"] as? String ?? ""
