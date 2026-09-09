@@ -225,6 +225,27 @@ final class Shared<T> {
     p = b.contents().bindMemory(to: T.self, capacity: max(n, 1))
     p.initialize(repeating: z, count: max(n, 1))
   }
+  convenience init(_ d: MTLDevice, _ values: [T]) {
+    precondition(!values.isEmpty)
+    self.init(d, values.count, values[0])
+    p.update(from: values, count: values.count)
+  }
+}
+func sharedBuffer(_ device: MTLDevice, _ bytes: Int) -> MTLBuffer {
+  device.makeBuffer(length: max(bytes, 16), options: [.storageModeShared])!
+}
+func runProbe(_ device: MTLDevice, _ function: MTLFunction, _ buffers: [MTLBuffer]) throws {
+  let pipe = try device.makeComputePipelineState(function: function)
+  guard let queue = device.makeCommandQueue(), let command = queue.makeCommandBuffer(),
+    let encoder = command.makeComputeCommandEncoder()
+  else { throw err("Probe command allocation failed.") }
+  encoder.setComputePipelineState(pipe)
+  for (j, buffer) in buffers.enumerated() { encoder.setBuffer(buffer, offset: 0, index: j) }
+  encoder.dispatchThreads(mtlSize(1), threadsPerThreadgroup: mtlSize(1))
+  encoder.endEncoding()
+  command.commit()
+  command.waitUntilCompleted()
+  guard command.status == .completed else { throw err("Probe failed: \(String(describing: command.error))") }
 }
 struct EnvSpec {
   static let poseLen = 9
@@ -256,6 +277,91 @@ struct EnvSpec {
 struct EnvTable {
   let specs: [EnvSpec]
   let constantWords: Int
+}
+
+final class EnvironmentStorage {
+  let fixed: [Int], entries: [Int]
+  let offsets: Shared<UInt32>
+  private(set) var arena: Shared<UInt32>
+  private var slots: Int, safeThroughStep: Int
+  var mask: UInt32 { UInt32(slots - 1) }
+
+  private static func layout(_ fixed: [Int], _ entries: [Int], _ slots: Int) throws -> ([UInt32], Int) {
+    var cursor = 0
+    let starts = fixed.indices.map { lane -> Int in
+      let start = cursor
+      cursor += fixed[lane] + entries[lane] * slots
+      return start
+    }
+    guard cursor <= Int(UInt32.max) else { throw err("Environment arena exceeds its addressable word count.") }
+    return (starts.map(UInt32.init), cursor)
+  }
+
+  init(_ device: MTLDevice, specs: [EnvSpec], kinds: [UInt32], steps: Int, window: Int) throws {
+    fixed = kinds.map {
+      let spec = specs[Int($0)]
+      return (spec.actionCount + spec.envStateWords + spec.naturalO + 3) & ~3
+    }
+    entries = kinds.map { specs[Int($0)].persistentEntryWords }
+    guard entries.allSatisfy({ $0 == 0 || $0 == 3 }) else {
+      throw err("Persistent entries require two coordinate words and a timestamp.")
+    }
+    slots = 2
+    while slots < 2 * min(steps, window) { slots *= 2 }
+    safeThroughStep = entries.contains(3) ? slots / 2 : steps
+    let (starts, words) = try Self.layout(fixed, entries, slots)
+    offsets = Shared(device, starts)
+    arena = Shared(device, words, 0)
+  }
+
+  func needsCapacity(through step: Int) -> Bool { step > safeThroughStep }
+
+  private static func slot(_ high: UInt32, _ low: UInt32, _ mask: Int) -> Int {
+    var key = UInt64(high) << 32 | UInt64(low)
+    key ^= key >> 30
+    key = key &* 0xbf58476d1ce4e5b9
+    key ^= key >> 27
+    key = key &* 0x94d049bb133111eb
+    key ^= key >> 31
+    return Int(key & UInt64(mask))
+  }
+
+  func prepare(completedStep: Int, throughStep: Int) throws {
+    precondition(throughStep >= completedStep)
+    var largest = 0
+    for lane in entries.indices where entries[lane] != 0 {
+      let history = arena.p + Int(offsets.p[lane]) + fixed[lane]
+      let count = (0..<slots).reduce(0) { $0 + (history[3 * $1 + 2] == 0 ? 0 : 1) }
+      largest = max(largest, count)
+    }
+    var capacity = slots
+    while capacity / 2 < largest + throughStep - completedStep {
+      guard capacity <= Int(UInt32.max) / 2 else { throw err("Persistent storage capacity is not addressable.") }
+      capacity *= 2
+    }
+    if capacity != slots {
+      let (starts, words) = try Self.layout(fixed, entries, capacity)
+      let grown = Shared<UInt32>(arena.b.device, words, 0)
+      for lane in entries.indices {
+        let source = arena.p + Int(offsets.p[lane])
+        let destination = grown.p + Int(starts[lane])
+        destination.update(from: source, count: fixed[lane])
+        if entries[lane] == 0 { continue }
+        let history = destination + fixed[lane]
+        for index in 0..<slots {
+          let entry = source + fixed[lane] + 3 * index
+          if entry[2] == 0 { continue }
+          var target = Self.slot(entry[0], entry[1], capacity - 1)
+          while history[3 * target + 2] != 0 { target = (target + 1) & (capacity - 1) }
+          (history + 3 * target).update(from: entry, count: 3)
+        }
+      }
+      arena = grown
+      offsets.p.update(from: starts, count: starts.count)
+      slots = capacity
+    }
+    safeThroughStep = completedStep + capacity / 2 - largest
+  }
 }
 
 final class Engine {
@@ -302,39 +408,15 @@ final class Engine {
     var d32 = UInt32(dPolicy)
     constants.setConstantValue(&d32, type: .uint, index: OakConst.specActionParams.rawValue)
     let fn = try lib.makeFunction(name: "oak_shape_probe", constantValues: constants)
-    let pipe = try dev.makeComputePipelineState(function: fn)
-    guard let outB = dev.makeBuffer(length: 176, options: [.storageModeShared]),
-      let dummy = dev.makeBuffer(length: 16, options: [.storageModeShared]),
-      let pq = dev.makeCommandQueue(), let cb = pq.makeCommandBuffer(),
-      let enc = cb.makeComputeCommandEncoder()
-    else { throw err("Shape probe dispatch failed.") }
-    enc.setComputePipelineState(pipe)
-    enc.setBuffer(outB, offset: 0, index: OakBuf.params.rawValue)
-    for j in OakBuf.state.rawValue...OakBuf.config.rawValue {
-      enc.setBuffer(dummy, offset: 0, index: j)
-    }
-    enc.dispatchThreads(MTLSize(width: 1, height: 1, depth: 1),
-                        threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1))
-    enc.endEncoding()
-    cb.commit()
-    cb.waitUntilCompleted()
+    let outB = sharedBuffer(dev, 176), dummy = sharedBuffer(dev, 16)
+    try runProbe(dev, fn, [outB] + Array(repeating: dummy, count: OakBuf.config.rawValue))
     return outB.contents().bindMemory(to: ShapeProbe.self, capacity: 1).pointee
   }
   static func runEnvTableProbe(_ dev: MTLDevice, _ lib: MTLLibrary) throws -> EnvTable {
     let fn = lib.makeFunction(name: "oak_env_table_probe")!
-    let pipe = try dev.makeComputePipelineState(function: fn)
     let words = 5 + Main.envIdsByKind.count * EnvSpec.stride
-    guard let outB = dev.makeBuffer(length: words * 4, options: [.storageModeShared]),
-      let pq = dev.makeCommandQueue(), let cb = pq.makeCommandBuffer(),
-      let enc = cb.makeComputeCommandEncoder()
-    else { throw err("Env table probe dispatch failed.") }
-    enc.setComputePipelineState(pipe)
-    enc.setBuffer(outB, offset: 0, index: OakBuf.params.rawValue)
-    enc.dispatchThreads(MTLSize(width: 1, height: 1, depth: 1),
-                        threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1))
-    enc.endEncoding()
-    cb.commit()
-    cb.waitUntilCompleted()
+    let outB = sharedBuffer(dev, words * 4)
+    try runProbe(dev, fn, [outB])
     let tbl = outB.contents().bindMemory(to: UInt32.self, capacity: words)
     guard tbl[0] == UInt32(Main.envIdsByKind.count) else {
       throw err("Env table count drift: kernel \(tbl[0]) vs host \(Main.envIdsByKind.count).")
@@ -390,16 +472,14 @@ final class Engine {
       }
     }
     var built: [Kind] = []
-    var probeCache: [UInt32: ShapeProbe] = [:]
     var pBase = 0, sBase = 0, uBase = 0
     var laneIdx = [Int](repeating: 0, count: b)
     for r in runs {
       let spec = table[Int(r.kind)]
       let naturalO = spec.naturalO
       let dk = spec.actionParams
-      let sp = try probeCache[r.kind] ?? Engine.runShapeProbe(
+      let sp = try Engine.runShapeProbe(
         dev, lib, obsDim: naturalO, dPolicy: dk)
-      probeCache[r.kind] = sp
       let percepts = Int(sp.perceptCount)
       precondition(
         percepts % Int(sp.simdWidth) == 0, "perception budget must tile the simd width")
@@ -407,10 +487,7 @@ final class Engine {
         Int(sp.featureCount) == percepts * (1 + Int(sp.constructedPerPercept) * Int(sp.candidatesPerSlot)),
         "constructed-feature identity broken")
       precondition(Int(sp.stateStride) % 4 == 0, "stateStride must stay 16B-aligned")
-      let cfgB = dev.makeBuffer(
-        length: MemoryLayout<KernelConfig>.stride, options: [.storageModeShared])!
-      cfgB.contents().bindMemory(to: KernelConfig.self, capacity: 1).initialize(
-        to: KernelConfig(
+      let cfgB = Shared(dev, 1, KernelConfig(
           obsDim: UInt32(naturalO), featureCount: sp.featureCount, optionCount: sp.optionCount,
           actionParamCount: UInt32(dk), obsTraceLevels: sp.traceLevels,
           perceptCount: sp.perceptCount, invFeatureTimeScale: sp.invFeatureTimeScale,
@@ -420,7 +497,7 @@ final class Engine {
           nurseryCount: sp.nursery,
           sampleSigma: sp.sampleSigma,
           sampleInv2S2: sp.sampleInv2S2,
-          actorAlphaDenom: sp.actorAlphaDenom))
+          actorAlphaDenom: sp.actorAlphaDenom)).b
       let kd = Kind(
         kind: r.kind, naturalO: naturalO, d: dk, count: r.count, firstLane: r.firstLane,
         off: sp, paramTotal: Int(sp.paramStride), stateTotal: Int(sp.stateStride),
@@ -442,10 +519,10 @@ final class Engine {
     params = Shared(dev, pBase, 0)
     state = Shared(dev, sBase, 0)
     uints = Shared(dev, uBase, 0)
-    scalarsB = dev.makeBuffer(
-      length: batch * MemoryLayout<KernelScalars>.stride, options: [.storageModeShared])!
+    let scalarStorage = Shared(dev, batch, KernelScalars())
+    scalarsB = scalarStorage.b
+    scalars = scalarStorage.p
     res = [params.b, state.b, uints.b, scalarsB, kinds[0].configB]
-    scalars = scalarsB.contents().bindMemory(to: KernelScalars.self, capacity: batch)
     for kd in kinds {
       let sp = kd.off
       let featureCount = Int(sp.featureCount)
@@ -459,7 +536,6 @@ final class Engine {
       let basis = 1 / Float(max(kd.d, 1))
       for local in 0..<kd.count {
         let lane = kd.firstLane + local
-        scalars[lane] = KernelScalars()
         let lp = params.p + kd.paramBase + local * kd.paramTotal
         let ls = state.p + kd.stateBase + local * kd.stateTotal
         let lu = uints.p + kd.uintBase + local * kd.uintTotal
@@ -1280,61 +1356,49 @@ final class TapeWriter {
     let snapBuf: MTLBuffer
     let diagAccumBuf: MTLBuffer
     let diagOutBuf: MTLBuffer
-    let envStateBuf: MTLBuffer
-    let envOffBuf: MTLBuffer
-    let envOffsets: [Int]
+    let environment: EnvironmentStorage
+    var envStateBuf: MTLBuffer { environment.arena.b }
+    var envOffBuf: MTLBuffer { environment.offsets.b }
+    func envOffset(_ lane: Int) -> Int { Int(environment.offsets.p[lane]) }
     let mjModelsBuf: MTLBuffer
     let mjScratchBuf: MTLBuffer
     let mjScratchOffBuf: MTLBuffer
     let envConstantsBuf: MTLBuffer
-    let ecfg: FleetEnvCfg
+    var ecfg: FleetEnvCfg {
+      FleetEnvCfg(
+        laneCount: UInt32(B), recordCapacity: UInt32(recordCapacity),
+        persistentMask: environment.mask, invObsFloor: 1 / Float(64))
+    }
+    func bind(_ enc: MTLComputeCommandEncoder, _ pipe: MTLComputePipelineState, _ resources: [MTLBuffer]) {
+      enc.setComputePipelineState(pipe)
+      for (j, buffer) in resources.enumerated() { enc.setBuffer(buffer, offset: 0, index: j) }
+      for (j, buffer) in [(6, laneBuf), (7, seedsBuf), (14, envStateBuf), (15, envOffBuf),
+                          (16, mjModelsBuf), (17, mjScratchBuf), (18, mjScratchOffBuf), (19, envConstantsBuf)] {
+        enc.setBuffer(buffer, offset: 0, index: j)
+      }
+      var config = ecfg
+      enc.setBytes(&config, length: MemoryLayout<FleetEnvCfg>.stride, index: OakBuf.envCfg.rawValue)
+    }
     init(
       _ dev: MTLDevice, lib: MTLLibrary, seeds: [Int], laneEnvKinds: [UInt32],
-      envTable: [EnvSpec], envConstantWords: Int, steps: Int
+      envTable: [EnvSpec], envConstantWords: Int, steps: Int, policy: String
     ) throws {
-      func makeBuf(_ len: Int) throws -> MTLBuffer {
-        guard let b = dev.makeBuffer(
-          length: max(len, 16), options: [.storageModeShared])
-        else {
-          throw err("Metal buffer allocation failed (\(len) bytes).")
-        }
-        return b
-      }
       B = seeds.count
       guard steps > 0, steps <= Int(UInt32.max), steps <= Int.max / 2 else {
         throw err("Declared run horizon \(steps) cannot be represented exactly.")
       }
-      var persistentSlots = 2
-      while persistentSlots < 2 * steps {
-        guard persistentSlots <= Int(UInt32.max) / 2 else {
-          throw err("Declared run horizon \(steps) exceeds persistent coordinate capacity.")
-        }
-        persistentSlots *= 2
-      }
       windowSteps = 1024
       maxChunkSteps = windowSteps / 4
       recordCapacity = 2 * maxChunkSteps
-      laneBuf = try makeBuf(B * fleetLaneStride)
-      seedsBuf = try makeBuf(B * 4)
-      do {
-        let sp = seedsBuf.contents().bindMemory(to: UInt32.self, capacity: B)
-        for (i, s) in seeds.enumerated() { sp[i] = UInt32(truncatingIfNeeded: s) }
-      }
-      envKindsBuf = try makeBuf(B * 4)
-      do {
-        let kp = envKindsBuf.contents().bindMemory(to: UInt32.self, capacity: B)
-        for i in 0..<B { kp[i] = laneEnvKinds[i] }
-      }
-      recordSlotBuf = try makeBuf(B * 4)
-      do {
-        let rp = recordSlotBuf.contents().bindMemory(to: Int32.self, capacity: B)
-        for i in 0..<B { rp[i] = Int32(i) }
-      }
-      recordBuf = try makeBuf(B * recordCapacity * recordFloats * 4)
+      laneBuf = sharedBuffer(dev, B * fleetLaneStride)
+      seedsBuf = Shared(dev, seeds.map { UInt32(truncatingIfNeeded: $0) }).b
+      envKindsBuf = Shared(dev, laneEnvKinds).b
+      recordSlotBuf = Shared(dev, (0..<B).map(Int32.init)).b
+      recordBuf = sharedBuffer(dev, B * recordCapacity * recordFloats * 4)
       let snapStride = MemoryLayout<LaneSnapshot>.stride
       precondition(snapStride == 36, "LaneSnapshot layout drifted from OakLaneSnapshot")
-      snapBuf = try makeBuf(2 * B * snapStride)
-      diagAccumBuf = try makeBuf(B * Diag.accumFloats * 4)
+      snapBuf = sharedBuffer(dev, 2 * B * snapStride)
+      diagAccumBuf = sharedBuffer(dev, B * Diag.accumFloats * 4)
       var diagFloats = 0
       let ppoP = Diag.ppoParams(
         obsMax: envTable.map(\.naturalO).max()!, actMax: envTable.map(\.actionCount).max()!)
@@ -1347,33 +1411,14 @@ final class TapeWriter {
           ).featureCount)
       }
       for kind in laneEnvKinds {
-        diagFloats += max(Diag.oakFloats(oakRankByKind[kind]!), Diag.ppoFloats(ppoP))
+        diagFloats += policy == "oak"
+          ? Diag.oakFloats(oakRankByKind[kind]!) : Diag.ppoFloats(ppoP)
       }
-      diagOutBuf = try makeBuf(2 * diagFloats * 4)
+      diagOutBuf = sharedBuffer(dev, 2 * diagFloats * 4)
       memset(diagAccumBuf.contents(), 0, diagAccumBuf.length)
       memset(diagOutBuf.contents(), 0, diagOutBuf.length)
-      var offsets: [Int] = []
-      var envCursor = 0
-      for kind in laneEnvKinds {
-        let spec = envTable[Int(kind)]
-        offsets.append(envCursor)
-        let fixed = (spec.actionCount + spec.envStateWords + spec.naturalO + 3) / 4 * 4
-        let (persistent, persistentOverflow) = spec.persistentEntryWords.multipliedReportingOverflow(
-          by: persistentSlots)
-        let (next, cursorOverflow) = envCursor.addingReportingOverflow(fixed + persistent)
-        guard !persistentOverflow, !cursorOverflow else {
-          throw err("Declared run horizon \(steps) overflows the environment arena.")
-        }
-        envCursor = next
-      }
-      envOffsets = offsets
-      envStateBuf = try makeBuf(envCursor * 4)
-      memset(envStateBuf.contents(), 0, envStateBuf.length)
-      envOffBuf = try makeBuf(B * 4)
-      do {
-        let op = envOffBuf.contents().bindMemory(to: UInt32.self, capacity: B)
-        for i in 0..<B { op[i] = UInt32(offsets[i]) }
-      }
+      environment = try EnvironmentStorage(
+        dev, specs: envTable, kinds: laneEnvKinds, steps: steps, window: windowSteps)
       let blob = try MjBlob.load()
       var mjEntryByKind: [Int: MjEntry] = [:]
       for (kind, spec) in envTable.enumerated() where spec.mjIndex >= 0 {
@@ -1389,11 +1434,7 @@ final class TapeWriter {
         }
         mjEntryByKind[kind] = entry
       }
-      let modelsBuf = try makeBuf(blob.data.count)
-      blob.data.withUnsafeBytes { raw in
-        modelsBuf.contents().copyMemory(from: raw.baseAddress!, byteCount: raw.count)
-      }
-      mjModelsBuf = modelsBuf
+      mjModelsBuf = Shared(dev, Array(blob.data)).b
       var scratchOffsets = [UInt32](repeating: 0, count: B)
       var scratchCursor = 0
       for i in 0..<B {
@@ -1402,34 +1443,14 @@ final class TapeWriter {
           scratchCursor += entry.scratchWords
         }
       }
-      mjScratchBuf = try makeBuf(max(scratchCursor, 1) * 4)
-      mjScratchOffBuf = try makeBuf(B * 4)
-      do {
-        let sp = mjScratchOffBuf.contents().bindMemory(to: UInt32.self, capacity: B)
-        for i in 0..<B { sp[i] = scratchOffsets[i] }
+      mjScratchBuf = sharedBuffer(dev, max(scratchCursor, 1) * 4)
+      mjScratchOffBuf = Shared(dev, scratchOffsets).b
+      let constants = sharedBuffer(dev, envConstantWords * 4)
+      guard let fn = lib.makeFunction(name: "oak_env_constants_init") else {
+        throw err("Environment constants kernel is unavailable.")
       }
-      let constants = try makeBuf(envConstantWords * 4)
-      guard let fn = lib.makeFunction(name: "oak_env_constants_init"),
-        let queue = dev.makeCommandQueue(), let cb = queue.makeCommandBuffer(),
-        let enc = cb.makeComputeCommandEncoder()
-      else { throw err("Environment constants initialization failed.") }
-      let pipe = try dev.makeComputePipelineState(function: fn)
-      enc.setComputePipelineState(pipe)
-      enc.setBuffer(constants, offset: 0, index: 0)
-      enc.dispatchThreads(MTLSize(width: 1, height: 1, depth: 1),
-                          threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1))
-      enc.endEncoding()
-      cb.commit()
-      cb.waitUntilCompleted()
-      guard cb.status == .completed else {
-        let message = cb.error?.localizedDescription ?? "unknown Metal error"
-        throw err("Environment constants initialization failed: \(message).")
-      }
+      try runProbe(dev, fn, [constants])
       envConstantsBuf = constants
-      ecfg = FleetEnvCfg(
-        laneCount: UInt32(B), recordCapacity: UInt32(recordCapacity),
-        persistentMask: UInt32(persistentSlots - 1),
-        invObsFloor: 1 / Float(64))
     }
   }
   static func oakPipes(
@@ -1537,21 +1558,6 @@ final class TapeWriter {
       }
     }
     let res = engine.res
-    let ecfg = bufs.ecfg
-    func bindFleet(_ enc: MTLComputeCommandEncoder, _ pipe: MTLComputePipelineState) {
-      enc.setComputePipelineState(pipe)
-      for j in res.indices { enc.setBuffer(res[j], offset: 0, index: j) }
-      enc.setBuffer(bufs.laneBuf, offset: 0, index: OakBuf.lanes.rawValue)
-      enc.setBuffer(bufs.seedsBuf, offset: 0, index: OakBuf.seeds.rawValue)
-      enc.setBuffer(bufs.envStateBuf, offset: 0, index: 14)
-      enc.setBuffer(bufs.envOffBuf, offset: 0, index: 15)
-      enc.setBuffer(bufs.mjModelsBuf, offset: 0, index: 16)
-      enc.setBuffer(bufs.mjScratchBuf, offset: 0, index: 17)
-      enc.setBuffer(bufs.mjScratchOffBuf, offset: 0, index: 18)
-      enc.setBuffer(bufs.envConstantsBuf, offset: 0, index: 19)
-      var c = ecfg
-      enc.setBytes(&c, length: MemoryLayout<FleetEnvCfg>.stride, index: OakBuf.envCfg.rawValue)
-    }
     let laneTG = mtlSize(
       min(64, initPipe.maxTotalThreadsPerThreadgroup, snapPipe.maxTotalThreadsPerThreadgroup))
     let laneRanks = engine.laneKindIdx.map { Int(engine.kinds[$0].off.featureCount) }
@@ -1568,12 +1574,12 @@ final class TapeWriter {
       label: "oak",
       encodeInit: { enc in
         for kd in engine.kinds {
-          bindFleet(enc, initPipe)
+          bufs.bind(enc, initPipe, res)
           enc.setBuffer(engine.params.b, offset: kd.paramBase * 4, index: OakBuf.params.rawValue)
           enc.setBuffer(engine.state.b, offset: kd.stateBase * 4, index: OakBuf.state.rawValue)
           enc.setBuffer(engine.uints.b, offset: kd.uintBase * 4, index: OakBuf.uints.rawValue)
           enc.setBuffer(kd.configB, offset: 0, index: OakBuf.config.rawValue)
-          var ce = ecfg
+          var ce = bufs.ecfg
           ce.invObsFloor = 1 / Float(2 * Int(kd.off.perceptCount))
           enc.setBytes(&ce, length: MemoryLayout<FleetEnvCfg>.stride, index: OakBuf.envCfg.rawValue)
           enc.setBuffer(bufs.envKindsBuf, offset: 0, index: OakBuf.aux0.rawValue)
@@ -1586,12 +1592,12 @@ final class TapeWriter {
         guard let enc = cb.makeComputeCommandEncoder(dispatchType: .concurrent) else { return }
         for run in envRuns {
           let kd = engine.kinds[run.kindIdx]
-          bindFleet(enc, variantPipes[run.kindIdx])
+          bufs.bind(enc, variantPipes[run.kindIdx], res)
           enc.setBuffer(engine.params.b, offset: kd.paramBase * 4, index: OakBuf.params.rawValue)
           enc.setBuffer(engine.state.b, offset: kd.stateBase * 4, index: OakBuf.state.rawValue)
           enc.setBuffer(engine.uints.b, offset: kd.uintBase * 4, index: OakBuf.uints.rawValue)
           enc.setBuffer(kd.configB, offset: 0, index: OakBuf.config.rawValue)
-          var ce = ecfg
+          var ce = bufs.ecfg
           ce.invObsFloor = 1 / Float(2 * Int(kd.off.perceptCount))
           enc.setBytes(&ce, length: MemoryLayout<FleetEnvCfg>.stride, index: OakBuf.envCfg.rawValue)
           enc.setBuffer(bufs.recordSlotBuf, offset: 0, index: OakBuf.aux0.rawValue)
@@ -1610,7 +1616,7 @@ final class TapeWriter {
       encodeSnapshot: { enc, half in
         var fullScan: UInt32 = 1
         for kd in engine.kinds {
-          bindFleet(enc, snapPipe)
+          bufs.bind(enc, snapPipe, res)
           enc.setBuffer(engine.params.b, offset: kd.paramBase * 4, index: OakBuf.params.rawValue)
           enc.setBuffer(engine.state.b, offset: kd.stateBase * 4, index: OakBuf.state.rawValue)
           enc.setBuffer(engine.uints.b, offset: kd.uintBase * 4, index: OakBuf.uints.rawValue)
@@ -1631,7 +1637,7 @@ final class TapeWriter {
       laneHashes: { lane, laneBytes in
         let spec = engine.envTable[Int(engine.kind(of: lane).kind)]
         let envState = bufs.envStateBuf.contents().bindMemory(
-          to: UInt32.self, capacity: bufs.envStateBuf.length / 4) + bufs.envOffsets[lane]
+          to: UInt32.self, capacity: bufs.envStateBuf.length / 4) + bufs.envOffset(lane)
         let laneWords = laneBytes.bindMemory(to: UInt32.self, capacity: fleetLaneStride / 4)
         let isCheetah = engine.kind(of: lane).kind == 0
         var canonical = [UInt32](repeating: 0, count: 60)
@@ -1760,7 +1766,7 @@ final class TapeWriter {
     }
     let bufs = try FleetBuffers(
       dev, lib: lib, seeds: seeds, laneEnvKinds: laneEnvKinds, envTable: envTable,
-      envConstantWords: envProbe.constantWords, steps: steps)
+      envConstantWords: envProbe.constantWords, steps: steps, policy: policy)
     let pipes: FleetPipes
     if let engine {
       pipes = try oakPipes(engine, lib, dev, bufs, ablations, e)
@@ -1770,6 +1776,7 @@ final class TapeWriter {
     let gpuSeconds = try runFleetLoop(
       q, bufs, pipes, seeds: seeds, steps: steps, root: root,
       laneEnvKinds: laneEnvKinds)
+    Self.pendingMeta["environmentMemoryBytes"] = bufs.envStateBuf.length
     Self.pendingMeta["gpuSeconds"] = gpuSeconds
     Self.pendingMeta["stepsPerSecond"] = gpuSeconds > 0
       ? Double(steps) * Double(seeds.count) / gpuSeconds : 0
@@ -1799,12 +1806,6 @@ final class TapeWriter {
       let fn = try lib.makeFunction(name: name, constantValues: constants)
       return try dev.makeComputePipelineState(function: fn)
     }
-    func makeBuf(_ len: Int) throws -> MTLBuffer {
-      guard let b = dev.makeBuffer(length: max(len, 16), options: [.storageModeShared]) else {
-        throw err("Metal buffer allocation failed (\(len) bytes).")
-      }
-      return b
-    }
     let isPpo = policy == "ppo"
     let obsMax = envTable.map(\.naturalO).max()!
     let actMax = envTable.map(\.actionCount).max()!
@@ -1822,35 +1823,20 @@ final class TapeWriter {
     let stepPipe = try pipeline("\(policy)_megastep")
     let snapPipe = try pipeline(isPpo ? "ppo_fleet_snapshot" : "baseline_fleet_snapshot")
     let B = bufs.B
-    let ecfg = bufs.ecfg
     let ppoBufs: [MTLBuffer]
     if isPpo {
       guard stepPipe.maxTotalThreadsPerThreadgroup >= 32 else {
         throw err("ppo_megastep supports only \(stepPipe.maxTotalThreadsPerThreadgroup) threads/threadgroup.")
       }
       ppoBufs = [
-        try makeBuf(B * ppoParamStride * 4),
-        try makeBuf(B * 2 * ppoParamStride * 4),
-        try makeBuf(B * ppoRollStride * 4),
-        try makeBuf(B * ppoScratchStride * 4),
-        try makeBuf(B * ppoStateStride * 4),
+        sharedBuffer(dev, B * ppoParamStride * 4),
+        sharedBuffer(dev, B * 2 * ppoParamStride * 4),
+        sharedBuffer(dev, B * ppoRollStride * 4),
+        sharedBuffer(dev, B * ppoScratchStride * 4),
+        sharedBuffer(dev, B * ppoStateStride * 4),
       ]
     } else {
       ppoBufs = []
-    }
-    func bindCommon(_ enc: MTLComputeCommandEncoder, _ pipe: MTLComputePipelineState) {
-      enc.setComputePipelineState(pipe)
-      for (j, b) in ppoBufs.enumerated() { enc.setBuffer(b, offset: 0, index: j) }
-      enc.setBuffer(bufs.laneBuf, offset: 0, index: OakBuf.lanes.rawValue)
-      enc.setBuffer(bufs.seedsBuf, offset: 0, index: OakBuf.seeds.rawValue)
-      enc.setBuffer(bufs.envStateBuf, offset: 0, index: 14)
-      enc.setBuffer(bufs.envOffBuf, offset: 0, index: 15)
-      enc.setBuffer(bufs.mjModelsBuf, offset: 0, index: 16)
-      enc.setBuffer(bufs.mjScratchBuf, offset: 0, index: 17)
-      enc.setBuffer(bufs.mjScratchOffBuf, offset: 0, index: 18)
-      enc.setBuffer(bufs.envConstantsBuf, offset: 0, index: 19)
-      var c = ecfg
-      enc.setBytes(&c, length: MemoryLayout<FleetEnvCfg>.stride, index: OakBuf.envCfg.rawValue)
     }
     let laneTG = mtlSize(min(
       64, initPipe.maxTotalThreadsPerThreadgroup, stepPipe.maxTotalThreadsPerThreadgroup,
@@ -1868,13 +1854,13 @@ final class TapeWriter {
     return FleetPipes(
       label: policy,
       encodeInit: { enc in
-        bindCommon(enc, initPipe)
+        bufs.bind(enc, initPipe, ppoBufs)
         enc.setBuffer(bufs.envKindsBuf, offset: 0, index: OakBuf.aux0.rawValue)
         enc.dispatchThreads(mtlSize(stepThreads), threadsPerThreadgroup: stepTG)
       },
       encodeMegastep: { cb, n, base in
         guard let enc = cb.makeComputeCommandEncoder(dispatchType: .concurrent) else { return }
-        bindCommon(enc, stepPipe)
+        bufs.bind(enc, stepPipe, ppoBufs)
         enc.setBuffer(bufs.recordSlotBuf, offset: 0, index: OakBuf.aux0.rawValue)
         enc.setBuffer(bufs.recordBuf, offset: 0, index: OakBuf.aux1.rawValue)
         var span = SIMD3<UInt32>(UInt32(n), UInt32(base), 0)
@@ -1887,7 +1873,7 @@ final class TapeWriter {
         enc.endEncoding()
       },
       encodeSnapshot: { enc, half in
-        bindCommon(enc, snapPipe)
+        bufs.bind(enc, snapPipe, ppoBufs)
         enc.setBuffer(bufs.snapBuf, offset: 0, index: OakBuf.aux0.rawValue)
         var snapBase = UInt32(half * B)
         enc.setBytes(&snapBase, length: 4, index: OakBuf.aux1.rawValue)
@@ -2116,6 +2102,15 @@ final class TapeWriter {
       let target = min(boundary, step + n)
       let isWindow = target % windowSteps == 0 || target == steps
       let isDump = dumpEvery > 0 && target % dumpEvery == 0
+      if bufs.environment.needsCapacity(through: target) {
+        inflight.wait()
+        inflight.wait()
+        writer.sync {}
+        if let error = st.error { throw error }
+        try bufs.environment.prepare(completedStep: step, throughStep: target)
+        inflight.signal()
+        inflight.signal()
+      }
       inflight.wait()
       if st.didFail, let err = st.error { throw err }
       if isWindow { windowSlots.wait() }
