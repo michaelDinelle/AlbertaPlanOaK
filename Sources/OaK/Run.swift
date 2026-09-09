@@ -441,7 +441,8 @@ struct FrameEntry {
 
 final class RunReader {
   let root: URL
-  let meta: RunMeta
+  private(set) var meta: RunMeta
+  private var metaSize = 0
   let fields: [String]
   let laneCount: Int
   private(set) var windows: [WindowRow] = []
@@ -486,6 +487,11 @@ final class RunReader {
   }
 
   func refresh() throws {
+    let metaNow = fileSize(root.appendingPathComponent("meta.json"))
+    if metaNow != metaSize {
+      meta = try RunMeta(root: root)
+      metaSize = metaNow
+    }
     let headersURL = root.appendingPathComponent("headers")
     let size = fileSize(headersURL)
     if size > headersScanned {
@@ -731,6 +737,17 @@ enum Checkpoint {
       out.append(Data(bytes: region.base, count: region.bytes))
     }
     try out.write(to: url, options: .atomic)
+  }
+
+  static func step(of url: URL) throws -> Int {
+    let handle = try FileHandle(forReadingFrom: url)
+    defer { try? handle.close() }
+    guard let head = try handle.read(upToCount: 12), head.count == 12 else { throw err("\(url.path): not a checkpoint") }
+    return try head.withUnsafeBytes { raw in
+      var r = ByteReader(raw)
+      guard try r.u32("magic") == magic else { throw err("\(url.path): not a checkpoint") }
+      return Int(try r.u64("step"))
+    }
   }
 
   static func load(_ url: URL) throws -> (step: Int, laneCount: Int, regions: [String: Data]) {

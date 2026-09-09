@@ -159,25 +159,30 @@ struct BenchmarkRequest {
   let resume: URL?
 
   init(json: Data) throws {
-    guard let obj = try JSONSerialization.jsonObject(with: json) as? [String: Any],
-      let root = obj["root"] as? String
-    else { throw err("benchmark request needs root") }
-    self.root = URL(fileURLWithPath: root, isDirectory: true)
+    guard let obj = try JSONSerialization.jsonObject(with: json) as? [String: Any] else {
+      throw err("benchmark request is not an object")
+    }
     timing = obj["timing"] as? Bool ?? false
     if let resumePath = obj["resume"] as? String {
       let checkpoint = URL(fileURLWithPath: resumePath)
-      let parent = try RunMeta(root: checkpoint.deletingLastPathComponent())
+      let parentRoot = checkpoint.deletingLastPathComponent()
+      let parent = try RunMeta(root: parentRoot)
+      let startStep = try Checkpoint.step(of: checkpoint)
       resume = checkpoint
       policy = parent.policy
       seeds = parent.seeds
-      steps = parent.steps
+      steps = obj["steps"] as? Int ?? parent.steps
+      guard steps > startStep else { throw err("resume horizon \(steps) is not past the checkpoint step \(startStep)") }
       envs = parent.envLanes.map { "\($0.envId):\($0.lanes.count)" }.joined(separator: ",")
       ablation = parent.raw["ablationLabel"] as? String ?? "none"
+      root = (obj["root"] as? String).map { URL(fileURLWithPath: $0, isDirectory: true) }
+        ?? parentRoot.deletingLastPathComponent().appendingPathComponent("\(parentRoot.lastPathComponent).\(startStep)", isDirectory: true)
       return
     }
     guard let policy = obj["policy"] as? String, let seeds = obj["seeds"] as? [Int],
-      let steps = obj["steps"] as? Int, let envs = obj["envs"] as? String
+      let steps = obj["steps"] as? Int, let envs = obj["envs"] as? String, let root = obj["root"] as? String
     else { throw err("benchmark request needs policy, seeds, steps, envs, root") }
+    self.root = URL(fileURLWithPath: root, isDirectory: true)
     resume = nil
     self.policy = policy
     self.seeds = seeds

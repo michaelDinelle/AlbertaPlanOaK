@@ -874,6 +874,25 @@ def cmd_job(args) -> int:
     return result
 
 
+def cmd_resume(args) -> int:
+    checkpoint = args.checkpoint.resolve()
+    if not checkpoint.is_file():
+        raise SystemExit(f"{checkpoint}: no such checkpoint")
+    if BENCH.resolve() not in checkpoint.parents:
+        raise SystemExit(f"{checkpoint}: checkpoints live under {BENCH}")
+    subprocess.run(["swift", "build", "-c", "release"], cwd=REPO, check=True)
+    current = daemon()
+    if current["running"] is not None:
+        raise SystemExit(f"OaK is already running {current['running']}")
+    request = {"resume": str(checkpoint), "timing": True}
+    if args.steps:
+        request["steps"] = int(args.steps)
+    started = json.loads(api("/api/benchmark", request))
+    print(f"[fleet] resumed {checkpoint.relative_to(BENCH)} as {started['id']}: a continuation, recorded without a gate")
+    print(f"  {BENCH / started['id']}\n  http://127.0.0.1:{PORT}")
+    return 0
+
+
 def gh(*args: str, check: bool = True) -> subprocess.CompletedProcess:
     return subprocess.run(["gh", *args], cwd=REPO, check=check, capture_output=True, text=True)
 
@@ -966,9 +985,12 @@ def main() -> int:
     gp.add_argument("candidate", type=Path)
     sub.add_parser("publish")
     sub.add_parser("fetch")
+    rs = sub.add_parser("resume")
+    rs.add_argument("checkpoint", type=Path)
+    rs.add_argument("--steps", type=int)
     args = ap.parse_args()
-    return {"run": cmd_run, "job": cmd_job, "report": cmd_report,
-            "gate": cmd_gate, "publish": cmd_publish, "fetch": cmd_fetch}[args.cmd](args)
+    return {"run": cmd_run, "job": cmd_job, "report": cmd_report, "gate": cmd_gate,
+            "publish": cmd_publish, "fetch": cmd_fetch, "resume": cmd_resume}[args.cmd](args)
 
 
 if __name__ == "__main__":
