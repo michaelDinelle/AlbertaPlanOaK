@@ -1,7 +1,7 @@
 name: releases
 on:
   release:
-    types: [created, published, edited, prereleased, released]
+    types: [published]
 permissions:
   contents: write
 jobs:
