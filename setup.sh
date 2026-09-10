@@ -17,6 +17,7 @@ case "$PRESET" in
   *) echo "choose a geometry preset: ./setup.sh --preset base|pro|max|ultra" >&2; exit 1 ;;
 esac
 command -v python3.11 >/dev/null || { echo "python3.11 not found." >&2; exit 1; }
+git -C "$ROOT" lfs pull
 
 [ -x "$VENV/bin/python" ] || python3.11 -m venv "$VENV"
 PY="$VENV/bin/python"
@@ -30,5 +31,4 @@ printf '%s\n' "$PRESET" > "$PRESET_FILE"
 swift build -c release
 command -v bun >/dev/null || { echo "bun not found." >&2; exit 1; }
 (cd "$ROOT/frontend" && bun install --frozen-lockfile && bun run build)
-"$PY" "$ROOT/fleet.py" fetch
 echo "Setup complete: OaK $PRESET. Run: ./fleet.py run, then open http://127.0.0.1:5174"

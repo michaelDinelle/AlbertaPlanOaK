@@ -29,7 +29,6 @@ BASELINE_STORE = BENCH / "baselines"
 OAK = REPO / ".build/release/OaK"
 PORT = int(os.environ.get("OAK_PORT", "5174"))
 DAEMON_LOG = BENCH / "oak.log"
-PAYLOAD_PARTS = 10
 FLEET_SCHEDULE = (
     ("HalfCheetah-v4", 0), ("FourRooms-cont-v0", 64), ("DeepSea-cont-v0", 128),
     ("KeyCorridor-cont-v0", 192), ("Acrobot-cont-v0", 256), ("MountainCar-cont-v0", 320),
@@ -67,12 +66,6 @@ def baseline_identity(meta: dict) -> str:
 def stored_baseline(meta: dict, policy: str) -> Path | None:
     root = BASELINE_STORE / baseline_identity(meta) / policy
     if not (root / "summary.json").is_file():
-        return None
-    if not recording_present(root):
-        print(f"[fleet] {root.relative_to(BENCH)} has no recording: recording {policy} again", flush=True)
-        for item in root.iterdir():
-            item.unlink()
-        root.rmdir()
         return None
     run = load(root)
     if run["meta"]["policy"] != policy or not same_run_shape({"meta": meta}, run):
@@ -182,10 +175,6 @@ def load(root: Path) -> dict:
     deaths = {int(lane): int(death[lane]) for lane in np.nonzero(np.isfinite(death))[0]}
     return {"meta": meta, "root": root, "ends": ends, "wall": wall,
             "lanes": int(reward_sum.shape[1]), "series": series_of, "deaths": deaths}
-
-
-def recording_present(root: Path) -> bool:
-    return any(f.is_file() for f in payload_files(root))
 
 
 def complete(run: dict) -> bool:
@@ -901,93 +890,6 @@ def cmd_resume(args) -> int:
     return 0
 
 
-def gh(*args: str, check: bool = True) -> subprocess.CompletedProcess:
-    return subprocess.run(["gh", *args], cwd=REPO, check=check, capture_output=True, text=True)
-
-
-def release_tags(name: str, meta: dict) -> list[tuple[str, Path]]:
-    identity = baseline_identity(meta)
-    return [(f"run-{name}", BENCH / name)] + [
-        (f"baseline-{identity}-{policy}", BASELINE_STORE / identity / policy)
-        for policy in ("ppo", "random")]
-
-
-def payload_files(root: Path) -> list[Path]:
-    return [root / f"payload.{part}" for part in range(PAYLOAD_PARTS)]
-
-
-def committed_best() -> tuple[str, dict]:
-    if subprocess.run(["git", "diff", "--quiet", "HEAD", "--", "best"], cwd=REPO).returncode != 0:
-        raise SystemExit("best is not committed")
-    name = best_hash()
-    if name is None:
-        raise SystemExit("no best")
-    return name, json.loads((BENCH / name / "meta.json").read_text())
-
-
-def cmd_tags(args) -> int:
-    name, meta = committed_best()
-    for tag, _ in release_tags(name, meta):
-        print(tag)
-    return 0
-
-
-def cmd_publish(args) -> int:
-    name, meta = committed_best()
-    for tag, root in release_tags(name, meta):
-        files = payload_files(root)
-        missing = [f.name for f in files if not f.is_file()]
-        if missing:
-            raise SystemExit(f"{root}: cannot publish without {missing}")
-        if gh("release", "view", tag, check=False).returncode != 0:
-            gh("release", "create", tag, "--title", tag, "--notes", "")
-        gh("release", "upload", tag, "--clobber", *map(str, files))
-        print(f"[fleet] published {tag}", flush=True)
-    return 0
-
-
-def origin() -> str:
-    url = subprocess.check_output(["git", "remote", "get-url", "origin"], cwd=REPO).decode().strip()
-    path = url.split("github.com")[-1].lstrip(":/")
-    return path[:-4] if path.endswith(".git") else path
-
-
-def fetch_release(tag: str, root: Path) -> None:
-    files = payload_files(root)
-    if all(f.is_file() for f in files):
-        return
-    root.mkdir(parents=True, exist_ok=True)
-    if subprocess.run(["which", "gh"], capture_output=True).returncode == 0:
-        gh("release", "download", tag, "--dir", str(root), "--pattern", "payload.*", "--clobber", check=False)
-    else:
-        for f in files:
-            subprocess.run(
-                ["curl", "-fL", "-o", str(f),
-                 f"https://github.com/{origin()}/releases/download/{tag}/{f.name}"], check=False)
-    missing = [f.name for f in files if not f.is_file()]
-    if missing:
-        for f in files:
-            f.unlink(missing_ok=True)
-        print(f"[fleet] {tag} is not published; {root.relative_to(REPO)} has headers only", flush=True)
-        return
-    print(f"[fleet] fetched {tag}", flush=True)
-
-
-def cmd_fetch(args) -> int:
-    name = best_hash()
-    if name is None:
-        print("[fleet] no best yet; nothing to fetch", flush=True)
-        return 0
-    meta = json.loads((BENCH / name / "meta.json").read_text())
-    for tag, root in release_tags(name, meta):
-        if not (root / "headers").is_file():
-            raise SystemExit(f"{root}: headers missing from the checkout")
-        fetch_release(tag, root)
-    for policy in ("ppo", "random"):
-        link_baseline(BENCH / name, policy, BASELINE_STORE / baseline_identity(meta) / policy)
-    return 0
-
-
 def main() -> int:
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -1001,15 +903,12 @@ def main() -> int:
     pp.add_argument("root", type=Path)
     gp = sub.add_parser("gate")
     gp.add_argument("candidate", type=Path)
-    sub.add_parser("publish")
-    sub.add_parser("tags")
-    sub.add_parser("fetch")
     rs = sub.add_parser("resume")
     rs.add_argument("checkpoint", type=Path)
     rs.add_argument("--steps", type=int)
     args = ap.parse_args()
     return {"run": cmd_run, "job": cmd_job, "report": cmd_report, "gate": cmd_gate,
-            "publish": cmd_publish, "tags": cmd_tags, "fetch": cmd_fetch, "resume": cmd_resume}[args.cmd](args)
+            "resume": cmd_resume}[args.cmd](args)
 
 
 if __name__ == "__main__":

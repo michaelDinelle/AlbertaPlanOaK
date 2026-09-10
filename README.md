@@ -25,7 +25,7 @@ Keeper: `93ba60adc94c2214db31e61a56ad693e241d1a72`. Full-run reward per step ove
 
 ## Setup and run
 
-Requires macOS 26+, Xcode with Metal tools, Python 3.11, Bun, and `gh`. From the repo root: `./setup.sh --preset base` builds the engine and the page and fetches the best fleet and its baselines, then `./fleet.py run` records a candidate. Everything is served by one process, `.build/release/OaK`, which `./fleet.py` starts; open http://127.0.0.1:5174. For page development, `cd frontend && bun run dev` and open http://localhost:5173.
+Requires macOS 26+, Xcode with Metal tools, Python 3.11, Bun, and Git LFS, which carries the recordings of the best fleet and its baselines with the repository. From the repo root: `./setup.sh --preset base` builds the engine and the page, then `./fleet.py run` records a candidate. Everything is served by one process, `.build/release/OaK`, which `./fleet.py` starts; open http://127.0.0.1:5174. For page development, `cd frontend && bun run dev` and open http://localhost:5173.
 
 Geometry is agent capacity, declared in `Sources/Geometry.metal`; larger presets use more compute and memory. Wide streams increase percept and feature counts above these declared sizes.
 

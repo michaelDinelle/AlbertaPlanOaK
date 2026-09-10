@@ -8,6 +8,7 @@
 !.oak-benchmarks/*/identity.json
 !.oak-benchmarks/*/summary.json
 !.oak-benchmarks/*/headers
+!.oak-benchmarks/*/payload.*
 !.oak-benchmarks/*/baselines/
 .oak-benchmarks/*/baselines/*
 !.oak-benchmarks/*/baselines/ppo
@@ -21,6 +22,7 @@
 !.oak-benchmarks/baselines/*/*/meta.json
 !.oak-benchmarks/baselines/*/*/summary.json
 !.oak-benchmarks/baselines/*/*/headers
+!.oak-benchmarks/baselines/*/*/payload.*
 
 media/*.mp4
 
