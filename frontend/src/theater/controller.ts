@@ -242,6 +242,9 @@ function applyPendingSeek(): void {
 
 function mountHero(): void {
   const gen = ++generation;
+  if (hero !== null && sceneHost !== null && attached && selectionSnapshot().pendingSeekStep === null) {
+    setPendingSeek(stepFromFrame(sceneHost.clock.position(), hero.totalSteps, hero.source.frameCount));
+  }
   const sel = selectionSnapshot();
   const inp = inputs;
   if (hero !== null) {
