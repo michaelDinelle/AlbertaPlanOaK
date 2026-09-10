@@ -2,12 +2,12 @@
 
 Geometry: 32 percepts, 480 features (96 active per step), 32 options.
 
-Keeper: `b0833b1551659c272cd4bec9b4fa358626849a4f`. Full-run reward per step over 1,000,000 steps, 64 seeds per environment. IQM averages the middle 50% of seeds. Win percentages compare matching seeds; ties count as half a win.
+Keeper: `93ba60adc94c2214db31e61a56ad693e241d1a72`. Full-run reward per step over 1,000,000 steps, 64 seeds per environment. IQM averages the middle 50% of seeds. Win percentages compare matching seeds; ties count as half a win.
 
 | Environment | OaK mean | OaK IQM | PPO mean | PPO IQM | Random mean | Random IQM | OaK vs PPO wins | OaK vs Random wins | PPO vs Random wins |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | Acrobot-cont-v0 | 0.0059618 | 0.00592066 | 0.00885534 | 0.00909559 | 0.000386531 | 0.000385812 | 3.12% | 100.00% | 98.44% |
-| Chain-cont-v0 | 0.0654791 | 0.0655594 | 0.0664122 | 0.0664693 | 0.00417067 | 0.00417069 | 1.56% | 100.00% | 100.00% |
+| Chain-cont-v0 | 0.0654791 | 0.0655594 | 0.0664122 | 0.0664692 | 0.00417067 | 0.00417069 | 1.56% | 100.00% | 100.00% |
 | DeepSea-cont-v0 | 0.140243 | 0.140262 | 0.0938155 | 0.117435 | 0.000500562 | 0.000500166 | 93.75% | 100.00% | 70.31% |
 | DelayedChain-cont-v0 | 0.0308337 | 0.030964 | 0.0274261 | 0.0321192 | 0.00101069 | 0.00101266 | 18.75% | 100.00% | 87.50% |
 | FourRooms-cont-v0 | 0.0063565 | 0.00665075 | 0.104155 | 0.104583 | 0.0026182 | 0.00262144 | 0.00% | 84.38% | 100.00% |
