@@ -142,7 +142,7 @@ class FogboundForestScene extends StageScene<WorldHandle> {
     const grid = this.grid;
     const halfX = grid.w * CELL / 2;
     const halfZ = grid.h * CELL / 2;
-    this.sceneView = makeSceneView(ctx, { min: [-halfX, 0, -halfZ], max: [halfX, 1.8, halfZ] }, [0, 0.82, 0], { distance: 4.7, azimuth: -1.35, polar: 1.32 });
+    this.sceneView = makeSceneView(ctx, { min: [-halfX, 0, -halfZ], max: [halfX, 1.8, halfZ] }, [0, 0.82, 0], { distance: 17, azimuth: -1.35, polar: 0.73 });
     return this.sceneView.options;
   }
 
@@ -282,7 +282,7 @@ class FogboundForestScene extends StageScene<WorldHandle> {
 
     world.setTime(time);
 
-    if (this.sceneView) world.setView(this.sceneView.update(rig, frame.dtReal, [wx, 0.82, wz]), this.camera);
+    if (this.sceneView) world.setView(this.sceneView.update(rig, frame.dtReal), this.camera);
   }
 
   protected drop(): void {
