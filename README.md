@@ -1,6 +1,6 @@
 # OaK
 
-> ⚠️ Recorded on a binned M4 Max; numerical stability across machines is not guaranteed, and rewards may differ.
+Recorded on a binned M4 Max.
 
 ## Base
 
