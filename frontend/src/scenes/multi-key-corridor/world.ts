@@ -559,16 +559,19 @@ export function makePortalGeometry(skin: TempleSkin): THREE.BufferGeometry {
   const parts: ColoredPart[] = [];
   const PIER_H = PORTAL_LINTEL_Y;
   const PIER_Z = 0.95;
+  const PLINTH_H = 0.14;
+  const CAPITAL_H = 0.13;
+  const SHAFT_H = PIER_H - PLINTH_H - CAPITAL_H;
 
   for (const sz of [-1, 1]) {
-    const pier = new THREE.BoxGeometry(0.46, PIER_H, 0.42);
-    pier.translate(0, PIER_H * 0.5, sz * PIER_Z);
+    const pier = new THREE.BoxGeometry(0.46, SHAFT_H, 0.42);
+    pier.translate(0, PLINTH_H + SHAFT_H * 0.5, sz * PIER_Z);
     parts.push({ geometry: pier, color: skin.stoneLight });
-    const plinth = new THREE.BoxGeometry(0.58, 0.14, 0.54);
-    plinth.translate(0, 0.07, sz * PIER_Z);
+    const plinth = new THREE.BoxGeometry(0.58, PLINTH_H, 0.54);
+    plinth.translate(0, PLINTH_H * 0.5, sz * PIER_Z);
     parts.push({ geometry: plinth, color: skin.stoneDark });
-    const capital = new THREE.BoxGeometry(0.56, 0.13, 0.5);
-    capital.translate(0, PIER_H - 0.065, sz * PIER_Z);
+    const capital = new THREE.BoxGeometry(0.56, CAPITAL_H, 0.5);
+    capital.translate(0, PIER_H - CAPITAL_H * 0.5, sz * PIER_Z);
     parts.push({ geometry: capital, color: skin.stoneDark });
     const finial = new THREE.OctahedronGeometry(0.095, 1);
     finial.scale(1, 1.7, 1);
