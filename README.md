@@ -1,4 +1,12 @@
-# OaK
+# OaK (Options and Knowledge)
+
+![Eight OaK environments playing inside a magenta butterfly](butterfly.png)
+
+[The Alberta Plan for AI Research](https://arxiv.org/abs/2208.11173) — Richard S. Sutton, Michael Bowling, and Patrick M. Pilarski.
+
+<img src="fc-stomp.png" alt="FC-STOMP cycle of discovery: state features define subtasks, learned options define models, and planning and feature use close the feedback loop." width="700">
+
+Cycle of discovery from Richard S. Sutton's [Alberta Plan slides, slide 11](http://incompleteideas.net/Talks/AlbertaPlan.pdf#page=11).
 
 Recorded on a binned M4 Max.
 
