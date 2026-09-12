@@ -57,7 +57,6 @@ export function CommandPalette({
   envList,
   setView,
   openWall,
-  openAbout,
   panelHidden,
   togglePanel,
   fullscreenTarget,
@@ -68,7 +67,6 @@ export function CommandPalette({
   envList: readonly EnvId[];
   setView: (view: PanelView) => void;
   openWall: () => void;
-  openAbout: () => void;
   panelHidden: boolean;
   togglePanel: () => void;
   fullscreenTarget: { current: HTMLElement | null };
@@ -158,9 +156,6 @@ export function CommandPalette({
                 </Item>
               </Command.Group>
               <Command.Group heading={STR.palette.actions}>
-                <Item onPick={done(openAbout)} hint={STR.about.open} shortcut="?">
-                  {STR.palette.about}
-                </Item>
                 <Item
                   onPick={done(() => setTransport({ playing: !transportSnapshot().playing }))}
                   hint={STR.palette.playPause}

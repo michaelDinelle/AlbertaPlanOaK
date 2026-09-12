@@ -10,7 +10,6 @@ export type KeyAction =
   | { kind: 'policy' }
   | { kind: 'panel' }
   | { kind: 'view'; index: number }
-  | { kind: 'about' }
   | { kind: 'escape' };
 
 export function keyAction(key: string, shift = false): KeyAction | null {
@@ -50,8 +49,6 @@ export function keyAction(key: string, shift = false): KeyAction | null {
     case '3':
     case '4':
       return { kind: 'view', index: Number(key) - 1 };
-    case '?':
-      return { kind: 'about' };
     case 'Escape':
       return { kind: 'escape' };
     default:

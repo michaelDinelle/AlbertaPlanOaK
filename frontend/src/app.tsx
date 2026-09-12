@@ -4,8 +4,6 @@ import { clsx } from 'clsx';
 import { ChevronDown, PanelRightOpen, RotateCcw } from 'lucide-react';
 import { ENV_IDS } from './data/envs';
 import type { Policy, RunDetail, RunIndexEntry } from './data/types';
-import { AboutOaK } from './about/AboutOaK';
-import { aboutSeen, markAboutSeen } from './about/seen';
 import { baselineDetailQuery, runDetailQuery, runsQuery } from './data/queries';
 import { Panel } from './glass/Panel';
 import { formatStep } from './lib/format';
@@ -176,15 +174,9 @@ export function App() {
   const [view, setView] = useState<PanelView>('reward');
   const [wallOpen, setWallOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
-  const [aboutOpen, setAboutOpen] = useState(() => !aboutSeen());
   const [panelHidden, setPanelHidden] = useState(false);
   const [panelSettled, setPanelSettled] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
-
-  const closeAbout = (): void => {
-    setAboutOpen(false);
-    markAboutSeen();
-  };
 
   useEffect(() => {
     if (!panelHidden) {
@@ -306,12 +298,7 @@ export function App() {
           }
           break;
         }
-        case 'about':
-          if (aboutOpen) closeAbout();
-          else setAboutOpen(true);
-          break;
         case 'escape':
-          if (aboutOpen) break;
           if (wallOpen) setWallOpen(false);
           else unpromote();
           break;
@@ -319,7 +306,7 @@ export function App() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [envList, stride, wallOpen, paletteOpen, aboutOpen, policies]);
+  }, [envList, stride, wallOpen, paletteOpen, policies]);
 
   const notice = runsQ.isError
     ? {
@@ -367,7 +354,6 @@ export function App() {
             best={best}
             active={active}
             onHide={() => setPanelHidden(true)}
-            onAbout={() => setAboutOpen(true)}
           />
         )}
       </div>
@@ -407,14 +393,12 @@ export function App() {
           envList={wallEnvs}
           setView={setView}
           openWall={() => setWallOpen(true)}
-          openAbout={() => setAboutOpen(true)}
           panelHidden={panelHidden}
           togglePanel={() => setPanelHidden((hidden) => !hidden)}
           fullscreenTarget={rootRef}
           onClose={() => setPaletteOpen(false)}
         />
       )}
-      {aboutOpen && <AboutOaK onClose={closeAbout} />}
     </div>
   );
 }

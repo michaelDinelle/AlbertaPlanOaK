@@ -1,5 +1,5 @@
 import { clsx } from 'clsx';
-import { Info, PanelRightClose } from 'lucide-react';
+import { PanelRightClose } from 'lucide-react';
 import type { Policy, RunDetail } from '../data/types';
 import { Panel } from '../glass/Panel';
 import { Hotkey } from './charts';
@@ -8,6 +8,7 @@ import { ComputeView } from './ComputeView';
 import { HealthView } from './HealthView';
 import { RewardView } from './RewardView';
 import { StandingsView } from './StandingsView';
+import { AUTHOR_LINKS } from './links';
 
 export type PanelView = keyof typeof STR.panels;
 
@@ -20,7 +21,6 @@ export function StatsPanel({
   best,
   active,
   onHide,
-  onAbout,
 }: {
   view: PanelView;
   setView: (view: PanelView) => void;
@@ -28,10 +28,27 @@ export function StatsPanel({
   best: RunDetail | null;
   active: RunDetail | null;
   onHide: () => void;
-  onAbout: () => void;
 }) {
   return (
     <Panel className="flex max-h-full w-full flex-col overflow-hidden py-2.5">
+      <header className="mx-3 mb-2 flex shrink-0 items-center gap-3 border-b border-white/10 pb-2">
+        <span className="min-w-0 text-xs text-ink-dim">{STR.author.by}</span>
+        <nav aria-label={STR.author.links} className="ml-auto flex items-center gap-1">
+          {AUTHOR_LINKS.map(({ href, label, Mark }) => (
+            <a
+              key={href}
+              href={href}
+              target="_blank"
+              rel="noreferrer"
+              aria-label={STR.author.follow(label)}
+              title={STR.author.follow(label)}
+              className="flex size-8 items-center justify-center rounded-md text-ink-dim transition-colors hover:bg-white/10 hover:text-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+            >
+              <Mark className="size-3.5" />
+            </a>
+          ))}
+        </nav>
+      </header>
       <div className="flex items-center gap-1 px-2 pb-2">
         {PANEL_VIEWS.map((id, index) => (
           <Hotkey key={id} label={STR.palette.show(STR.panels[id])} keyName={String(index + 1)}>
@@ -48,16 +65,6 @@ export function StatsPanel({
           </Hotkey>
         ))}
         <span className="ml-auto flex items-center gap-1">
-          <Hotkey label={STR.about.title} keyName="?" align="end">
-            <button
-              type="button"
-              onClick={onAbout}
-              aria-label={STR.about.open}
-              className="flex size-6 shrink-0 items-center justify-center rounded-md text-ink-faint transition-colors hover:bg-white/10 hover:text-ink active:bg-white/15"
-            >
-              <Info className="size-3.5" />
-            </button>
-          </Hotkey>
           <Hotkey label={STR.bar.hidePanel} keyName="c" align="end">
             <button
               type="button"
