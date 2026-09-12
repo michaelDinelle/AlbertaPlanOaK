@@ -17,7 +17,6 @@ case "$PRESET" in
   *) echo "choose a geometry preset: ./setup.sh --preset base|pro|max|ultra" >&2; exit 1 ;;
 esac
 command -v python3.11 >/dev/null || { echo "python3.11 not found." >&2; exit 1; }
-git -C "$ROOT" lfs pull
 
 [ -x "$VENV/bin/python" ] || python3.11 -m venv "$VENV"
 PY="$VENV/bin/python"

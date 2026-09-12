@@ -1,28 +1,7 @@
 /.build/
 /.swiftpm/
 
-.oak-benchmarks/*
-!.oak-benchmarks/*/
-.oak-benchmarks/*/*
-!.oak-benchmarks/*/meta.json
-!.oak-benchmarks/*/identity.json
-!.oak-benchmarks/*/summary.json
-!.oak-benchmarks/*/headers
-!.oak-benchmarks/*/payload.*
-!.oak-benchmarks/*/baselines/
-.oak-benchmarks/*/baselines/*
-!.oak-benchmarks/*/baselines/ppo
-!.oak-benchmarks/*/baselines/random
-!.oak-benchmarks/baselines/
-.oak-benchmarks/baselines/*
-!.oak-benchmarks/baselines/*/
-.oak-benchmarks/baselines/*/*
-!.oak-benchmarks/baselines/*/*/
-.oak-benchmarks/baselines/*/*/*
-!.oak-benchmarks/baselines/*/*/meta.json
-!.oak-benchmarks/baselines/*/*/summary.json
-!.oak-benchmarks/baselines/*/*/headers
-!.oak-benchmarks/baselines/*/*/payload.*
+/.oak-benchmarks/
 
 media/*.mp4
 
