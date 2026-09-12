@@ -14,7 +14,6 @@ Recorded on a binned M4 Max.
 
 Geometry: 32 percepts, 480 features (96 active per step), 32 options; 200,160 total parameters (6 action dimensions). 633,097 SPS.
 
-Keeper: `93ba60adc94c2214db31e61a56ad693e241d1a72`. Full-run reward per step over 1,000,000 steps, 64 seeds per environment. IQM averages the middle 50% of seeds. Win percentages compare matching seeds; ties count as half a win.
 
 | Environment | OaK mean | OaK IQM | PPO mean | PPO IQM | Random mean | Random IQM | OaK vs PPO wins | OaK vs Random wins | PPO vs Random wins |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
