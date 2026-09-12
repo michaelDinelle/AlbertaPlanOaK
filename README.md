@@ -1,6 +1,6 @@
 # OaK (Options and Knowledge)
 
-![Eight OaK environments playing inside a magenta butterfly](butterfly.png)
+![Eight OaK environments playing inside a pink butterfly](butterfly.png)
 
 [The Alberta Plan for AI Research](https://arxiv.org/abs/2208.11173) — Richard S. Sutton, Michael Bowling, and Patrick M. Pilarski.
 
