@@ -304,7 +304,6 @@ final class Daemon: @unchecked Sendable {
       "steps": r.meta.steps,
       "startedAt": meta["startedAt"] ?? NSNull(),
       "complete": r.complete,
-      "maxStep": r.maxStep,
       "inFlight": running?.root.standardizedFileURL == r.root.standardizedFileURL,
       "hasSummary": FileManager.default.fileExists(atPath: r.root.appendingPathComponent("summary.json").path),
       "hasRecordings": !r.frames.isEmpty,
@@ -367,7 +366,7 @@ final class Daemon: @unchecked Sendable {
       }
       switch (request.method, segs.dropFirst().map { $0 }) {
       case ("GET", ["identity"]):
-        return try .json(["binary": binarySha, "port": Int(port), "running": running?.id ?? NSNull()])
+        return try .json(["binary": binarySha, "running": running?.id ?? NSNull()] as [String: Any])
       case ("GET", ["runs"]):
         return try .json(runList())
       case ("GET", let s) where s.count == 2 && s[0] == "runs":

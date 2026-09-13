@@ -79,7 +79,7 @@ export function HealthView({ active }: { active: RunDetail | null }) {
   }, [rates, rho]);
 
   const kmBand = useMemo(() => {
-    const km = sel.envId === null ? undefined : summary?.envs[sel.envId]?.divergence.km;
+    const km = sel.envId === null ? undefined : summary?.envs[sel.envId]?.km;
     if (km === undefined || km.steps.length === 0) return null;
     return bandRows(km.steps, km.ci95[0], km.ci95[1]);
   }, [summary, sel.envId]);

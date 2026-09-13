@@ -5,7 +5,6 @@ import Metal
 
 struct OakError: Error, CustomStringConvertible { let description: String }
 func err(_ s: String) -> OakError { OakError(description: s) }
-let lockName = ".oak-benchmark.lock"
 
 struct KernelScalars {
   var stepCount: UInt32 = 0, stateSlot: UInt32 = 0
@@ -35,10 +34,6 @@ enum OakConst: Int {
 }
 
 enum OakBuf: Int {
-  case params = 0
-  case state = 1
-  case uints = 2
-  case scalars = 3
   case envCfg = 8
   case aux0 = 9
   case aux1 = 10
@@ -129,9 +124,10 @@ struct ShapeProbe {
   var featureCount, optionCount, nursery, traceLevels, perceptCount: UInt32
   var paramStride, stateStride, uintStride: UInt32
   var pOption, recordFloats, recordValue, recordPolicy: UInt32
-  var stUtilOpt, stAlpha, stBeta, stAlphaPsi, stBetaPsi, stAlphaModel, stBetaModel, stAlphaAct, stBetaAct: UInt32
-  var uOptFeature, uParentA, uParentB, uKind, uNurParentA: UInt32
+  var stUtilOpt, stValueMeta, stOptionValueMeta, stModelMeta, stActorMeta: UInt32
+  var uOptFeature, uFeatureMeta, uNurseryMeta: UInt32
   var simdWidth, threadgroupLanes, activeFeatures, featureTimeScale, optionsPerThread, actorAlphaDenom: UInt32
+  var laneThreadgroupFloats: UInt32
 }
 final class Shared<T> {
   let b: MTLBuffer
@@ -168,28 +164,15 @@ func runProbe(_ queue: MTLCommandQueue, _ function: MTLFunction, _ buffers: [MTL
 struct EnvSpec {
   static let poseLen = 9
   static let stride = 12 + poseLen
-  static let slotNames = [
-    "none", "x", "y", "gx", "gy", "kx", "ky", "carry", "gates", "tokens", "cue", "heading",
-    "effort", "banana", "onion", "jellyBean", "truffle", "depletionLo", "depletionHi",
-  ]
   let nameHash: UInt32
   let naturalO: Int
-  let actionKind: Int
   let actionCount: Int
   let actionParams: Int
-  let gridW: Int
-  let gridH: Int
   let controlHz: Int
   let envStateWords: Int
   let mjIndex: Int
-  let laneThreads: Int
   let slots: [Int]
   let persistentEntryWords: Int
-  static func slotName(_ code: Int) -> String {
-    if code >= 32 { return "q\(code - 32)" }
-    guard code >= 0, code < slotNames.count else { return "none" }
-    return slotNames[code]
-  }
 }
 
 struct EnvTable {
@@ -287,18 +270,14 @@ final class Engine {
     let kind: UInt32
     let naturalO, d, count, firstLane: Int
     let off: ShapeProbe
-    let paramTotal, stateTotal, uintTotal: Int
     let paramBase, stateBase, uintBase: Int
   }
   let batch: Int
   let kinds: [Kind]
-  let laneKindIdx: [Int]
   let envTable: [EnvSpec]
   let q: MTLCommandQueue, params, state: Shared<Float>,
     uints: Shared<UInt32>, res: [MTLBuffer]
   let scalarsB: MTLBuffer
-  let scalars: UnsafeMutablePointer<KernelScalars>
-  func kind(of lane: Int) -> Kind { kinds[laneKindIdx[lane]] }
   static func specConstants(_ spec: EnvSpec, kind: UInt32) -> MTLFunctionConstantValues {
     let constants = MTLFunctionConstantValues()
     var o32 = UInt32(spec.naturalO)
@@ -310,9 +289,9 @@ final class Engine {
     return constants
   }
   static func runShapeProbe(_ queue: MTLCommandQueue, _ lib: MTLLibrary, _ spec: EnvSpec, kind: UInt32) throws -> ShapeProbe {
-    precondition(MemoryLayout<ShapeProbe>.stride == 128, "ShapeProbe layout drifted from OakShapeProbe")
+    precondition(MemoryLayout<ShapeProbe>.stride == 108, "ShapeProbe layout drifted from OakShapeProbe")
     let fn = try lib.makeFunction(name: "oak_shape_probe", constantValues: specConstants(spec, kind: kind))
-    let outB = sharedBuffer(queue.device, 128)
+    let outB = sharedBuffer(queue.device, 108)
     try runProbe(queue, fn, [outB])
     return outB.contents().bindMemory(to: ShapeProbe.self, capacity: 1).pointee
   }
@@ -328,22 +307,12 @@ final class Engine {
     let specs = (0..<Main.envIdsByKind.count).map { i in
       let row = 5 + i * EnvSpec.stride
       return EnvSpec(
-        nameHash: tbl[row], naturalO: Int(tbl[row + 1]), actionKind: Int(tbl[row + 2]),
+        nameHash: tbl[row], naturalO: Int(tbl[row + 1]),
         actionCount: Int(tbl[row + 3]), actionParams: Int(tbl[row + 4]),
-        gridW: Int(tbl[row + 5]), gridH: Int(tbl[row + 6]),
         controlHz: Int(tbl[row + 7]), envStateWords: Int(tbl[row + 8]),
         mjIndex: tbl[row + 9] == 0xffff_ffff ? -1 : Int(tbl[row + 9]),
-        laneThreads: Int(tbl[row + 10]),
         slots: (0..<EnvSpec.poseLen).map { Int(tbl[row + 11 + $0]) },
         persistentEntryWords: Int(tbl[row + 11 + EnvSpec.poseLen]))
-    }
-    if let bad = specs.first(where: { $0.mjIndex >= 0 && $0.laneThreads <= 1 }) {
-      throw err(
-        "Env \(bad.nameHash) uses the physics engine but declares laneThreads "
-          + "\(bad.laneThreads); the engine requires a full simdgroup per lane.")
-    }
-    if let bad = specs.first(where: { $0.laneThreads != 1 && $0.laneThreads != 32 }) {
-      throw err("Env \(bad.nameHash) declares laneThreads \(bad.laneThreads); expected 1 or 32.")
     }
     guard tbl[1] == UInt32(specs.map(\.naturalO).max()!),
       tbl[2] == UInt32(specs.map(\.actionCount).max()!),
@@ -379,7 +348,6 @@ final class Engine {
     }
     var built: [Kind] = []
     var pBase = 0, sBase = 0, uBase = 0
-    var laneIdx = [Int](repeating: 0, count: b)
     for r in runs {
       let spec = table[Int(r.kind)]
       let sp = try Engine.runShapeProbe(queue, lib, spec, kind: r.kind)
@@ -388,23 +356,18 @@ final class Engine {
       precondition(Int(sp.stateStride) % 4 == 0, "stateStride must stay 16B-aligned")
       let kd = Kind(
         kind: r.kind, naturalO: spec.naturalO, d: spec.actionParams, count: r.count, firstLane: r.firstLane,
-        off: sp, paramTotal: Int(sp.paramStride), stateTotal: Int(sp.stateStride),
-        uintTotal: Int(sp.uintStride), paramBase: pBase, stateBase: sBase, uintBase: uBase)
+        off: sp, paramBase: pBase, stateBase: sBase, uintBase: uBase)
       built.append(kd)
-      for l in r.firstLane..<(r.firstLane + r.count) { laneIdx[l] = built.count - 1 }
-      pBase += r.count * kd.paramTotal
-      sBase += r.count * kd.stateTotal
-      uBase += r.count * kd.uintTotal
+      pBase += r.count * Int(sp.paramStride)
+      sBase += r.count * Int(sp.stateStride)
+      uBase += r.count * Int(sp.uintStride)
     }
     kinds = built
-    laneKindIdx = laneIdx
     envTable = table
     params = Shared(dev, pBase, 0)
     state = Shared(dev, sBase, 0)
     uints = Shared(dev, uBase, 0)
-    let scalarStorage = Shared(dev, batch, KernelScalars())
-    scalarsB = scalarStorage.b
-    scalars = scalarStorage.p
+    scalarsB = Shared(dev, batch, KernelScalars()).b
     res = [params.b, state.b, uints.b, scalarsB]
     for kd in kinds {
       let sp = kd.off
@@ -419,40 +382,39 @@ final class Engine {
       let basis = 1 / Float(max(kd.d, 1))
       for local in 0..<kd.count {
         let lane = kd.firstLane + local
-        let lp = params.p + kd.paramBase + local * kd.paramTotal
-        let ls = state.p + kd.stateBase + local * kd.stateTotal
-        let lu = uints.p + kd.uintBase + local * kd.uintTotal
+        let lp = params.p + kd.paramBase + local * Int(sp.paramStride)
+        let ls = state.p + kd.stateBase + local * Int(sp.stateStride)
+        let lu = uints.p + kd.uintBase + local * Int(sp.uintStride)
         for n in 0..<rn {
-          lu[Int(sp.uNurParentA) + n] = UInt32(n % ((n % 4 == 3) ? traceChannels : percepts))
-          lu[Int(sp.uNurParentA) + rn + n] = UInt32((n * 7 + 3) % percepts)
-          lu[Int(sp.uNurParentA) + 2 * rn + n] = UInt32(n % 4)
+          let meta = lu + Int(sp.uNurseryMeta) + 4 * n
+          meta[0] = UInt32(n % ((n % 4 == 3) ? traceChannels : percepts))
+          meta[1] = UInt32((n * 7 + 3) % percepts)
+          meta[2] = UInt32(n % 4)
         }
         for i in 0..<featureCount {
+          let meta = lu + Int(sp.uFeatureMeta) + 4 * i
           if i >= percepts {
             let idx = i - percepts
             if idx < traceChannels {
-              lu[Int(sp.uParentA) + i] = UInt32(idx)
-              lu[Int(sp.uParentB) + i] = 0
-              lu[Int(sp.uKind) + i] = 3
+              meta[0] = UInt32(idx)
+              meta[1] = 0
+              meta[2] = 3
             } else {
-              lu[Int(sp.uParentA) + i] = UInt32(idx % percepts)
-              lu[Int(sp.uParentB) + i] = UInt32((idx * 7 + 3) % percepts)
-              lu[Int(sp.uKind) + i] = UInt32(idx % 3)
+              meta[0] = UInt32(idx % percepts)
+              meta[1] = UInt32((idx * 7 + 3) % percepts)
+              meta[2] = UInt32(idx % 3)
             }
-          } else {
-            lu[Int(sp.uParentA) + i] = 0
-            lu[Int(sp.uParentB) + i] = 0
-            lu[Int(sp.uKind) + i] = 0
           }
-          [sp.stAlpha, sp.stAlphaPsi, sp.stAlphaModel].forEach { ls[Int($0) + i] = alpha0 }
-          [sp.stBeta, sp.stBetaPsi, sp.stBetaModel].forEach { ls[Int($0) + i] = log(alpha0) }
+          for base in [sp.stValueMeta, sp.stOptionValueMeta, sp.stModelMeta] {
+            ls[Int(base) + 4 * i] = alpha0
+            ls[Int(base) + 4 * i + 1] = log(alpha0)
+          }
         }
         for kk in 0..<k {
           lu[Int(sp.uOptFeature) + kk] = UInt32(kk)
           lp[Int(sp.pOption) + (kk * k + kk) * record + Int(sp.recordValue)] = inv
           ls[Int(sp.stUtilOpt) + kk] = Float(featureCount)
-          ls[Int(sp.stAlphaAct) + kk] = 1
-          ls[Int(sp.stBetaAct) + kk] = 0
+          ls[Int(sp.stActorMeta) + 4 * kk] = 1
           let h = UInt32(truncatingIfNeeded: lane &* 2_654_435_761 &+ kk &* 40_503 &+ 977)
           let slot = Int(h % UInt32(max(kd.d / 2, 1)))
           let sign: Float = ((h >> 16) & 1) == 0 ? 1 : -1
@@ -815,16 +777,10 @@ final class RecordWriter: @unchecked Sendable {
       let spec = table[kind]
       let codec = RecordCodec.byKind[kind]
       return [
-        "envId": envId, "kind": kind,
-        "actionKind": spec.actionKind == 0 ? "box" : "discrete",
-        "actionCount": spec.actionCount,
+        "envId": envId,
         "controlHz": spec.controlHz,
-        "gridW": spec.gridW, "gridH": spec.gridH,
-        "slots": spec.slots.map(EnvSpec.slotName),
         "category": codec.category,
-        "fields": codec.fields.map { f in
-          ["slot": f.idx, "scale": f.scale, "wrap": f.wrap, "anchor": f.anchor] as [String: Any]
-        },
+        "fields": codec.fields.map { f in ["slot": f.idx, "wrap": f.wrap] as [String: Any] },
       ]
     }
     try JSONSerialization.data(
@@ -837,15 +793,6 @@ final class RecordWriter: @unchecked Sendable {
     var buf = [CChar](repeating: 0, count: size)
     guard sysctlbyname(name, &buf, &size, nil, 0) == 0 else { return "" }
     return String(cString: buf)
-  }
-  static func hardwareInfo(_ dev: MTLDevice) -> [String: Any] {
-    [
-      "gpu": dev.name,
-      "machine": sysctlString("hw.model"),
-      "cpuCores": ProcessInfo.processInfo.processorCount,
-      "memoryBytes": ProcessInfo.processInfo.physicalMemory,
-      "os": ProcessInfo.processInfo.operatingSystemVersionString,
-    ]
   }
   static func hardwareKey(_ dev: MTLDevice) -> String {
     let parts = "\(sysctlString("hw.model"))|\(dev.name)|\(ProcessInfo.processInfo.processorCount)"
@@ -995,38 +942,23 @@ final class RecordWriter: @unchecked Sendable {
     var snapPipes: [MTLComputePipelineState] = []
     var stepPipes: [MTLComputePipelineState] = []
     var kindMegaG: [Int] = []
-    var geometries: [[String: Any]] = []
+    var shapes = Set<UInt32>()
     for kd in engine.kinds {
       let sp = kd.off
-      let shape: [String: Any] = [
-        "percepts": Int(sp.perceptCount), "features": Int(sp.featureCount),
-        "activeFeaturesPerStep": Int(sp.activeFeatures), "nursery": Int(sp.nursery),
-        "options": Int(sp.optionCount), "optionsPerThread": Int(sp.optionsPerThread),
-        "traceLevels": Int(sp.traceLevels), "featureTimeScale": Int(sp.featureTimeScale),
-        "actorStepDenominator": Int(sp.actorAlphaDenom),
-      ]
       let envId = Main.envIdsByKind[Int(kd.kind)]
-      if let i = geometries.firstIndex(where: { NSDictionary(dictionary: $0["shape"] as! [String: Any]).isEqual(to: shape) }) {
-        geometries[i]["envIds"] = (geometries[i]["envIds"] as! [String]) + [envId]
-      } else {
-        geometries.append(["envIds": [envId], "shape": shape])
+      if shapes.insert(sp.perceptCount).inserted {
         let line = "OaK shape: percepts \(sp.perceptCount) | features \(sp.featureCount) | active per step \(sp.activeFeatures)"
           + " | nursery \(sp.nursery) | options \(sp.optionCount) (\(sp.optionsPerThread) per wave thread)"
           + " | trace levels \(sp.traceLevels) | tracking floor \(sp.featureTimeScale) steps | actor step ÷\(Int(sp.actorAlphaDenom))"
         FileHandle.standardError.write((line + "\n").data(using: .utf8)!)
       }
-      func laneSlotBytes(_ gk: Int) -> Int {
-        (5 * Int(sp.optionCount) + 1) * gk * MemoryLayout<Float>.stride
-      }
+      func laneSlotBytes(_ gk: Int) -> Int { Int(sp.laneThreadgroupFloats) * gk * MemoryLayout<Float>.stride }
       var gk = Int(sp.threadgroupLanes)
       while gk > 1,
         kd.firstLane % gk != 0 || kd.count % gk != 0
           || gk * Int(sp.perceptCount) > core * core
           || laneSlotBytes(gk) > dev.maxThreadgroupMemoryLength
       { gk /= 2 }
-      guard kd.firstLane % gk == 0, kd.count % gk == 0 else {
-        throw err("Env block [\(kd.firstLane), +\(kd.count)) must start and size on multiples of megaG=\(gk).")
-      }
       let c = constants(kd)
       var g32 = UInt32(gk)
       c.setConstantValue(&g32, type: .uint, index: OakConst.megaG.rawValue)
@@ -1043,7 +975,6 @@ final class RecordWriter: @unchecked Sendable {
       initPipes.append(try pipeline("oak_fleet_init", kd))
       snapPipes.append(try pipeline("oak_fleet_snapshot", kd))
     }
-    Self.pendingMeta["geometry"] = geometries
     let res = engine.res
     return FleetPipes(
       label: "oak",
@@ -1064,7 +995,7 @@ final class RecordWriter: @unchecked Sendable {
           enc.setBuffer(bufs.recordBuf, offset: 0, index: OakBuf.aux1.rawValue)
           var span = SIMD3<UInt32>(UInt32(n), UInt32(base), UInt32(kd.firstLane / gk))
           enc.setBytes(&span, length: MemoryLayout<SIMD3<UInt32>>.stride, index: OakBuf.aux2.rawValue)
-          enc.setThreadgroupMemoryLength((5 * Int(kd.off.optionCount) + 1) * gk * MemoryLayout<Float>.stride, index: 0)
+          enc.setThreadgroupMemoryLength(Int(kd.off.laneThreadgroupFloats) * gk * MemoryLayout<Float>.stride, index: 0)
           enc.dispatchThreadgroups(
             MTLSize(width: kd.count / gk, height: 1, depth: 1),
             threadsPerThreadgroup: mtlSize(core * gk))
@@ -1111,7 +1042,6 @@ final class RecordWriter: @unchecked Sendable {
         throw err("\(name): kernel declares slots \(declared.sorted()) but the codec records \(recorded.sorted()).")
       }
     }
-    Self.pendingMeta["hardware"] = Self.hardwareInfo(dev)
     Self.pendingMeta["hardwareKey"] = Self.hardwareKey(dev)
     try Self.writeRunMeta(root, envTable)
     for flag in ["OAK_PROBE_FIXEDIDX", "OAK_MEGA_STAGE_MASK"] where e[flag] != nil {
@@ -1128,8 +1058,6 @@ final class RecordWriter: @unchecked Sendable {
     }
     let gpuSeconds = try runFleetLoop(
       q, bufs, pipes, steps: steps, root: root, laneEnvKinds: laneEnvKinds, onWindow: onWindow)
-    Self.pendingMeta["environmentMemoryBytes"] = bufs.envStateBuf.length
-    Self.pendingMeta["gpuSeconds"] = gpuSeconds
     Self.pendingMeta["stepsPerSecond"] = gpuSeconds > 0
       ? Double(steps) * Double(seeds.count) / gpuSeconds : 0
     Self.pendingMeta["finishedAt"] = ISO8601DateFormatter().string(from: Date())
@@ -1146,9 +1074,10 @@ final class RecordWriter: @unchecked Sendable {
     _ policy: String, _ lib: MTLLibrary, _ dev: MTLDevice, _ bufs: FleetBuffers,
     _ envTable: [EnvSpec], _ laneEnvKinds: [UInt32], _ e: [String: String]
   ) throws -> FleetPipes {
+    let stageMask = try stageMaskEnv(e)
     func pipeline(_ name: String) throws -> MTLComputePipelineState {
       let constants = MTLFunctionConstantValues()
-      if let mask = try stageMaskEnv(e) {
+      if let mask = stageMask {
         var m = mask
         constants.setConstantValue(&m, type: .uint, index: OakConst.megaStageMask.rawValue)
       }
@@ -1468,21 +1397,9 @@ final class RecordWriter: @unchecked Sendable {
       throw err("envs schedule covers \(offset) of B=\(seedValues.count) lanes.")
     }
     let dir = request.root
-    let lockDir = URL(fileURLWithPath: fm.currentDirectoryPath).appendingPathComponent(
-      ".oak-benchmarks", isDirectory: true)
-    try fm.createDirectory(at: lockDir, withIntermediateDirectories: true)
-    let fd = open(
-      lockDir.appendingPathComponent(lockName).path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
-    guard fd >= 0, flock(fd, LOCK_EX) == 0 else {
-      throw err("Cannot lock benchmark workspace.")
-    }
-    defer {
-      _ = flock(fd, LOCK_UN)
-      _ = close(fd)
-    }
     if fm.fileExists(atPath: dir.path),
       !(try fm.contentsOfDirectory(atPath: dir.path).filter {
-        $0 != ".DS_Store" && $0 != "identity.json" && $0 != "baselines" && $0 != "run.log"
+        $0 != ".DS_Store" && $0 != "identity.json" && $0 != "baselines"
       }).isEmpty
     {
       throw err("\(dir.path) is not empty; refusing to write beside existing data.")

@@ -10,25 +10,7 @@ export type Policy = 'oak' | 'ppo' | 'random';
 
 export type BaselinePolicy = 'ppo' | 'random';
 
-export interface AgentShape {
-  percepts: number;
-  features: number;
-  activeFeaturesPerStep: number;
-  nursery: number;
-  options: number;
-  optionsPerThread: number;
-  traceLevels: number;
-  featureTimeScale: number;
-  actorStepDenominator: number;
-}
-
-export interface RunGeometry {
-  envIds: string[];
-  shape: AgentShape;
-}
-
 export interface RunMeta {
-  batch: number;
   seeds: number[];
   steps: number;
   policy: Policy;
@@ -36,7 +18,6 @@ export interface RunMeta {
   startedAt?: string;
   envSchedule: EnvScheduleEntry[];
   envCatalog: unknown[];
-  geometry?: RunGeometry[];
 }
 
 export const DEATH_DETECTORS: readonly string[] = [
@@ -63,7 +44,6 @@ export interface DivergenceSummary {
   rateCi95: Ci95;
   expectedAliveSteps: number;
   expectedAliveCi95: Ci95;
-  km: KmCurve;
 }
 
 export interface EnvCurves {
@@ -73,7 +53,7 @@ export interface EnvCurves {
 export interface EnvSummary {
   finalRate: RateSummary;
   forgetting: RateSummary;
-  divergence: DivergenceSummary;
+  km: KmCurve;
   curves: EnvCurves;
 }
 
@@ -82,8 +62,6 @@ export interface AggregateSummary {
 }
 
 export interface ProbImprovement {
-  mean: number;
-  ci95: Ci95;
   envs: Record<string, { p: number; ci95: Ci95 }>;
 }
 
@@ -106,7 +84,6 @@ export interface RunIndexEntry {
   steps: number;
   startedAt: string | null;
   complete: boolean;
-  maxStep: number;
   inFlight: boolean;
   hasSummary: boolean;
   hasRecordings: boolean;

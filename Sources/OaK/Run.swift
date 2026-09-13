@@ -3,7 +3,6 @@ import Foundation
 enum RunLayout {
   static let headersMagic: UInt32 = 0x544B_414F
   static let payloadMagic: UInt32 = 0x504B_414F
-  static let windowSteps = 1024
   static let payloadParts = 10
   static func part(stepStart: Int, steps: Int) -> Int {
     min(stepStart * payloadParts / steps, payloadParts - 1)
@@ -25,9 +24,6 @@ struct ByteReader {
     return at
   }
   mutating func u8(_ what: String) throws -> UInt8 { bytes[try take(1, what)] }
-  mutating func u32(_ what: String) throws -> UInt32 {
-    UInt32(littleEndian: bytes.loadUnaligned(fromByteOffset: try take(4, what), as: UInt32.self))
-  }
   mutating func u64(_ what: String) throws -> UInt64 {
     UInt64(littleEndian: bytes.loadUnaligned(fromByteOffset: try take(8, what), as: UInt64.self))
   }

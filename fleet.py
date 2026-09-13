@@ -12,7 +12,6 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import numpy as np
@@ -42,17 +41,22 @@ ENVIRONMENT_SOURCES = ("Sources/EnvCore.metal", "Sources/Env.metal", "Sources/Ba
                        "Sources/envs", "Sources/OaK/Resources")
 
 
-def environment_digest() -> str:
+def files_digest(paths) -> str:
     digest = hashlib.sha256()
+    for path in paths:
+        digest.update(str(path.relative_to(REPO)).encode())
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def environment_digest() -> str:
+    paths = []
     for entry in ENVIRONMENT_SOURCES:
         base = REPO / entry
-        paths = sorted(p for p in base.rglob("*") if p.is_file()) if base.is_dir() else [base]
-        for path in paths:
-            digest.update(str(path.relative_to(REPO)).encode())
-            digest.update(b"\0")
-            digest.update(path.read_bytes())
-            digest.update(b"\0")
-    return digest.hexdigest()
+        paths.extend(sorted(p for p in base.rglob("*") if p.is_file()) if base.is_dir() else [base])
+    return files_digest(paths)
 
 
 def baseline_identity(meta: dict) -> str:
@@ -63,15 +67,22 @@ def baseline_identity(meta: dict) -> str:
     return digest.hexdigest()[:40]
 
 
+def validated_run(root: Path, policy: str, shape: dict) -> dict:
+    run = load(root)
+    if run["meta"]["policy"] != policy:
+        raise SystemExit(f"{root}: policy is {run['meta']['policy']}, expected {policy}")
+    if not same_run_shape(shape, run):
+        raise SystemExit(f"{root}: run shape differs from the schedule it belongs to")
+    if not complete(run):
+        raise SystemExit(f"{root}: incomplete")
+    return run
+
+
 def stored_baseline(meta: dict, policy: str) -> Path | None:
     root = BASELINE_STORE / baseline_identity(meta) / policy
     if not (root / "summary.json").is_file():
         return None
-    run = load(root)
-    if run["meta"]["policy"] != policy or not same_run_shape({"meta": meta}, run):
-        raise SystemExit(f"{root}: stored baseline does not match the schedule it is filed under")
-    if not complete(run):
-        raise SystemExit(f"{root}: stored baseline is incomplete")
+    validated_run(root, policy, {"meta": meta})
     return root
 
 
@@ -347,21 +358,16 @@ def rmst(times: np.ndarray, events: np.ndarray, horizon: int) -> float:
         survival_fit(times, events, horizon), t=float(horizon)))
 
 
-def mean_fraction(v: np.ndarray, horizon: int) -> float:
+def mean_fraction(v: np.ndarray) -> float:
     return float(np.mean(v))
 
 
-def delivered_iqm(v: np.ndarray, horizon: int) -> float:
-    return iqm(v)
-
-
-def paired(best: dict, cand: dict, keys: tuple[str, ...], stat,
-           horizon: int, seed: int) -> np.ndarray:
+def paired(best: dict, cand: dict, keys: tuple[str, ...], stat, seed: int) -> np.ndarray:
     rng = np.random.default_rng(seed)
     n = len(best[keys[0]])
     idx = rng.integers(0, n, size=(GATE_REPS, n))
-    return np.array([stat(*[cand[key][row] for key in keys], horizon)
-                     - stat(*[best[key][row] for key in keys], horizon) for row in idx])
+    return np.array([stat(*[cand[key][row] for key in keys])
+                     - stat(*[best[key][row] for key in keys]) for row in idx])
 
 
 def fl(x) -> float | None:
@@ -395,23 +401,27 @@ def rate_stats(rates: np.ndarray, seed: int) -> dict:
     return {"iqm": point, "ci95": ci}
 
 
-def divergence_block(run: dict, lanes: np.ndarray, max_step: int) -> dict:
+def survival_curve(run: dict, lanes: np.ndarray, max_step: int) -> dict:
+    died, dtimes = death_vectors(run, lanes, max_step)
+    km = survival_fit(dtimes, died, max_step)
+    sf = km.survival_function_.iloc[:, 0]
+    sf_ci = km.confidence_interval_survival_function_
+    return {"steps": [int(t) for t in sf.index],
+            "survival": fl_list(sf.to_numpy()),
+            "ci95": [fl_list(sf_ci.iloc[:, 0].to_numpy()), fl_list(sf_ci.iloc[:, 1].to_numpy())]}
+
+
+def divergence_summary(run: dict, lanes: np.ndarray, max_step: int) -> dict:
     died, dtimes = death_vectors(run, lanes, max_step)
     diverged = int(died.sum())
     lo, hi = proportion_confint(diverged, len(lanes), method="wilson")
     km = survival_fit(dtimes, died, max_step)
     alive, alive_var = restricted_mean_survival_time(km, t=float(max_step), return_variance=True)
     half = 1.96 * math.sqrt(alive_var) if alive_var >= 0 else float("nan")
-    sf = km.survival_function_.iloc[:, 0]
-    sf_ci = km.confidence_interval_survival_function_
     return {"diverged": diverged, "rate": fl(died.mean()),
             "rateCi95": [fl(float(lo)), fl(float(hi))],
             "expectedAliveSteps": fl(float(alive)),
-            "expectedAliveCi95": [fl(float(alive) - half), fl(float(alive) + half)],
-            "km": {"steps": [int(t) for t in sf.index],
-                   "survival": fl_list(sf.to_numpy()),
-                   "ci95": [fl_list(sf_ci.iloc[:, 0].to_numpy()),
-                            fl_list(sf_ci.iloc[:, 1].to_numpy())]}}
+            "expectedAliveCi95": [fl(float(alive) - half), fl(float(alive) + half)]}
 
 
 def full_window_rates(run: dict) -> np.ndarray:
@@ -439,14 +449,7 @@ def baseline_runs(run: dict) -> dict[str, dict]:
         root = run["root"] / "baselines" / policy
         if not (root / "summary.json").exists():
             raise SystemExit(f"{run['root']}: missing complete {policy} baseline")
-        base = load(root)
-        if not complete(base):
-            raise SystemExit(f"{root}: baseline incomplete")
-        if base["meta"]["policy"] != policy:
-            raise SystemExit(f"{root}: policy is {base['meta']['policy']}, expected {policy}")
-        if not same_run_shape(run, base):
-            raise SystemExit(f"{root}: run shape differs from {run['root']}")
-        out[policy] = base
+        out[policy] = validated_run(root, policy, run)
     return out
 
 
@@ -454,21 +457,13 @@ def vs_baseline(seed_base: int, run: dict, base: dict, slices: dict) -> dict:
     own_final = final_window_rates(run)
     base_final = final_window_rates(base)
     base_slices = env_slices(base)
-    env_ids = sorted(slices)
     per_env = {}
-    own_runs, base_runs = [], []
-    for e, env in enumerate(env_ids):
-        own = own_final[slices[env]]
-        other = base_final[base_slices[env]]
+    for e, env in enumerate(sorted(slices)):
         p, ci = interval_estimate(
-            [runs_matrix([own]), runs_matrix([other])], agg_prob_improvement, seed_base + e)
+            [runs_matrix([own_final[slices[env]]]), runs_matrix([base_final[base_slices[env]]])],
+            agg_prob_improvement, seed_base + e)
         per_env[env] = {"p": p, "ci95": ci}
-        own_runs.append(own)
-        base_runs.append(other)
-    mean_p, mean_ci = interval_estimate(
-        [runs_matrix(own_runs), runs_matrix(base_runs)], agg_prob_improvement,
-        seed_base + len(env_ids))
-    return {"probImprovement": {"mean": mean_p, "ci95": mean_ci, "envs": per_env}}
+    return {"probImprovement": {"envs": per_env}}
 
 
 def cmd_report(args) -> int:
@@ -484,9 +479,6 @@ def cmd_report(args) -> int:
     if max_step < horizon:
         raise SystemExit(f"{args.root}: incomplete at {max_step:,} of {horizon:,} steps")
     n_lanes = run["lanes"]
-    started = datetime.strptime(meta["startedAt"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-    generated_at = (started + timedelta(seconds=float(run["wall"][-1]))).strftime(
-        "%Y-%m-%dT%H:%M:%SZ")
     rates = full_window_rates(run)
     final_rate = last_finite(rates)
     peak_rate = peak_finite(rates)
@@ -498,28 +490,18 @@ def cmd_report(args) -> int:
             "finalRate": rate_stats(final_rate[lanes], BOOT_BASE_SEED + 101 + e * 10),
             "forgetting": rate_stats(
                 peak_rate[lanes] - final_rate[lanes], BOOT_BASE_SEED + 102 + e * 10),
-            "divergence": divergence_block(run, lanes, max_step),
+            "km": survival_curve(run, lanes, max_step),
             "curves": {"iqm": fl_list(iqm(impute_worst(row)) for row in rates[:, lanes])},
         }
     summary = {
-        "generatedAt": generated_at,
-        "horizon": horizon,
-        "maxStep": max_step,
-        "complete": True,
         "seedsPerEnv": per_env_counts.pop(),
-        "bootstrap": {"reps": BOOT_REPS, "baseSeed": BOOT_BASE_SEED},
         "curveSteps": [int(s) for s in ends],
         "curveSeconds": fl_list(run["wall"]),
         "envs": envs_out,
-        "aggregate": {"divergence": divergence_block(run, np.arange(n_lanes), max_step)},
+        "aggregate": {"divergence": divergence_summary(run, np.arange(n_lanes), max_step)},
     }
     if meta["policy"] == "oak":
-        bases = baseline_runs(run)
-        summary["vsBaselines"] = {
-            policy: vs_baseline(
-                BOOT_BASE_SEED + 3000 + i * 1000, run, bases[policy], slices)
-            for i, policy in enumerate(("ppo", "random"))
-        }
+        summary["vsBaselines"] = {"ppo": vs_baseline(BOOT_BASE_SEED + 3000, run, baseline_runs(run)["ppo"], slices)}
     out = args.root / "summary.json"
     out.write_text(json.dumps(summary, indent=2, sort_keys=True, allow_nan=False))
     print(out)
@@ -532,8 +514,8 @@ GATE_FLEET_CHECKS = ("divergence", "rewardRateIQM", "learnedSeeds", "retainedSee
 WIN_CHECK = "rewardRateIQM"
 GATE_CHECKS = {
     "divergence": (11, ("died",), mean_fraction, -1.0, "deaths avoided"),
-    "rewardRateIQM": (12, ("delivered",), delivered_iqm, 1.0, "delivered IQM"),
-    "rmstSurvival": (13, ("dtimes", "died"), rmst, 1.0, "RMST steps"),
+    "rewardRateIQM": (12, ("delivered",), iqm, 1.0, "delivered IQM"),
+    "rmstSurvival": (13, ("dtimes", "died"), None, 1.0, "RMST steps"),
     "learnedSeeds": (30, ("learned",), mean_fraction, 1.0, "learned fraction"),
     "retainedSeeds": (31, ("retained",), mean_fraction, 1.0, "retained fraction"),
     "positiveSeedFraction": (33, ("positive",), mean_fraction, 1.0, "positive fraction"),
@@ -550,7 +532,9 @@ def slice_checks(tag: str, k: dict, c: dict, horizon: int,
     out = []
     for name in categories:
         offset, keys, stat, sign, label = GATE_CHECKS[name]
-        d = sign * paired(k, c, keys, stat, horizon, boot_seed(tag, offset))
+        if stat is None:
+            stat = lambda times, events: rmst(times, events, horizon)
+        d = sign * paired(k, c, keys, stat, boot_seed(tag, offset))
         lo, hi = float(np.percentile(d, 5)), float(np.percentile(d, 95))
         out.append((name, "PASS" if hi >= 0.0 else "FAIL",
                     f"{label} [{lo + 0.0:+.6g}, {hi + 0.0:+.6g}]",
@@ -705,13 +689,7 @@ def artifact_identity() -> dict:
     if resolved.exists():
         paths.append(resolved)
     paths.extend(sorted(path for path in (REPO / "Sources").rglob("*") if path.is_file()))
-    source = hashlib.sha256()
-    for path in paths:
-        source.update(str(path.relative_to(REPO)).encode())
-        source.update(b"\0")
-        source.update(path.read_bytes())
-        source.update(b"\0")
-    source_digest = source.hexdigest()
+    source_digest = files_digest(paths)
     binary = file_sha256(OAK)
     metal = file_sha256(metallib)
     content = hashlib.sha256()
@@ -751,15 +729,7 @@ def run_benchmark(meta: dict, policy: str, root: Path) -> None:
         raise SystemExit(f"{rid} did not finish; see {DAEMON_LOG}")
 
 
-def recorded(root: Path) -> bool:
-    meta_path = root / "meta.json"
-    return meta_path.is_file() and "finishedAt" in json.loads(meta_path.read_text())
-
-
 def record_policy(candidate: dict, policy: str, identity: dict) -> dict:
-    if policy == "oak" and recorded(candidate["root"]):
-        print("[fleet] oak already recorded", flush=True)
-        return load(candidate["root"])
     if policy != "oak":
         stored = stored_baseline(candidate["meta"], policy)
         if stored is not None:
@@ -773,13 +743,7 @@ def record_policy(candidate: dict, policy: str, identity: dict) -> dict:
     if file_sha256(OAK) != identity["binary"]:
         raise SystemExit("release executable changed during the science run")
     run_benchmark(candidate["meta"], policy, root)
-    run = load(root)
-    if run["meta"]["policy"] != policy:
-        raise SystemExit(f"{root}: policy is {run['meta']['policy']}, expected {policy}")
-    if not same_run_shape(candidate, run):
-        raise SystemExit(f"{root}: run shape differs from {candidate['root']}")
-    if not complete(run):
-        raise SystemExit(f"{root}: incomplete")
+    run = validated_run(root, policy, candidate)
     if policy != "oak":
         cmd_report(argparse.Namespace(root=root))
         link_baseline(candidate["root"], policy, root)
@@ -793,7 +757,7 @@ def cmd_run(args) -> int:
     subprocess.run(["swift", "build", "-c", "release"], cwd=REPO, check=True)
     identity = artifact_identity()
     name = identity["id"]
-    if name == best_hash():
+    if name == best_hash() and not args.steps:
         raise SystemExit(f"{name} is already the best")
     if best_hash() is None:
         print("[fleet] no best exists: this run bootstraps the best", flush=True)

@@ -4,7 +4,6 @@ export const FRAME_FLOATS = 11;
 export const OFF_DONE = 0;
 export const OFF_POSE = 1;
 export const POSE_LEN = 9;
-export const OFF_REWARD = 10;
 
 export class ApiError extends Error {
   readonly status: number;
