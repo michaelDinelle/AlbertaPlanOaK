@@ -66,7 +66,7 @@ export function bandRows(
   return out;
 }
 
-export function lineProps(stroke: string, width = 1.4, dash?: string, axis: 'y' | 'r' = 'y') {
+export function lineProps(stroke: string, width = 1.4, dash?: string) {
   return {
     dataKey: 'y',
     type: 'linear',
@@ -76,8 +76,7 @@ export function lineProps(stroke: string, width = 1.4, dash?: string, axis: 'y' 
     dot: false,
     activeDot: { r: 2.5, fill: stroke, strokeWidth: 0 },
     isAnimationActive: false,
-    yAxisId: axis,
-    unit: axis,
+    yAxisId: 'y',
   } as const;
 }
 
@@ -114,14 +113,12 @@ function TipCard({
   label,
   xFormat,
   yFormat,
-  rightFormat,
 }: {
   active: boolean;
   payload: TooltipPayload;
   label: string | number | undefined;
   xFormat: (value: number) => string;
   yFormat: (value: number) => string;
-  rightFormat?: (value: number) => string;
 }) {
   if (!active || typeof label !== 'number') return null;
   const rows = payload.filter(
@@ -139,7 +136,7 @@ function TipCard({
         <div key={i} className="mt-0.5 flex items-center gap-1.5">
           <span className="h-0.5 w-3 shrink-0 rounded-full" style={{ background: entry.color ?? 'var(--color-ink)' }} />
           <span className="font-mono tabular-nums">
-            {(entry.unit === 'r' && rightFormat !== undefined ? rightFormat : yFormat)(entry.value as number)}
+            {yFormat(entry.value as number)}
           </span>
           {typeof entry.name === 'string' && entry.name !== 'y' && (
             <span className="text-ink-dim">{entry.name}</span>
@@ -158,10 +155,8 @@ export function TimeChart({
   xScale,
   xFormat,
   yFormat,
-  rightFormat,
   xLabel,
   yLabel,
-  rightLabel,
   overlay,
   yDomain,
   children,
@@ -173,10 +168,8 @@ export function TimeChart({
   xScale?: 'log';
   xFormat?: (value: number) => string;
   yFormat?: (value: number) => string;
-  rightFormat?: (value: number) => string;
   xLabel?: string;
   yLabel?: string;
-  rightLabel?: string;
   overlay?: ReactNode;
   yDomain?: readonly [number, number];
   children: ReactNode;
@@ -186,11 +179,6 @@ export function TimeChart({
       {yLabel !== undefined && (
         <span className="pointer-events-none absolute top-0 font-mono text-2xs text-ink-dim" style={{ left: 2 }}>
           {yLabel}
-        </span>
-      )}
-      {rightLabel !== undefined && (
-        <span className="pointer-events-none absolute right-0 top-0 font-mono text-2xs text-ink-dim">
-          {rightLabel}
         </span>
       )}
       <div className="relative" style={{ height }}>
@@ -221,17 +209,6 @@ export function TimeChart({
             axisLine={false}
             tickLine={false}
           />
-          {rightFormat !== undefined && (
-            <YAxis
-              yAxisId="r"
-              orientation="right"
-              width={AXIS_WIDTH}
-              tickFormatter={rightFormat}
-              tick={TICK}
-              axisLine={false}
-              tickLine={false}
-            />
-          )}
           <Tooltip
             isAnimationActive={false}
             cursor={TIP_CURSOR}
@@ -242,7 +219,6 @@ export function TimeChart({
                 label={label}
                 xFormat={xFormat ?? formatStep}
                 yFormat={yFormat ?? ((value: number) => formatRate(value))}
-                rightFormat={rightFormat}
               />
             )}
           />

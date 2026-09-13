@@ -31,7 +31,6 @@ export interface RunMeta {
   batch: number;
   seeds: number[];
   steps: number;
-  ablationLabel: string;
   policy: Policy;
   preset: string;
   startedAt?: string;
@@ -71,17 +70,11 @@ export interface EnvCurves {
   iqm: (number | null)[];
 }
 
-export interface PlasticityTrack {
-  final: number | null;
-  iqm: (number | null)[];
-}
-
 export interface EnvSummary {
   finalRate: RateSummary;
   forgetting: RateSummary;
   divergence: DivergenceSummary;
   curves: EnvCurves;
-  plasticity?: Record<string, PlasticityTrack>;
 }
 
 export interface AggregateSummary {
@@ -102,7 +95,6 @@ export interface RunSummary {
   seedsPerEnv: number;
   curveSteps: number[];
   curveSeconds: number[];
-  plasticitySteps: number[];
   envs: Record<string, EnvSummary>;
   aggregate: AggregateSummary;
   vsBaselines?: Partial<Record<BaselinePolicy, BaselineComparison>>;
@@ -112,7 +104,6 @@ export interface RunIndexEntry {
   id: string;
   envIds: string[];
   steps: number;
-  ablationLabel: string;
   startedAt: string | null;
   complete: boolean;
   maxStep: number;

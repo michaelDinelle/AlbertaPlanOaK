@@ -105,7 +105,6 @@ function RunChip({
                 {runDateLabel(run.startedAt)}
                 {run.role === 'best' && <span className="text-best">{STR.best}</span>}
                 {run.policy !== 'oak' && <span style={{ color: POLICY_TOKENS[run.policy] }}>{STR.policy[run.policy]}</span>}
-                {run.ablationLabel !== 'none' && <span className="text-ink-dim">{run.ablationLabel}</span>}
                 {run.inFlight && <span className="size-1.5 motion-safe:animate-pulse rounded-full bg-good" title={STR.bar.live} />}
               </span>
               <span className="font-mono text-2xs tabular-nums text-ink-dim">

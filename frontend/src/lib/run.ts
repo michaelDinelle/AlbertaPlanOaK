@@ -87,7 +87,7 @@ export function resolveFeaturedRun(entries: readonly RunIndexEntry[]): { runId: 
   return { runId: newest(playable)?.id ?? null };
 }
 
-export type RunLabelSource = Pick<RunIndexEntry, 'id' | 'startedAt' | 'role' | 'ablationLabel' | 'policy'>;
+export type RunLabelSource = Pick<RunIndexEntry, 'id' | 'startedAt' | 'role' | 'policy'>;
 
 export function runShortId(id: string): string {
   return id.slice(id.lastIndexOf('-') + 1).slice(0, 7);
@@ -95,13 +95,12 @@ export function runShortId(id: string): string {
 
 export function runLabelSource(
   id: string,
-  meta: Pick<RunMeta, 'startedAt' | 'ablationLabel' | 'policy'>,
+  meta: Pick<RunMeta, 'startedAt' | 'policy'>,
 ): RunLabelSource {
   return {
     id,
     startedAt: meta.startedAt ?? null,
     role: null,
-    ablationLabel: meta.ablationLabel,
     policy: meta.policy,
   };
 }
@@ -110,7 +109,6 @@ export function runLabel(entry: RunLabelSource): string {
   const parts = [runDateLabel(entry.startedAt)];
   if (entry.role === 'best') parts.push('best');
   if (entry.policy !== 'oak') parts.push(entry.policy);
-  if (entry.ablationLabel !== 'none') parts.push(entry.ablationLabel);
   parts.push(runShortId(entry.id));
   return parts.join(' · ');
 }

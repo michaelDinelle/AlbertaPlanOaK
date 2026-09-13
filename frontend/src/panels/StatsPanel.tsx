@@ -80,7 +80,7 @@ export function StatsPanel({
       {view === 'reward' && <RewardView runs={runs} best={best} active={active} />}
       {view === 'standings' && <StandingsView runs={runs} />}
       {view === 'compute' && <ComputeView runs={runs} />}
-      {view === 'health' && <HealthView runs={runs} active={active} />}
+      {view === 'health' && <HealthView active={active} />}
     </Panel>
   );
 }

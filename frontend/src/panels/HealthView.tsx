@@ -1,7 +1,6 @@
 import { useMemo } from 'react';
-import { clsx } from 'clsx';
 import { Area, Line } from 'recharts';
-import type { Policy, RunDetail } from '../data/types';
+import type { RunDetail } from '../data/types';
 import { formatCount, formatPercent, formatRate, formatStep } from '../lib/format';
 import { envLanes } from '../lib/run';
 import { useSelection } from '../state/selectionStore';
@@ -36,16 +35,9 @@ function Head({ label, hint, chips }: { label: string; hint: string; chips?: Hea
   );
 }
 
-export function HealthView({
-  runs,
-  active,
-}: {
-  runs: Record<Policy, RunDetail | null>;
-  active: RunDetail | null;
-}) {
+export function HealthView({ active }: { active: RunDetail | null }) {
   const sel = useSelection();
   const summary = active?.summary ?? null;
-  const oakSummary = runs.oak?.summary ?? null;
   const lanes = useMemo(
     () => (active === null || sel.envId === null ? null : envLanes(active.meta, sel.envId)),
     [active, sel.envId],
@@ -76,32 +68,6 @@ export function HealthView({
     });
     return seriesRows(rates.x, values);
   }, [rates]);
-
-  const capacity = useMemo(() => {
-    const steps = oakSummary?.plasticitySteps ?? [];
-    if (steps.length === 0 || sel.envId === null) return null;
-    const pull = (
-      summaryOf: typeof oakSummary,
-      field: string,
-    ): (number | null)[] | null => {
-      const track = summaryOf?.envs[sel.envId ?? '']?.plasticity?.[field];
-      return track !== undefined && track.iqm.length === steps.length ? track.iqm : null;
-    };
-    const oakDormant = pull(oakSummary, 'dormantFraction');
-    const ppoDormant = pull(runs.ppo?.summary ?? null, 'dormantFraction');
-    const oakErank = pull(oakSummary, 'erank');
-    const ppoErank = pull(runs.ppo?.summary ?? null, 'erank');
-    const tracks = [oakDormant, ppoDormant, oakErank, ppoErank];
-    if (tracks.every((t) => t === null)) return null;
-    const alive = tracks.some((t) => t !== null && t.some((v) => v !== null && Number.isFinite(v)));
-    return {
-      alive,
-      oakDormant: oakDormant === null ? [] : seriesRows(steps, oakDormant),
-      ppoDormant: ppoDormant === null ? [] : seriesRows(steps, ppoDormant),
-      oakErank: oakErank === null ? [] : seriesRows(steps, oakErank),
-      ppoErank: ppoErank === null ? [] : seriesRows(steps, ppoErank),
-    };
-  }, [oakSummary, runs.ppo, sel.envId]);
 
   const know = useMemo(() => {
     if (rates === null || rho === null) return null;
@@ -176,41 +142,6 @@ export function HealthView({
       <TimeChart label={STR.health.retention} height={100} xMax={horizon} xLabel={STR.axis.steps} yLabel={STR.axis.phi}>
         <Line {...lineProps('var(--color-crit)', 1.4)} name={STR.health.faded} data={fade} />
       </TimeChart>
-      <Head
-        label={STR.health.capacity}
-        hint={STR.health.capacityHint}
-        chips={[
-          { swatch: 'var(--color-oak)', label: STR.policy.oak },
-          { swatch: 'var(--color-ppo)', label: STR.policy.ppo },
-          { swatch: 'var(--color-ink-dim)', label: STR.health.erank, dashed: true },
-        ]}
-      />
-      {capacity === null || !capacity.alive ? (
-        <div className={clsx('py-3 text-center', TXT.bodyDim)}>{STR.health.noPlasticity}</div>
-      ) : (
-        <TimeChart label={STR.health.capacity} height={100} xMax={horizon} yFormat={(v) => formatPercent(v, 0)} rightFormat={(v) => formatRate(v, 2)} xLabel={STR.axis.steps} yLabel={STR.axis.dormant} rightLabel={STR.axis.erank}>
-          <Line
-            {...lineProps('var(--color-oak)', 1.5)}
-            name={`${STR.policy.oak} ${STR.health.dormant}`}
-            data={capacity.oakDormant}
-          />
-          <Line
-            {...lineProps('var(--color-ppo)', 1.5)}
-            name={`${STR.policy.ppo} ${STR.health.dormant}`}
-            data={capacity.ppoDormant}
-          />
-          <Line
-            {...lineProps('var(--color-oak)', 1, '4 3', 'r')}
-            name={`${STR.policy.oak} ${STR.health.erank}`}
-            data={capacity.oakErank}
-          />
-          <Line
-            {...lineProps('var(--color-ppo)', 1, '4 3', 'r')}
-            name={`${STR.policy.ppo} ${STR.health.erank}`}
-            data={capacity.ppoErank}
-          />
-        </TimeChart>
-      )}
       <Head
         label={STR.health.know}
         hint={STR.health.knowHint}

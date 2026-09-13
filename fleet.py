@@ -85,14 +85,7 @@ def link_baseline(candidate_root: Path, policy: str, stored: Path) -> None:
 BOOT_REPS = 50_000
 BOOT_BASE_SEED = 20260817
 GATE_REPS = 10_000
-PLASTICITY_FIELDS = {
-    "oak": ["dormantFraction", "utilityDormantFraction", "featureBirths", "weightAbsMean",
-            "weightAbsMeanValue", "erank", "logAlphaValueP10", "logAlphaValueP50",
-            "logAlphaValueP90", "logAlphaOptionValueP50", "logAlphaModelP50"],
-    "ppo": ["dormantFraction", "dormantFractionCritic", "weightAbsMean", "erank",
-            "logStepP10", "logStepP50", "logStepP90"],
-    "random": [],
-}
+REWARD_CHUNK_STEPS = 65_536
 
 def api(path: str, body: dict | None = None) -> bytes:
     data = None if body is None else json.dumps(body).encode()
@@ -141,10 +134,35 @@ def daemon() -> dict:
 
 
 def run_id(root: Path) -> str:
-    rel = root.resolve().relative_to(BENCH.resolve()).parts
-    if len(rel) == 3 and rel[1] == "baselines":
-        return f"{rel[0]}:{rel[2]}"
-    return "/".join(rel)
+    return "/".join(root.resolve().relative_to(BENCH.resolve()).parts)
+
+
+def rewards_identical(best: dict, candidate: dict) -> bool:
+    steps = candidate["meta"]["steps"]
+    identical = True
+    for entry in best["meta"]["envSchedule"]:
+        env = entry["envId"]
+        lanes = entry["seedEnd"] - entry["seedStart"] + 1
+        mismatches = 0
+        first = None
+        for start in range(0, steps, REWARD_CHUNK_STEPS):
+            count = min(REWARD_CHUNK_STEPS, steps - start)
+            planes = []
+            for run in (best, candidate):
+                path = f"/api/runs/{urllib.parse.quote(run_id(run['root']), safe='')}/rewards/{urllib.parse.quote(env)}"
+                raw = api(f"{path}?from={start}&n={count}")
+                if len(raw) != count * lanes * 4:
+                    raise SystemExit(f"{run['root']}: {env} rewards cover {len(raw) // (lanes * 4)} of {count} steps from {start}")
+                planes.append(np.frombuffer(raw, "<u4").reshape(count, lanes))
+            differ = np.nonzero(planes[0] != planes[1])
+            if differ[0].size:
+                mismatches += int(differ[0].size)
+                if first is None:
+                    first = (start + int(differ[0][0]), int(differ[1][0]))
+        identical = identical and mismatches == 0
+        where = "" if first is None else f" first at step {first[0]:,} lane {first[1]}"
+        print(f"  {'SAME' if mismatches == 0 else 'DIFF':<7} {env:<26} {mismatches:,} of {steps * lanes:,} rewards differ{where}")
+    return identical
 
 
 def read_series(root: Path, column: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -179,10 +197,6 @@ def load(root: Path) -> dict:
 
 def complete(run: dict) -> bool:
     return "finishedAt" in run["meta"] and int(run["ends"][-1]) >= run["meta"]["steps"]
-
-
-def series(run: dict, field: str) -> np.ndarray:
-    return run["series"](field)
 
 
 def last_finite(mat: np.ndarray) -> np.ndarray:
@@ -221,7 +235,7 @@ def windowed_rates(run: dict, lanes: np.ndarray) -> tuple[np.ndarray, np.ndarray
     ends, jr = window_ctx(run)
     i = np.nonzero(jr >= 0)[0]
     j = jr[i]
-    rs = series(run, "rewardSum")[:, lanes]
+    rs = run["series"]("rewardSum")[:, lanes]
     rates = (rs[i] - rs[j]) / (ends[i] - ends[j])[:, None]
     return peak_finite(rates), last_finite(rates)
 
@@ -229,7 +243,7 @@ def windowed_rates(run: dict, lanes: np.ndarray) -> tuple[np.ndarray, np.ndarray
 def retention_null(run: dict, lanes: np.ndarray,
                    boot: int = 200) -> tuple[np.ndarray, np.ndarray]:
     ends, jr = window_ctx(run)
-    rs_all = series(run, "rewardSum")[:, lanes]
+    rs_all = run["series"]("rewardSum")[:, lanes]
     n = len(lanes)
     p5, spread = (np.full(n, np.nan) for _ in range(2))
     if not (jr >= 0).any() or rs_all.shape[0] < 8:
@@ -278,7 +292,7 @@ def death_vectors(run: dict, lanes: np.ndarray,
 def lane_vectors(run: dict) -> dict[str, np.ndarray]:
     max_step = int(run["ends"][-1])
     lanes = np.arange(run["lanes"])
-    delivered = last_finite(series(run, "rewardSum")) / max_step
+    delivered = last_finite(run["series"]("rewardSum")) / max_step
     blind = ~np.isfinite(delivered)
     worst = min(0.0, float(np.min(delivered[~blind]))) if (~blind).any() else 0.0
     delivered = np.where(blind, worst, delivered)
@@ -359,15 +373,6 @@ def fl_list(v) -> list:
     return [fl(x) for x in v]
 
 
-def diag_iqm(v: np.ndarray) -> float | None:
-    fin = v[np.isfinite(v)]
-    return fl(iqm(fin)) if fin.size else None
-
-
-def agg_iqm(scores: np.ndarray) -> np.ndarray:
-    return np.array([iqm(scores)])
-
-
 def agg_prob_improvement(x: np.ndarray, y: np.ndarray) -> np.ndarray:
     pairs = x.shape[0] * y.shape[0]
     per_task = np.empty(x.shape[1])
@@ -379,18 +384,14 @@ def agg_prob_improvement(x: np.ndarray, y: np.ndarray) -> np.ndarray:
     return np.array([per_task.mean()])
 
 
-def ci_pair(ci: np.ndarray) -> list:
-    return [fl(float(ci[0][0])), fl(float(ci[1][0]))]
-
-
 def interval_estimate(scores, func, seed: int) -> tuple[float | None, list]:
     np.random.seed(seed)
     point, ci = rly.get_interval_estimates({"scores": scores}, func, reps=BOOT_REPS)
-    return fl(float(point["scores"][0])), ci_pair(ci["scores"])
+    return fl(float(point["scores"][0])), [fl(float(ci["scores"][0][0])), fl(float(ci["scores"][1][0]))]
 
 
 def rate_stats(rates: np.ndarray, seed: int) -> dict:
-    point, ci = interval_estimate(runs_matrix([rates]), agg_iqm, seed)
+    point, ci = interval_estimate(runs_matrix([rates]), lambda scores: np.array([iqm(scores)]), seed)
     return {"iqm": point, "ci95": ci}
 
 
@@ -415,7 +416,7 @@ def divergence_block(run: dict, lanes: np.ndarray, max_step: int) -> dict:
 
 def full_window_rates(run: dict) -> np.ndarray:
     ends, j = window_ctx(run)
-    rs = series(run, "rewardSum")
+    rs = run["series"]("rewardSum")
     jc = np.maximum(j, 0)
     start = np.where(j >= 0, ends[jc], 0.0)
     base = np.where(j[:, None] >= 0, rs[jc], 0.0)
@@ -445,8 +446,6 @@ def baseline_runs(run: dict) -> dict[str, dict]:
             raise SystemExit(f"{root}: policy is {base['meta']['policy']}, expected {policy}")
         if not same_run_shape(run, base):
             raise SystemExit(f"{root}: run shape differs from {run['root']}")
-        if not (root / "summary.json").exists():
-            raise SystemExit(f"{root}: missing summary.json")
         out[policy] = base
     return out
 
@@ -492,9 +491,6 @@ def cmd_report(args) -> int:
     final_rate = last_finite(rates)
     peak_rate = peak_finite(rates)
     env_ids = sorted(slices)
-    plast_fields = PLASTICITY_FIELDS[meta["policy"]]
-    plast_rows = np.unique(np.linspace(0, len(ends) - 1, 100).astype(int))
-    plast_series = {f: series(run, f) for f in plast_fields}
     envs_out = {}
     for e, env in enumerate(env_ids):
         lanes = slices[env]
@@ -505,12 +501,6 @@ def cmd_report(args) -> int:
             "divergence": divergence_block(run, lanes, max_step),
             "curves": {"iqm": fl_list(iqm(impute_worst(row)) for row in rates[:, lanes])},
         }
-        if plast_fields:
-            envs_out[env]["plasticity"] = {
-                f: {"final": diag_iqm(plast_series[f][-1, lanes]),
-                    "iqm": [diag_iqm(plast_series[f][r][lanes]) for r in plast_rows]}
-                for f in plast_fields
-            }
     summary = {
         "generatedAt": generated_at,
         "horizon": horizon,
@@ -520,7 +510,6 @@ def cmd_report(args) -> int:
         "bootstrap": {"reps": BOOT_REPS, "baseSeed": BOOT_BASE_SEED},
         "curveSteps": [int(s) for s in ends],
         "curveSeconds": fl_list(run["wall"]),
-        "plasticitySteps": [int(ends[r]) for r in plast_rows] if plast_fields else [],
         "envs": envs_out,
         "aggregate": {"divergence": divergence_block(run, np.arange(n_lanes), max_step)},
     }
@@ -594,13 +583,19 @@ def gate(best: dict, candidate: dict) -> int:
             return _fail(f"GATE ERROR: {label} incomplete")
     if not same_run_shape(best, candidate):
         return _fail("GATE ERROR: environment, seed, horizon, or lane schedule differs")
-    if best["meta"]["ablationLabel"] != candidate["meta"]["ablationLabel"]:
-        return _fail("GATE ERROR: ablation differs")
     if best["meta"]["preset"] != candidate["meta"]["preset"]:
         return _fail("GATE ERROR: geometry preset differs")
     if not (candidate["root"] / "summary.json").exists():
         return _fail("GATE ERROR: candidate summary missing")
     baseline_runs(candidate)
+    if rewards_identical(best, candidate):
+        _, status, detail, _ = throughput_check(best, candidate)
+        print(f"  {status:<7} fleet  throughput  {detail}")
+        if status == "PASS":
+            print("PROMOTE: rewards bitwise identical, throughput held")
+            return 0
+        print("REJECT: rewards bitwise identical, throughput regressed")
+        return 1
     slices = env_slices(best)
     env_ids = sorted(slices)
     print(f"  environments ({len(env_ids)}): {', '.join(env_ids)}")
@@ -656,7 +651,7 @@ def best_run() -> dict | None:
         return None
     root = BENCH / name
     if not root.is_dir():
-        raise SystemExit(f"best artifact missing: {root}; run ./fleet.py fetch")
+        raise SystemExit(f"best artifact missing: {root}")
     run = load(root)
     if run["meta"]["policy"] != "oak":
         raise SystemExit(f"best policy is {run['meta']['policy']}")
@@ -669,8 +664,7 @@ def fleet_schedule() -> dict:
     schedule = [{"envId": env, "seedStart": start, "seedEnd": start + FLEET_SEEDS_PER_ENV - 1}
                 for env, start in FLEET_SCHEDULE]
     seeds = [seed for entry in schedule for seed in range(entry["seedStart"], entry["seedEnd"] + 1)]
-    return {"steps": FLEET_STEPS, "batch": len(seeds), "seeds": seeds, "envSchedule": schedule,
-            "ablationLabel": "none"}
+    return {"steps": FLEET_STEPS, "batch": len(seeds), "seeds": seeds, "envSchedule": schedule}
 
 
 def write_best(name: str) -> None:
@@ -695,9 +689,8 @@ def file_sha256(path: Path) -> str:
 
 
 def artifact_identity() -> dict:
-    executable = REPO / ".build/release/OaK"
-    if not executable.is_file():
-        raise SystemExit(f"release executable missing: {executable}")
+    if not OAK.is_file():
+        raise SystemExit(f"release executable missing: {OAK}; run ./setup.sh")
     metallib = REPO / ".build/OakKernel.metallib"
     if not metallib.is_file():
         raise SystemExit(f"Metal library missing: {metallib}; run ./setup.sh")
@@ -719,7 +712,7 @@ def artifact_identity() -> dict:
         source.update(path.read_bytes())
         source.update(b"\0")
     source_digest = source.hexdigest()
-    binary = file_sha256(executable)
+    binary = file_sha256(OAK)
     metal = file_sha256(metallib)
     content = hashlib.sha256()
     content.update(source_digest.encode())
@@ -737,8 +730,7 @@ def artifact_identity() -> dict:
 
 def benchmark_request(meta: dict, policy: str, root: Path) -> dict:
     return {"policy": policy, "steps": meta["steps"], "seeds": meta["seeds"],
-            "envs": env_schedule(meta), "root": str(root), "timing": True,
-            "ablation": meta["ablationLabel"] if policy == "oak" else "none"}
+            "envs": env_schedule(meta), "root": str(root)}
 
 
 def run_benchmark(meta: dict, policy: str, root: Path) -> None:
@@ -803,7 +795,7 @@ def cmd_run(args) -> int:
     name = identity["id"]
     if name == best_hash():
         raise SystemExit(f"{name} is already the best")
-    if best_run() is None:
+    if best_hash() is None:
         print("[fleet] no best exists: this run bootstraps the best", flush=True)
     current = daemon()
     if current["running"] is not None:
@@ -836,11 +828,18 @@ def cmd_job(args) -> int:
     if args.steps:
         meta["steps"] = int(args.steps)
     candidate = {"root": root, "meta": meta}
-    for policy in ("ppo", "random"):
-        stored = stored_baseline(meta, policy)
-        if stored is not None:
-            link_baseline(root, policy, stored)
     record_policy(candidate, "oak", identity)
+    if best is not None and meta["steps"] < best["meta"]["steps"]:
+        completed = load(root)
+        if completed["meta"]["preset"] != best["meta"]["preset"]:
+            print(f"[fleet] {completed['meta']['preset']} prefix of {meta['steps']:,} steps: nothing to compare with the best's"
+                  f" {best['meta']['preset']}", flush=True)
+        else:
+            same = rewards_identical(best, completed)
+            print(f"[fleet] prefix of {meta['steps']:,} steps: rewards {'bitwise identical to' if same else 'differ from'}"
+                  " the best over that prefix; a prefix carries no verdict", flush=True)
+        print("[fleet] DONE", flush=True)
+        return 0
     record_policy(candidate, "ppo", identity)
     record_policy(candidate, "random", identity)
     cmd_report(argparse.Namespace(root=root))
@@ -871,25 +870,6 @@ def cmd_job(args) -> int:
     return result
 
 
-def cmd_resume(args) -> int:
-    checkpoint = args.checkpoint.resolve()
-    if not checkpoint.is_file():
-        raise SystemExit(f"{checkpoint}: no such checkpoint")
-    if BENCH.resolve() not in checkpoint.parents:
-        raise SystemExit(f"{checkpoint}: checkpoints live under {BENCH}")
-    subprocess.run(["swift", "build", "-c", "release"], cwd=REPO, check=True)
-    current = daemon()
-    if current["running"] is not None:
-        raise SystemExit(f"OaK is already running {current['running']}")
-    request = {"resume": str(checkpoint), "timing": True}
-    if args.steps:
-        request["steps"] = int(args.steps)
-    started = json.loads(api("/api/benchmark", request))
-    print(f"[fleet] resumed {checkpoint.relative_to(BENCH)} as {started['id']}: a continuation, recorded without a gate")
-    print(f"  {BENCH / started['id']}\n  http://127.0.0.1:{PORT}")
-    return 0
-
-
 def main() -> int:
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -903,12 +883,8 @@ def main() -> int:
     pp.add_argument("root", type=Path)
     gp = sub.add_parser("gate")
     gp.add_argument("candidate", type=Path)
-    rs = sub.add_parser("resume")
-    rs.add_argument("checkpoint", type=Path)
-    rs.add_argument("--steps", type=int)
     args = ap.parse_args()
-    return {"run": cmd_run, "job": cmd_job, "report": cmd_report, "gate": cmd_gate,
-            "resume": cmd_resume}[args.cmd](args)
+    return {"run": cmd_run, "job": cmd_job, "report": cmd_report, "gate": cmd_gate}[args.cmd](args)
 
 
 if __name__ == "__main__":

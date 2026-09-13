@@ -189,12 +189,9 @@ extension RecordWriter {
 
 final class FrameEncoder: @unchecked Sendable {
   let encoders: [RecordWriter]
-  var closed: [Bool] { encoders.map(\.closed) }
 
-  init(laneEnvKinds: [UInt32], closed: [Bool]?) throws {
-    encoders = try laneEnvKinds.enumerated().map { lane, kind in
-      try RecordWriter(envKind: kind, closed: closed?[lane] ?? false)
-    }
+  init(laneEnvKinds: [UInt32]) throws {
+    encoders = try laneEnvKinds.map { try RecordWriter(envKind: $0) }
   }
 
   func encode(
@@ -281,20 +278,17 @@ final class PayloadWriter {
 }
 
 final class HeaderWriter {
-  static let baseFields = ["rewardSum", "rho", "deathStep", "deathDetector"]
-  let fields: [String]
+  static let fields = ["rewardSum", "rho", "deathStep", "deathDetector"]
   private let handle: FileHandle
   private let laneCount: Int
-  private let diagCount: Int
   private var block: [Float]
 
-  init(root: URL, laneCount: Int, diagFields: [String]) throws {
+  init(root: URL, laneCount: Int) throws {
     let url = root.appendingPathComponent("headers")
     FileManager.default.createFile(atPath: url.path, contents: nil)
     handle = try FileHandle(forWritingTo: url)
     self.laneCount = laneCount
-    diagCount = diagFields.count
-    fields = Self.baseFields + diagFields
+    let fields = Self.fields
     block = [Float](repeating: 0, count: fields.count * laneCount)
     let json = try JSONSerialization.data(withJSONObject: ["fields": fields])
     var head = Data()
@@ -304,11 +298,10 @@ final class HeaderWriter {
   }
 
   func append(
-    snap: UnsafePointer<LaneSnapshot>, deadStep: [Int?], deadDetector: [UInt32?], diag: [Float],
+    snap: UnsafePointer<LaneSnapshot>, deadStep: [Int?], deadDetector: [UInt32?],
     stepStart: Int, stepCount: Int, wallSeconds: Double
   ) throws {
-    precondition(diag.count == diagCount * laneCount, "diag matrix shape drifted from the field list")
-    var out = Data(capacity: 16 + fields.count * laneCount * 4)
+    var out = Data(capacity: 16 + Self.fields.count * laneCount * 4)
     for v: UInt32 in [UInt32(stepStart), UInt32(stepCount)] { out.appendLE(v) }
     out.appendLE(Float(wallSeconds).bitPattern)
     var field = 0
@@ -320,9 +313,6 @@ final class HeaderWriter {
     push { _, s in s.rho }
     push { l, _ in deadStep[l].map { Float(bitPattern: UInt32($0)) } ?? Float.nan }
     push { l, _ in deadDetector[l].map { Float($0) } ?? Float.nan }
-    for f in 0..<diagCount {
-      push { l, _ in diag[l * diagCount + f] }
-    }
     let comp = try block.withUnsafeBufferPointer {
       try (Data(buffer: $0) as NSData).compressed(using: .zlib) as Data
     }
@@ -340,11 +330,10 @@ final class RunWriter {
   let payload: PayloadWriter
   let laneCount: Int
   let envLanes: [Range<Int>]
-  var closed: [Bool] { frames.closed }
 
-  init(root: URL, laneCount: Int, steps: Int, laneEnvKinds: [UInt32], diagFields: [String], closed: [Bool]?) throws {
-    headers = try HeaderWriter(root: root, laneCount: laneCount, diagFields: diagFields)
-    frames = try FrameEncoder(laneEnvKinds: laneEnvKinds, closed: closed)
+  init(root: URL, laneCount: Int, steps: Int, laneEnvKinds: [UInt32]) throws {
+    headers = try HeaderWriter(root: root, laneCount: laneCount)
+    frames = try FrameEncoder(laneEnvKinds: laneEnvKinds)
     payload = try PayloadWriter(root: root, laneCount: laneCount, steps: steps)
     self.laneCount = laneCount
     envLanes = Self.envLanes(laneEnvKinds)
@@ -364,11 +353,11 @@ final class RunWriter {
 
   func writeWindow(
     stepStart: Int, stepCount: Int, wallSeconds: Double,
-    snap: UnsafePointer<LaneSnapshot>, deadStep: [Int?], deadDetector: [UInt32?], diag: [Float],
+    snap: UnsafePointer<LaneSnapshot>, deadStep: [Int?], deadDetector: [UInt32?],
     records: UnsafePointer<Float>, capacity: Int, onError: (Error) -> Void
   ) throws {
     try headers.append(
-      snap: snap, deadStep: deadStep, deadDetector: deadDetector, diag: diag,
+      snap: snap, deadStep: deadStep, deadDetector: deadDetector,
       stepStart: stepStart, stepCount: stepCount, wallSeconds: wallSeconds)
     let chunks = frames.encode(
       records, capacity: capacity, stepStart: stepStart, stepCount: stepCount, onError: onError)
@@ -712,91 +701,5 @@ final class RunReader {
       index += 1
     }
     return out
-  }
-}
-
-struct CheckpointRegion {
-  let name: String
-  let base: UnsafeMutableRawPointer
-  let bytes: Int
-}
-
-enum Checkpoint {
-  static let magic: UInt32 = 0x504B_4B4F
-
-  static func save(_ url: URL, step: Int, laneCount: Int, regions: [CheckpointRegion]) throws {
-    var out = Data()
-    out.appendLE(magic)
-    out.appendLE(UInt64(step))
-    out.appendLE(UInt32(laneCount))
-    for region in regions {
-      let name = Data(region.name.utf8)
-      out.appendLE(UInt32(name.count))
-      out.append(name)
-      out.appendLE(UInt64(region.bytes))
-      out.append(Data(bytes: region.base, count: region.bytes))
-    }
-    try out.write(to: url, options: .atomic)
-  }
-
-  static func step(of url: URL) throws -> Int {
-    let handle = try FileHandle(forReadingFrom: url)
-    defer { try? handle.close() }
-    guard let head = try handle.read(upToCount: 12), head.count == 12 else { throw err("\(url.path): not a checkpoint") }
-    return try head.withUnsafeBytes { raw in
-      var r = ByteReader(raw)
-      guard try r.u32("magic") == magic else { throw err("\(url.path): not a checkpoint") }
-      return Int(try r.u64("step"))
-    }
-  }
-
-  static func load(_ url: URL) throws -> (step: Int, laneCount: Int, regions: [String: Data]) {
-    let data = try Data(contentsOf: url)
-    var regions: [String: Data] = [:]
-    let (step, laneCount) = try data.withUnsafeBytes { raw -> (Int, Int) in
-      var r = ByteReader(raw)
-      guard try r.u32("magic") == magic else { throw err("\(url.path): not a checkpoint") }
-      let step = Int(try r.u64("step"))
-      let lanes = Int(try r.u32("lane count"))
-      while r.remaining > 0 {
-        let nameLen = Int(try r.u32("region name length"))
-        let nameAt = try r.take(nameLen, "region name")
-        let name = String(decoding: UnsafeRawBufferPointer(rebasing: raw[nameAt..<(nameAt + nameLen)]), as: UTF8.self)
-        let bytes = Int(try r.u64("region size"))
-        let at = try r.take(bytes, "region \(name)")
-        regions[name] = Data(raw[at..<(at + bytes)])
-      }
-      return (step, lanes)
-    }
-    return (step, laneCount, regions)
-  }
-
-  static func restore(_ saved: [String: Data], into regions: [CheckpointRegion]) throws {
-    for region in regions {
-      guard let data = saved[region.name] else { throw err("checkpoint lacks region \(region.name)") }
-      guard data.count == region.bytes else {
-        throw err("checkpoint region \(region.name) is \(data.count) bytes, engine expects \(region.bytes)")
-      }
-      data.withUnsafeBytes { region.base.copyMemory(from: $0.baseAddress!, byteCount: region.bytes) }
-    }
-  }
-}
-
-struct LoopRestore {
-  let step: Int
-  let deadStep: [Int?]
-  let deadDetector: [UInt32?]
-  let closed: [Bool]
-
-  init(step: Int, laneCount: Int, regions: [String: Data]) throws {
-    guard let dead = regions["deadStep"], let detector = regions["deadDetector"], let closed = regions["closed"],
-      dead.count == laneCount * 4, detector.count == laneCount * 4, closed.count == laneCount
-    else { throw err("checkpoint lacks loop state for \(laneCount) lanes") }
-    self.step = step
-    let deadWords = dead.withUnsafeBytes { Array($0.bindMemory(to: UInt32.self)) }
-    let detectorWords = detector.withUnsafeBytes { Array($0.bindMemory(to: UInt32.self)) }
-    deadStep = deadWords.map { $0 == UInt32.max ? nil : Int($0) }
-    deadDetector = detectorWords.map { $0 == UInt32.max ? nil : $0 }
-    self.closed = closed.map { $0 != 0 }
   }
 }

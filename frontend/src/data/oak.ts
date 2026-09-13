@@ -179,11 +179,3 @@ export function follow(id: string, lane: number, handlers: FollowHandlers): () =
     }
   };
 }
-
-export function signal(id: string, lane: number, word: number, value: number): void {
-  if (socket !== null && socket.readyState === WebSocket.OPEN) socket.send(`signal ${id} ${lane} ${word} ${value}`);
-}
-
-export function save(id: string): void {
-  if (socket !== null && socket.readyState === WebSocket.OPEN) socket.send(`save ${id}`);
-}

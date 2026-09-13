@@ -83,7 +83,6 @@ final class Connection: @unchecked Sendable {
         let head = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: \(accept)\r\n\r\n"
         nw.send(content: Data(head.utf8), completion: .contentProcessed { _ in })
         websocket = true
-        daemon.attach(self)
         while try websocketFrame() {}
         return
       }
@@ -197,41 +196,9 @@ final class Connection: @unchecked Sendable {
   func sendBinary(_ data: Data) { send(opcode: 2, data) }
 }
 
-final class LiveControl: @unchecked Sendable {
-  private let lock = NSLock()
-  private var signals: [(lane: Int, word: Int, value: UInt32)] = []
-  private var saveRequested = false
-  var onWindow: ((Int) -> Void)?
-
-  func signal(lane: Int, word: Int, value: UInt32) {
-    lock.lock()
-    signals.append((lane, word, value))
-    lock.unlock()
-  }
-  func requestSave() {
-    lock.lock()
-    saveRequested = true
-    lock.unlock()
-  }
-  var pending: Bool {
-    lock.lock()
-    defer { lock.unlock() }
-    return !signals.isEmpty || saveRequested
-  }
-  func take(allowSave: Bool) -> (signals: [(lane: Int, word: Int, value: UInt32)], save: Bool) {
-    lock.lock()
-    defer { lock.unlock() }
-    let out = (signals, saveRequested && allowSave)
-    signals = []
-    if allowSave { saveRequested = false }
-    return out
-  }
-}
-
 final class RunningJob {
   let id: String
   let root: URL
-  let control = LiveControl()
   init(id: String, root: URL) {
     self.id = id
     self.root = root
@@ -244,7 +211,6 @@ final class Daemon: @unchecked Sendable {
   let port: UInt16
   let queue = DispatchQueue(label: "oak.daemon")
   private var readers: [String: RunReader] = [:]
-  private var connections: Set<ObjectIdentifier> = []
   private var sockets: [ObjectIdentifier: Connection] = [:]
   private(set) var running: RunningJob?
   private var listener: NWListener?
@@ -266,7 +232,6 @@ final class Daemon: @unchecked Sendable {
     let listener = try NWListener(using: params)
     listener.newConnectionHandler = { [self] nw in
       let c = Connection(nw, daemon: self)
-      connections.insert(ObjectIdentifier(c))
       sockets[ObjectIdentifier(c)] = c
       c.start()
     }
@@ -284,18 +249,12 @@ final class Daemon: @unchecked Sendable {
     if let failure { throw err("port \(port) is taken: \(failure)") }
     self.listener = listener
     fputs("OaK on http://127.0.0.1:\(port)\n", stderr)
-    if ProcessInfo.processInfo.environment["OAK_BENCH_POLICY"] != nil {
-      let request = try BenchmarkRequest.fromEnvironment()
-      try queue.sync { try start(request) }
-    }
     dispatchMain()
   }
 
   func forget(_ c: Connection) {
-    connections.remove(ObjectIdentifier(c))
     sockets.removeValue(forKey: ObjectIdentifier(c))
   }
-  func attach(_ c: Connection) {}
 
   private func reader(_ id: String) throws -> RunReader {
     if let r = readers[id] {
@@ -343,7 +302,6 @@ final class Daemon: @unchecked Sendable {
       "id": id,
       "envIds": r.meta.envLanes.map(\.envId),
       "steps": r.meta.steps,
-      "ablationLabel": meta["ablationLabel"] ?? "none",
       "startedAt": meta["startedAt"] ?? NSNull(),
       "complete": r.complete,
       "maxStep": r.maxStep,
@@ -475,14 +433,6 @@ final class Daemon: @unchecked Sendable {
       if let r = try? reader(parts[1]) { c.sendText("columns \(parts[1]) \(r.fields.joined(separator: ","))") }
     case "unfollow" where parts.count == 3:
       c.follows.remove("\(parts[1]) \(parts[2])")
-    case "signal" where parts.count == 5:
-      guard let job = running, job.id == parts[1], let lane = Int(parts[2]), let word = Int(parts[3]),
-        let value = UInt32(parts[4])
-      else { c.sendText("error signal needs a running run, lane, word, value"); return }
-      job.control.signal(lane: lane, word: word, value: value)
-    case "save" where parts.count == 2:
-      guard let job = running, job.id == parts[1] else { c.sendText("error save needs the running run"); return }
-      job.control.requestSave()
     default:
       c.sendText("error unknown command")
     }
@@ -527,10 +477,6 @@ final class Daemon: @unchecked Sendable {
   private func start(_ request: BenchmarkRequest) throws {
     let rel = request.root.standardizedFileURL.path.replacingOccurrences(of: bench.standardizedFileURL.path + "/", with: "")
     let job = RunningJob(id: rel, root: request.root)
-    job.control.onWindow = { [weak self, weak job] step in
-      guard let self, let job else { return }
-      self.queue.async { self.windowLanded(job, step: step) }
-    }
     running = job
     readers.removeValue(forKey: job.id)
     Thread.detachNewThread { [self] in
@@ -540,7 +486,10 @@ final class Daemon: @unchecked Sendable {
         "OaK run \(job.id)" as CFString, &assertion)
       defer { IOPMAssertionRelease(assertion) }
       do {
-        try Main.benchmark(request, control: job.control)
+        try Main.benchmark(request) { [weak self, weak job] step in
+          guard let self, let job else { return }
+          self.queue.async { self.windowLanded(job, step: step) }
+        }
         fputs("[serve] run \(job.id) complete\n", stderr)
       } catch {
         fputs("[serve] run \(job.id) failed: \(error)\n", stderr)

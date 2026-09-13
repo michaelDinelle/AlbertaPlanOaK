@@ -87,6 +87,12 @@ constant uint OAK_DIAG_OUT_FLOATS = sizeof(PpoDiagRecord) / 4u;
 
 inline float finiteOrZero(float x) { return isfinite(x) ? x : 0.0f; }
 
+constant uint OAK_MEGA_STAGE_MASK [[function_constant(4)]];
+constant uint OAK_MEGA_STAGES = is_function_constant_defined(OAK_MEGA_STAGE_MASK)
+    ? OAK_MEGA_STAGE_MASK : 0xffffffffu;
+
+inline void laneFence() { simdgroup_barrier(mem_flags::mem_device); }
+
 inline void kahanAdd(device float *sum, device float *comp, float x) {
     float y = x - *comp;
     float t = *sum + y;
