@@ -29,6 +29,7 @@ constant uint RECORD_NEXT = 4u;
 constant uint RECORD_NEXT_AUX = 5u;
 constant uint RECORD_TWIN = 6u;
 constant uint RECORD_POLICY = 7u;
+constant uint OAK_RECORD_VEC_MAX = ((RECORD_POLICY + OAK_POLICY_MAX) + 3u) / 4u;
 
 inline float keepFinite(float old_w, float new_w) { return isfinite(new_w) ? new_w : old_w; }
 
@@ -52,7 +53,7 @@ inline Shape shapeFor(uint obsDim, uint actionParams, uint envActionCount) {
     s.nurseryCount = nurseryForPercepts(s.perceptCount);
     s.traceLevels = OAK_CANDIDATES_PER_SLOT;
     s.policyCount = max(actionParams / 2u, 1u);
-    s.recordFloats = RECORD_POLICY + s.policyCount;
+    s.recordFloats = ((RECORD_POLICY + s.policyCount) + 3u) & ~3u;
     s.envActionCount = envActionCount;
     uint featureTimeScale = featureTimeScaleForPercepts(s.perceptCount);
     s.invFeatureTimeScale = 1.0f / float(featureTimeScale);
@@ -963,7 +964,11 @@ static inline void learnFromTransition(Agent agent, device const float *prev,
                 float aP = simd_shuffle(aPH, (ushort)l);
                 float aM = simd_shuffle(aMH, (ushort)l);
                 if (!optionLive) continue;
-                device float *rec = record(agent, i, slot);
+                device float4 *recv = (device float4 *)record(agent, i, slot);
+                uint qn = agent.recordFloats >> 2u;
+                float4 q[OAK_RECORD_VEC_MAX];
+                for (uint v = 0u; v < qn; ++v) q[v] = recv[v];
+                thread float *rec = (thread float *)q;
                 for (uint j = 0u; j < policyN; ++j) {
                     float w = rec[RECORD_POLICY + j];
                     rec[RECORD_POLICY + j] = keepFinite(w, w + actorCoefficient[j] * xp);
@@ -982,6 +987,7 @@ static inline void learnFromTransition(Agent agent, device const float *prev,
                 float rewardModelGradient = (continuation > 0.0f) ? (twinPrevDot * (xp - continuation * xc)) : (rewardModelTdError * xp);
                 rec[RECORD_REWARD] = keepFinite(rewardWeight, rewardWeight + aM * importanceRatio * rewardModelGradient * nextValueStepScale);
                 rec[RECORD_TWIN] = keepFinite(twin, twin + aM * importanceRatio * twinResidual * xp * nextValueAuxStepScale);
+                for (uint v = 0u; v < qn; ++v) recv[v] = q[v];
             }
         }
 
