@@ -208,47 +208,55 @@ function makeHoodoos(world: ReturnType<typeof makeWorld>, terrainMaterial: THREE
   material.onBeforeCompile = terrainMaterial.onBeforeCompile;
   const meshes = new Map<string, THREE.Mesh>();
   let previous = '';
+  let pending: { key: string; x: number; z: number; rng: () => number }[] = [];
+  const build = ({ key, x, z, rng }: (typeof pending)[number]): void => {
+    const scale = 1.2 + rng() * 0.5, angle = (rng() - 0.5) * 0.4;
+    const geometry = source.clone().scale(scale, scale, scale).rotateY(angle);
+    const positions = geometry.getAttribute('position'), colors = geometry.getAttribute('color');
+    const exposure = new Float32Array(positions.count);
+    const anchor = prairieGroundHeight(x, z);
+    for (let i = 0; i < positions.count; i++) {
+      const px = x + positions.getX(i), pz = z + positions.getZ(i), py = positions.getY(i);
+      const ground = prairieGroundHeight(px, pz);
+      const y = py + THREE.MathUtils.lerp(ground, anchor, THREE.MathUtils.smoothstep(py / scale, 0.3, 1.8)) - 0.08;
+      positions.setXYZ(i, px, y, pz);
+      const blend = THREE.MathUtils.smoothstep(py / scale, 0, 0.9);
+      exposure[i] = THREE.MathUtils.lerp(prairieRidge(px, pz).exposure, 1, blend);
+      colors.setXYZ(i, THREE.MathUtils.lerp(1, colors.getX(i) * 2.2, blend), THREE.MathUtils.lerp(1, colors.getY(i) * 2.5, blend), THREE.MathUtils.lerp(1, colors.getZ(i) * 3.2, blend));
+    }
+    geometry.setAttribute('exposure', new THREE.BufferAttribute(exposure, 1));
+    geometry.computeVertexNormals();
+    geometry.computeBoundingSphere();
+    const mesh = world.add(new THREE.Mesh(geometry, material));
+    mesh.name = 'sandstoneHoodoos';
+    mesh.castShadow = mesh.receiveShadow = true;
+    meshes.set(key, mesh);
+  };
   return world.own({
     setView(coverage: ViewCoverage) {
       const cx = Math.floor(coverage.x / 64), cz = Math.floor(coverage.z / 96), center = `${cx},${cz}`;
-      if (center === previous) return;
-      previous = center;
-      const active = new Set<string>();
-      for (let tx = cx - 6; tx <= cx + 6; tx++) for (let tz = cz - 5; tz <= cz + 5; tz++) {
-        const rng = rngAt(tx, tz, seed), x = tx * 64 + (rng() - 0.5) * 32;
-        const ridge = prairieRidge(x, (tz + 0.5) * 96);
-        const z = Math.sign(tz + 0.5) * (ridge.center - ridge.width * 0.57);
-        if (tz !== Math.floor(z / 96) || prairieRidge(x, z).exposure < 0.35) continue;
-        const key = `${tx},${tz}`;
-        active.add(key);
-        if (meshes.has(key)) continue;
-        const scale = 1.2 + rng() * 0.5, angle = (rng() - 0.5) * 0.4;
-        const geometry = source.clone().scale(scale, scale, scale).rotateY(angle);
-        const positions = geometry.getAttribute('position'), colors = geometry.getAttribute('color');
-        const exposure = new Float32Array(positions.count);
-        const anchor = prairieGroundHeight(x, z);
-        for (let i = 0; i < positions.count; i++) {
-          const px = x + positions.getX(i), pz = z + positions.getZ(i), py = positions.getY(i);
-          const ground = prairieGroundHeight(px, pz);
-          const y = py + THREE.MathUtils.lerp(ground, anchor, THREE.MathUtils.smoothstep(py / scale, 0.3, 1.8)) - 0.08;
-          positions.setXYZ(i, px, y, pz);
-          const blend = THREE.MathUtils.smoothstep(py / scale, 0, 0.9);
-          exposure[i] = THREE.MathUtils.lerp(prairieRidge(px, pz).exposure, 1, blend);
-          colors.setXYZ(i, THREE.MathUtils.lerp(1, colors.getX(i) * 2.2, blend), THREE.MathUtils.lerp(1, colors.getY(i) * 2.5, blend), THREE.MathUtils.lerp(1, colors.getZ(i) * 3.2, blend));
+      if (center !== previous) {
+        previous = center;
+        const active = new Set<string>();
+        pending = [];
+        for (let tx = cx - 6; tx <= cx + 6; tx++) for (let tz = cz - 5; tz <= cz + 5; tz++) {
+          const rng = rngAt(tx, tz, seed), x = tx * 64 + (rng() - 0.5) * 32;
+          const ridge = prairieRidge(x, (tz + 0.5) * 96);
+          const z = Math.sign(tz + 0.5) * (ridge.center - ridge.width * 0.57);
+          if (tz !== Math.floor(z / 96) || prairieRidge(x, z).exposure < 0.35) continue;
+          const key = `${tx},${tz}`;
+          active.add(key);
+          if (!meshes.has(key)) pending.push({ key, x, z, rng });
         }
-        geometry.setAttribute('exposure', new THREE.BufferAttribute(exposure, 1));
-        geometry.computeVertexNormals();
-        geometry.computeBoundingSphere();
-        const mesh = world.add(new THREE.Mesh(geometry, material));
-        mesh.name = 'sandstoneHoodoos';
-        mesh.castShadow = mesh.receiveShadow = true;
-        meshes.set(key, mesh);
+        pending.sort((a, b) => (b.x - coverage.x) ** 2 + (b.z - coverage.z) ** 2 - (a.x - coverage.x) ** 2 - (a.z - coverage.z) ** 2);
+        for (const [key, mesh] of meshes) if (!active.has(key)) {
+          mesh.geometry.dispose();
+          mesh.removeFromParent();
+          meshes.delete(key);
+        }
       }
-      for (const [key, mesh] of meshes) if (!active.has(key)) {
-        mesh.geometry.dispose();
-        mesh.removeFromParent();
-        meshes.delete(key);
-      }
+      const start = performance.now();
+      while (pending.length > 0 && performance.now() - start < 2) build(pending.pop()!);
     },
     dispose() {
       for (const mesh of meshes.values()) { mesh.geometry.dispose(); mesh.removeFromParent(); }

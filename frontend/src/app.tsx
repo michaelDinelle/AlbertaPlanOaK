@@ -1,393 +1,222 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
-import { clsx } from 'clsx';
-import { ChevronDown, PanelRightOpen, RotateCcw } from 'lucide-react';
-import type { Policy, RunDetail, RunIndexEntry } from './data/types';
-import { runDetailQuery, runsQuery } from './data/queries';
-import { Panel } from './glass/Panel';
-import { formatStep } from './lib/format';
-import { cycleEnv, keyAction } from './lib/keymap';
-import { envLanes, resolveFeaturedRun, runDateLabel, runEnvs, runLabel, runLabelFor, runShortId, sortRuns } from './lib/run';
-import { peakSeed } from './lib/selection';
-import { CommandPalette } from './panels/CommandPalette';
-import { Hotkey, POLICY_TOKENS } from './panels/charts';
+import { useEffect, useMemo, useRef } from 'react';
+import { entryFor, parseCatalog } from '@sim/catalog';
+import { fetchDetail, fetchRuns, loadTape, type RunIndexEntry } from './data/oak';
+import { envLanes, leaderSeed, peakStep, rateWindow, runEnvs } from './derive';
+import { formatDate, formatStep } from './format';
+import { BEST_TOKEN, POLICY_NAMES, POLICY_ORDER, POLICY_TOKENS } from './panels/charts';
+import { glass } from './glass/glass';
+import { EnvPicker } from './panels/EnvPicker';
+import { HealthView } from './panels/HealthView';
 import { JbwLegend } from './panels/JbwLegend';
+import { AUTHOR_LINKS } from './panels/links';
 import { PlaybackBar, PolicySwitch } from './panels/PlaybackBar';
-import { PANEL_VIEWS, StatsPanel, type PanelView } from './panels/StatsPanel';
-import {
-  adoptDefaultEnv,
-  adoptFromUrl,
-  cycleSortMode,
-  electLeader,
-  resolveRun,
-  selectEnv,
-  selectPolicy,
-  selectRun,
-  selectionSnapshot,
-  toggleDebug,
-  unpromote,
-  useSelection,
-} from './state/selectionStore';
-import { STR } from './strings';
-import { retentionWindow } from './tape/derive';
-import { reloadTape, useTapeSnapshot, type DeriveSpec } from './tape/store';
-import { setTransport, transportSnapshot } from './playback/store';
-import { pullHero, resetCamera, setTheaterInputs, stepBySteps, useStageMeta } from './theater/controller';
-import { TheaterStage } from './theater/TheaterStage';
-import { sceneRegistry } from './scenes/table';
-import { EnvTileButton } from './wall/EnvTileButton';
-import { EnvWall } from './wall/EnvWall';
-import { watchRuns } from './toasts';
-import { urlState } from './url/useUrlState';
+import { RewardView, type Comparison } from './panels/RewardView';
+import { StandingsView } from './panels/StandingsView';
+import { addDetail, addTape, fail, patch, selectEnv, selectRun, store, type Panel } from './store';
+import { mountStage, type Alternate, type Stage } from './theater/stage';
 
-function Notice({ title, detail, pulse }: { title: string; detail: string | null; pulse?: boolean }) {
-  return (
-    <Panel className="flex max-w-md flex-col gap-1.5 px-5 py-4">
-      <div className="font-mono text-sm text-ink">{title}</div>
-      {detail !== null && <div className="text-xs text-ink-dim">{detail}</div>}
-      {pulse === true && <span className="mt-1 size-1.5 motion-safe:animate-pulse rounded-full bg-accent" />}
-    </Panel>
-  );
+const PANELS: Record<Panel, string> = { reward: 'Reward', standings: 'Standings', health: 'Health' };
+const loading = new Set<string>();
+
+async function ensure(id: string): Promise<void> {
+  if (loading.has(id) || store.get().details[id] !== undefined) return;
+  loading.add(id);
+  try {
+    const [detail, tape] = await Promise.all([fetchDetail(id), loadTape(id)]);
+    addDetail(detail, tape);
+  } catch (error) {
+    fail(error);
+  } finally {
+    loading.delete(id);
+  }
 }
 
-function RunChip({
-  entries,
-  active,
-}: {
-  entries: readonly RunIndexEntry[] | undefined;
-  active: RunDetail | null;
-}) {
-  const [open, setOpen] = useState(false);
-  if (active === null) return null;
-  const entry = entries?.find((run) => run.id === active.id);
-  const runs = sortRuns(entries ?? []).slice(0, 16);
-  return (
-    <div className="pointer-events-auto relative" onKeyDown={(event) => { if (event.key === 'Escape') setOpen(false); }}>
-      {open && <button type="button" aria-hidden className="fixed inset-0 cursor-default" onClick={() => setOpen(false)} />}
-      <Panel className="relative px-3 py-1.5">
-        <button
-          type="button"
-          onClick={() => setOpen((o) => !o)}
-          title={STR.run.commit(active.id)}
-          className="flex items-center gap-2.5 text-left"
-        >
-          <div className="flex flex-col">
-            <span className="font-mono text-xs text-ink">{runLabelFor(active.id, entries, active)}</span>
-            <span className="font-mono text-2xs text-ink-dim">
-              {STR.run.facts(runEnvs(active.meta).length, formatStep(active.meta.steps), active.meta.preset)}
-            </span>
-          </div>
-          {entry?.inFlight === true && (
-            <span className="size-1.5 motion-safe:animate-pulse rounded-full bg-good" title={STR.bar.live} />
-          )}
-          <ChevronDown className={clsx('size-3 text-ink-faint transition-transform', open && 'rotate-180')} />
-        </button>
-      </Panel>
-      {open && (
-        <Panel className="absolute left-0 top-full mt-1.5 flex min-w-56 flex-col gap-0.5 p-1.5">
-          {runs.map((run) => (
-            <button
-              key={run.id}
-              type="button"
-              onClick={() => {
-                selectRun(run.id);
-                setOpen(false);
-              }}
-              title={STR.run.switchTo(runLabel(run))}
-              className={clsx(
-                'flex flex-col gap-0.5 whitespace-nowrap rounded-md px-2.5 py-1.5 text-left transition-colors',
-                run.id === active.id ? 'bg-accent/15' : 'hover:bg-white/10',
-              )}
-            >
-              <span className="flex items-center gap-2 text-xs text-ink">
-                {runDateLabel(run.startedAt)}
-                {run.role === 'best' && <span className="text-best">{STR.best}</span>}
-                {run.policy !== 'oak' && <span style={{ color: POLICY_TOKENS[run.policy] }}>{STR.policy[run.policy]}</span>}
-                {run.inFlight && <span className="size-1.5 motion-safe:animate-pulse rounded-full bg-good" title={STR.bar.live} />}
-              </span>
-              <span className="font-mono text-2xs tabular-nums text-ink-dim">
-                {runShortId(run.id)} · {STR.run.facts(run.envIds.length, formatStep(run.steps), run.preset)}
-              </span>
-            </button>
-          ))}
-        </Panel>
-      )}
-    </div>
-  );
-}
+const runLabel = (run: RunIndexEntry): string =>
+  [formatDate(run.startedAt), run.role === 'best' ? 'best' : null, run.inFlight ? 'live' : null, run.id.slice(0, 7), `${run.envIds.length} envs · ${formatStep(run.steps)} steps · ${run.preset}`]
+    .filter((part) => part !== null)
+    .join(' · ');
 
 export function App() {
-  const sel = useSelection();
-  const meta = useStageMeta();
-  const runsQ = useQuery(runsQuery());
-  const entries = runsQ.data;
-  const entry = useMemo(() => entries?.find((run) => run.id === sel.runId) ?? null, [entries, sel.runId]);
-
-  const detailQ = useQuery({ ...runDetailQuery(sel.runId ?? ''), enabled: sel.runId !== null });
-  const detail = detailQ.data ?? null;
-
-  const bestId = useMemo(() => entries?.find((run) => run.role === 'best')?.id, [entries]);
-  const bestQ = useQuery({ ...runDetailQuery(bestId ?? ''), enabled: bestId !== undefined && bestId !== sel.runId });
-  const best = bestId !== undefined && bestId !== sel.runId ? bestQ.data ?? null : null;
-  const ppoId = detail?.baselines.ppo;
-  const randomId = detail?.baselines.random;
-  const ppoQ = useQuery({ ...runDetailQuery(ppoId ?? ''), enabled: ppoId !== undefined });
-  const randomQ = useQuery({ ...runDetailQuery(randomId ?? ''), enabled: randomId !== undefined });
-  const ppoDetail = ppoQ.data ?? null;
-  const randomDetail = randomQ.data ?? null;
-  const runs = useMemo<Record<Policy, RunDetail | null>>(
-    () => ({ oak: detail, ppo: ppoDetail, random: randomDetail }),
-    [detail, ppoDetail, randomDetail],
+  const s = store.use();
+  const host = useRef<HTMLDivElement | null>(null);
+  const stage = useRef<Stage | null>(null);
+  const entry = s.runs?.find((run) => run.id === s.runId) ?? null;
+  const detail = s.runId === null ? null : s.details[s.runId] ?? null;
+  const bestId = s.runs?.find((run) => run.role === 'best')?.id;
+  const baselineId = s.policy === 'oak' ? s.runId : detail?.baselines[s.policy] ?? null;
+  const active = baselineId === null ? null : s.details[baselineId] ?? null;
+  const tape = active === null ? undefined : s.tapes[active.id];
+  const live = s.policy === 'oak' && entry?.inFlight === true;
+  const envs = useMemo(() => (detail === null ? [] : runEnvs(detail.meta)), [detail]);
+  const lanes = useMemo(() => (active === null || s.envId === null ? null : envLanes(active.meta, s.envId)), [active, s.envId]);
+  const seed = useMemo(() => {
+    if (lanes === null || tape === undefined || lanes.seeds.length === 0) return null;
+    if (s.seed !== null && lanes.seeds.includes(s.seed)) return s.seed;
+    return leaderSeed(tape, lanes);
+  }, [lanes, tape, s.seed]);
+  const startStep = useMemo(
+    () => (active === null || lanes === null || tape === undefined || seed === null ? null : peakStep(tape, lanes.lanes[lanes.seeds.indexOf(seed)]!, rateWindow(active.meta.steps))),
+    [active, lanes, tape, seed],
   );
-
-  const baselineId = sel.policy === 'oak' ? undefined : detail?.baselines[sel.policy];
-  const active = sel.policy === 'oak'
-    ? detail
-    : baselineId === undefined ? null : sel.policy === 'ppo' ? ppoDetail : randomDetail;
-  const baselinePending =
-    sel.policy !== 'oak'
-    && (detail === null
-      ? detailQ.isPending
-      : baselineId !== undefined && (sel.policy === 'ppo' ? ppoQ : randomQ).isPending);
-
-  const envList = useMemo(() => (detail === null ? [] : runEnvs(detail.meta)), [detail]);
-  const stride = active === null ? 1 : active.meta.batch;
-  const live = entry?.inFlight === true;
-  const candidates = useMemo(() => active === null || sel.envId === null ? null : envLanes(active.meta, sel.envId), [active, sel.envId]);
-  const peakSpec = useMemo<(DeriveSpec & { mode: 'windowedRates' }) | null>(() => active === null || candidates === null ? null : {
-    mode: 'windowedRates', lanes: candidates.lanes, win: retentionWindow(active.meta.steps),
-  }, [active, candidates]);
-  const peakRates = useTapeSnapshot(active?.id ?? null, sel.envId, 'windowedRates', peakSpec);
-  const leader = useMemo(() => candidates === null || peakRates === null || peakSpec === null ? null : peakSeed(candidates.seeds, peakRates, peakSpec.win), [candidates, peakRates, peakSpec]);
-  const leaderPending = sel.selection.promoted === null && candidates !== null && candidates.lanes.length > 0 && (peakRates === null || (live && peakRates.x.length === 0));
-
-  const [view, setView] = useState<PanelView>('reward');
-  const [wallOpen, setWallOpen] = useState(false);
-  const [paletteOpen, setPaletteOpen] = useState(false);
-  const [panelHidden, setPanelHidden] = useState(false);
-  const [panelSettled, setPanelSettled] = useState(false);
-  const rootRef = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    if (!panelHidden) {
-      setPanelSettled(false);
-      return;
+  const alternates = useMemo<Alternate[]>(() => {
+    const envId = s.envId;
+    if (active === null || envId === null || seed === null) return [];
+    return [s.runId, detail?.baselines.ppo, detail?.baselines.random].flatMap((id) => {
+      const other = id === null || id === undefined || id === active.id ? undefined : s.details[id];
+      const otherTape = id === null || id === undefined ? undefined : s.tapes[id];
+      if (other === undefined || otherTape === undefined) return [];
+      const laneSet = envLanes(other.meta, envId);
+      const otherSeed = s.seed === null ? leaderSeed(otherTape, laneSet) : seed;
+      const lane = otherSeed === null ? undefined : laneSet.lanes[laneSet.seeds.indexOf(otherSeed)];
+      return lane === undefined || otherSeed === null ? [] : [{ runId: other.id, lane, seed: otherSeed, entry: entryFor(parseCatalog(other.meta.envCatalog), envId), horizon: other.meta.steps }];
+    });
+  }, [active, s.envId, seed, s.seed, s.runId, detail, s.details, s.tapes]);
+  const compare = useMemo<Comparison[]>(() => {
+    const out: Comparison[] = [];
+    for (const policy of POLICY_ORDER) {
+      const id = policy === 'oak' ? s.runId : detail?.baselines[policy];
+      if (policy !== s.policy && id !== null && id !== undefined && s.tapes[id] !== undefined) out.push({ key: policy, label: POLICY_NAMES[policy], tone: POLICY_TOKENS[policy], runId: id });
     }
-    const timer = window.setTimeout(() => setPanelSettled(true), 320);
-    return () => window.clearTimeout(timer);
-  }, [panelHidden]);
+    if (bestId !== undefined && bestId !== s.runId && s.tapes[bestId] !== undefined) out.push({ key: 'best', label: 'Best', tone: BEST_TOKEN, runId: bestId });
+    return out;
+  }, [s.runId, s.policy, s.tapes, detail, bestId]);
+  const stride = active?.meta.batch ?? 1;
 
   useEffect(() => {
-    adoptFromUrl(urlState());
-    const onPop = (): void => adoptFromUrl(urlState());
-    window.addEventListener('popstate', onPop);
-    return () => window.removeEventListener('popstate', onPop);
+    const poll = (): Promise<void> => fetchRuns().then((runs) => patch({ runs, error: null }), fail);
+    void poll();
+    const timer = setInterval(() => {
+      const runs = store.get().runs;
+      if (runs === null || runs.some((run) => run.inFlight)) void poll();
+    }, 5000);
+    return () => clearInterval(timer);
   }, []);
 
-  useEffect(() => watchRuns(entries), [entries]);
+  useEffect(() => {
+    if (s.runId !== null || s.runs === null) return;
+    const pick = s.runs.find((run) => run.role === 'best') ?? s.runs.find((run) => run.policy === 'oak');
+    if (pick !== undefined) selectRun(pick.id);
+  }, [s.runs, s.runId]);
 
   useEffect(() => {
-    if (sel.runId !== null || entries === undefined) return;
-    const pick = resolveFeaturedRun(entries);
-    if (pick.runId !== null) resolveRun(pick.runId);
-  }, [entries, sel.runId]);
+    for (const id of [s.runId, bestId, detail?.baselines.ppo, detail?.baselines.random]) if (id !== null && id !== undefined) void ensure(id);
+  }, [s.runs, s.runId, bestId, detail]);
 
   useEffect(() => {
-    if (detail === null || sel.envId !== null) return;
-    const first = envList[0];
-    if (first !== undefined) adoptDefaultEnv(first);
-  }, [detail, envList, sel.envId]);
+    if (s.runId === null || entry?.inFlight !== true || s.tapes[s.runId] === undefined) return;
+    const id = s.runId;
+    loadTape(id).then((next) => addTape(id, next), fail);
+    stage.current?.pull();
+  }, [s.runs]);
 
   useEffect(() => {
-    if (candidates === null || baselinePending || peakRates === null) return;
-    electLeader(leader, candidates.seeds);
-  }, [candidates, baselinePending, peakRates, leader, sel.selection.leader]);
+    const first = envs[0];
+    if (first !== undefined && (s.envId === null || !envs.includes(s.envId))) selectEnv(first);
+  }, [envs, s.envId]);
 
   useEffect(() => {
-    setTheaterInputs({
-      active,
-      policy: sel.policy,
-      baselineId,
-      baselinePending: baselinePending || leaderPending,
-      live: sel.policy === 'oak' && live,
-    });
-  }, [active, sel.policy, baselineId, baselinePending, leaderPending, live, setTheaterInputs]);
+    const mounted = mountStage(host.current!);
+    stage.current = mounted;
+    return () => {
+      mounted.destroy();
+      stage.current = null;
+    };
+  }, []);
+
+  useEffect(() => { stage.current?.[s.playing ? 'play' : 'pause'](); }, [s.playing]);
+  useEffect(() => { stage.current?.setSpeed(s.speed); }, [s.speed]);
+  useEffect(() => { stage.current?.setDebug(s.debug); }, [s.debug]);
 
   useEffect(() => {
-    if (!live || sel.runId === null) return;
-    reloadTape(sel.runId);
-    pullHero();
-  }, [sel.runId, live, runsQ.dataUpdatedAt]);
-
-  useEffect(() => {
-    if (sel.envId !== null) void sceneRegistry[sel.envId]?.();
-  }, [sel.envId]);
-
-  const policies = useMemo<Policy[]>(
-    () => ['oak', ...(['ppo', 'random'] as const).filter((p) => detail?.baselines[p] !== undefined)],
-    [detail],
-  );
+    if (active === null || s.envId === null || seed === null || lanes === null) {
+      stage.current?.setTarget(null);
+      return;
+    }
+    try {
+      stage.current?.setTarget({
+        runId: active.id,
+        envId: s.envId,
+        seed,
+        lane: lanes.lanes[lanes.seeds.indexOf(seed)]!,
+        entry: entryFor(parseCatalog(active.meta.envCatalog), s.envId),
+        horizon: active.meta.steps,
+        live,
+        startStep,
+        alternates,
+      });
+    } catch (error) {
+      fail(error);
+    }
+  }, [active, s.envId, seed, lanes, live, startStep, alternates]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
-      if ((event.metaKey || event.ctrlKey) && (event.key === 'k' || event.key === 'K')) {
+      if (event.metaKey || event.ctrlKey || event.altKey || event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement) return;
+      if (event.key === ' ') {
         event.preventDefault();
-        setPaletteOpen((open) => !open);
-        return;
-      }
-      if (event.metaKey || event.ctrlKey || event.altKey || paletteOpen) return;
-      const node = event.target;
-      if (
-        node instanceof HTMLInputElement
-        || node instanceof HTMLSelectElement
-        || node instanceof HTMLTextAreaElement
-      ) {
-        return;
-      }
-      const action = keyAction(event.key, event.shiftKey);
-      if (action === null) return;
-      event.preventDefault();
-      switch (action.kind) {
-        case 'toggle':
-          setTransport({ playing: !transportSnapshot().playing });
-          break;
-        case 'step':
-          stepBySteps(action.frames * stride);
-          break;
-        case 'env': {
-          const next = cycleEnv(envList, selectionSnapshot().envId, action.direction);
-          if (next !== null) selectEnv(next);
-          break;
-        }
-        case 'sort':
-          cycleSortMode();
-          break;
-        case 'debug':
-          toggleDebug();
-          break;
-        case 'policy': {
-          const order = policies;
-          const at = order.indexOf(selectionSnapshot().policy);
-          const next = order[(at + 1) % order.length];
-          if (next !== undefined) selectPolicy(next);
-          break;
-        }
-        case 'fullscreen':
-          if (document.fullscreenElement !== null) void document.exitFullscreen();
-          else rootRef.current?.requestFullscreen().catch(() => {});
-          break;
-        case 'panel':
-          setPanelHidden((hidden) => !hidden);
-          break;
-        case 'view': {
-          const next = PANEL_VIEWS[action.index];
-          if (next !== undefined) {
-            setView(next);
-            setPanelHidden(false);
-          }
-          break;
-        }
-        case 'escape':
-          if (wallOpen) setWallOpen(false);
-          else unpromote();
-          break;
+        patch({ playing: !store.get().playing });
+      } else if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+        event.preventDefault();
+        patch({ playing: false });
+        stage.current?.stepBy((event.key === 'ArrowLeft' ? -20 : 20) * stride);
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [envList, stride, wallOpen, paletteOpen, policies]);
+  }, [stride]);
 
-  const notice = runsQ.isError
-    ? {
-        title: STR.notices.apiDown,
-        detail: `${runsQ.error instanceof Error ? runsQ.error.message : String(runsQ.error)} — ${STR.notices.apiHint}`,
-      }
-    : sel.runId !== null && detailQ.isError
-      ? {
-          title: STR.notices.loadFailed(sel.runId),
-          detail: detailQ.error instanceof Error ? detailQ.error.message : String(detailQ.error),
-        }
-      : entries !== undefined && sel.runId === null
-        ? { title: STR.notices.noRun, detail: STR.notices.noRunHint }
-        : meta.note !== null
-          ? { title: meta.note, detail: meta.noteDetail, pulse: meta.status === 'loading' }
-          : null;
+  const notice = s.error
+    ?? s.stage.note
+    ?? (s.runs !== null && s.runId === null ? 'No run to show yet' : null)
+    ?? (s.policy !== 'oak' && detail !== null && baselineId === null ? `No recorded ${POLICY_NAMES[s.policy]} baseline for this run` : null);
 
   return (
-    <div ref={rootRef} className="fixed inset-0 overflow-hidden bg-ground">
-      <TheaterStage />
+    <div className="fixed inset-0 overflow-hidden bg-ground">
+      <div ref={host} className="absolute inset-0" />
       {notice !== null && (
         <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center p-6">
-          <Notice title={notice.title} detail={notice.detail ?? null} pulse={notice.pulse} />
+          <div ref={glass} className="glass max-w-md rounded-lg px-5 py-4 font-mono text-sm text-ink">{notice}</div>
         </div>
       )}
-      <div className="pointer-events-none absolute left-4 top-4 z-20 flex items-start gap-2">
-        <RunChip entries={entries} active={active} />
-        <Panel>
-          <button type="button" onClick={resetCamera} aria-label={STR.bar.resetCamera} title={STR.bar.resetCamera} className="pointer-events-auto flex h-9 items-center gap-2 rounded-lg px-3 text-xs text-ink-dim transition-colors hover:bg-white/10 hover:text-ink active:bg-white/15">
-            <RotateCcw className="size-3.5" /><span className="hidden sm:inline">{STR.bar.resetCamera}</span>
-          </button>
-        </Panel>
+      <div className="absolute left-4 top-4 z-20 flex items-center gap-2">
+        <select ref={glass} value={s.runId ?? ''} onChange={(event) => selectRun(event.target.value)} className="glass h-9 rounded-lg px-3 font-mono text-xs text-ink">
+          {s.runs?.map((run) => <option key={run.id} value={run.id}>{runLabel(run)}</option>)}
+        </select>
+        <button ref={glass} type="button" onClick={() => stage.current?.resetCamera()} title="Reset camera" className="glass flex h-9 items-center gap-2 rounded-lg px-3 text-xs text-ink-dim hover:bg-white/10 hover:text-ink">⟲<span className="hidden sm:inline">Reset camera</span></button>
       </div>
-      <div
-        className={clsx(
-          'pointer-events-none absolute bottom-20 right-(--gutter) top-(--gutter) z-20 w-(--dock-width) max-w-[calc(100vw-2*var(--gutter))] transition-[transform,opacity] duration-300 ease-out motion-reduce:transition-none',
-          panelHidden ? 'translate-x-[calc(100%+1rem)] opacity-0' : 'translate-x-0 opacity-100',
-        )}
-      >
-        {!(panelHidden && panelSettled) && (
-          <StatsPanel
-            view={view}
-            setView={setView}
-            runs={runs}
-            best={best}
-            active={active}
-            onHide={() => setPanelHidden(true)}
-          />
-        )}
+      {s.panelOpen ? (
+        <aside ref={glass} className="glass absolute bottom-20 right-4 top-4 z-20 flex w-[400px] max-w-[calc(100vw-2rem)] flex-col overflow-hidden rounded-lg py-2.5">
+          <header className="mx-3 mb-2 flex shrink-0 items-center gap-3 border-b border-white/10 pb-2">
+            <span className="min-w-0 text-xs text-ink-dim">Michael Dinelle</span>
+            <nav aria-label="Michael Dinelle’s links" className="ml-auto flex items-center gap-1">
+              {AUTHOR_LINKS.map(({ href, label, Mark }) => (
+                <a key={href} href={href} target="_blank" rel="noreferrer" aria-label={`Michael Dinelle on ${label}`} title={`Michael Dinelle on ${label}`} className="flex size-8 items-center justify-center rounded-md text-ink-dim hover:bg-white/10 hover:text-accent">
+                  <Mark className="size-3.5" />
+                </a>
+              ))}
+            </nav>
+          </header>
+          <div className="flex items-center gap-1 px-2 pb-2">
+            {(Object.keys(PANELS) as Panel[]).map((panel) => (
+              <button key={panel} type="button" onClick={() => patch({ panel })} className={`rounded-md px-2.5 py-1 text-xs ${s.panel === panel ? 'bg-accent/20 text-accent' : 'text-ink-dim hover:bg-white/10 hover:text-ink'}`}>{PANELS[panel]}</button>
+            ))}
+            <button type="button" onClick={() => patch({ panelOpen: false })} aria-label="Hide the side panel" title="Hide the side panel" className="ml-auto flex size-6 items-center justify-center rounded-md text-ink-faint hover:bg-white/10 hover:text-ink">›</button>
+          </div>
+          {s.panel === 'reward' && active !== null && tape !== undefined && s.envId !== null && seed !== null && <RewardView stage={stage} runId={active.id} envId={s.envId} seed={seed} compare={compare} />}
+          {s.panel === 'standings' && <StandingsView />}
+          {s.panel === 'health' && active !== null && tape !== undefined && s.envId !== null && <HealthView runId={active.id} envId={s.envId} />}
+        </aside>
+      ) : (
+        <button ref={glass} type="button" onClick={() => patch({ panelOpen: true })} aria-label="Show the side panel" title="Show the side panel" className="glass absolute right-4 top-4 z-20 flex size-9 items-center justify-center rounded-lg text-ink-dim hover:bg-white/10 hover:text-ink">‹</button>
+      )}
+      <div className="absolute inset-x-0 bottom-4 z-30 grid grid-cols-[1fr_minmax(0,760px)_1fr] items-end gap-3 px-4">
+        <div className="flex flex-col items-start gap-3">
+          {s.envId === 'JellyBeanWorld-cont-v0' && <JbwLegend />}
+          <EnvPicker envs={envs} detail={detail} seed={seed} />
+        </div>
+        <PlaybackBar stage={stage} stride={stride} live={live} />
+        <div className="justify-self-end"><PolicySwitch detail={detail} /></div>
       </div>
-      {panelHidden && panelSettled && (
-        <div className="absolute right-4 top-4 z-20">
-          <Panel>
-            <Hotkey label={STR.bar.showPanel} keyName="c" align="end">
-              <button
-                type="button"
-                aria-label={STR.bar.showPanel}
-                onClick={() => setPanelHidden(false)}
-                className="flex size-9 items-center justify-center rounded-lg text-ink-dim transition-colors hover:bg-white/10 hover:text-ink active:bg-white/15"
-              >
-                <PanelRightOpen className="size-4" />
-              </button>
-            </Hotkey>
-          </Panel>
-        </div>
-      )}
-      <div className="pointer-events-none absolute inset-x-0 bottom-4 z-30 grid grid-cols-[1fr_minmax(0,760px)_1fr] items-end gap-3 px-4">
-        <div className="flex flex-col items-start gap-3 justify-self-start">
-          {sel.envId === 'JellyBeanWorld-cont-v0' && <JbwLegend />}
-          <EnvTileButton onOpen={() => setWallOpen(true)} />
-        </div>
-        <PlaybackBar stride={stride} live={live} fullscreenTarget={rootRef} />
-        <div className="justify-self-end">
-          <PolicySwitch runs={runs} entries={entries} />
-        </div>
-      </div>
-      {wallOpen && (
-        <EnvWall detail={detail} envList={envList} onClose={() => setWallOpen(false)} />
-      )}
-      {paletteOpen && (
-        <CommandPalette
-          entries={entries}
-          detail={detail}
-          envList={envList}
-          setView={setView}
-          openWall={() => setWallOpen(true)}
-          panelHidden={panelHidden}
-          togglePanel={() => setPanelHidden((hidden) => !hidden)}
-          fullscreenTarget={rootRef}
-          onClose={() => setPaletteOpen(false)}
-        />
-      )}
     </div>
   );
 }

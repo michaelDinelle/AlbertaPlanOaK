@@ -37,9 +37,18 @@ export interface EventStream {
   kinds: Uint16Array;
   cellX: Int32Array;
   cellY: Int32Array;
-  types: readonly SimEvent['type'][];
+  types: SimEvent['type'][];
   count: number;
 }
+
+export const emptyStream = (): EventStream => ({
+  steps: new Int32Array(1024),
+  kinds: new Uint16Array(1024),
+  cellX: new Int32Array(1024),
+  cellY: new Int32Array(1024),
+  types: [],
+  count: 0,
+});
 
 export const EMPTY_EVENT_STREAM: EventStream = {
   steps: new Int32Array(0),
@@ -98,11 +107,4 @@ export interface EnvDecoder<St = unknown> {
   geometry(st: St, seed: number): EnvGeometry;
   initFrame(seed: number, st: St): EnvFrame;
   deriveEvents(prev: EnvFrame, next: EnvFrame, st: St): SimEvent[];
-}
-
-export interface RawRecording {
-  envId: EnvId;
-  seed: number;
-  data: Float32Array;
-  steps: number;
 }

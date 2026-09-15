@@ -39,30 +39,19 @@
   --text-xs--line-height: 19px;
   --text-sm: 15px;
   --text-sm--line-height: 21px;
-
-  --animate-fade-in: fade-in 120ms ease-out;
-  --animate-panel-enter: panel-enter 320ms cubic-bezier(0.2, 0.9, 0.3, 1.1);
-
-  @keyframes fade-in {
-    from { opacity: 0; }
-  }
-  @keyframes panel-enter {
-    from { transform: translateY(14px) scale(0.98); }
-  }
 }
 
 @utility glass {
-  background: var(--glass-tint);
-  border: 1px solid var(--glass-line);
-  backdrop-filter: var(--glass-frost-filter);
-  -webkit-backdrop-filter: var(--glass-frost-filter);
+  background: linear-gradient(180deg, oklch(13% 0 0 / 0.64), oklch(13% 0 0 / 0.78));
+  border: 1px solid oklch(100% 0 0 / 0.13);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
   box-shadow:
-    0 24px 60px var(--glass-shadow),
-    inset 0 1px 1px var(--glass-highlight),
-    inset 0 -8px 20px var(--glass-glow);
+    0 24px 60px oklch(0% 0 0 / 0.45),
+    inset 0 1px 1px oklch(100% 0 0 / 0.5),
+    inset 0 -8px 20px oklch(100% 0 0 / 0.06);
   text-shadow: 0 1px 2px oklch(0% 0 0 / 0.55);
 }
-
 
 @layer components {
   .theater-canvas {
@@ -75,23 +64,9 @@
     -webkit-user-select: none;
     user-select: none;
   }
-
 }
 
 @layer base {
-  :root {
-    --dock-width: 400px;
-    --gutter: 1rem;
-    --glass-tint-floor: oklch(13% 0 0 / 0.64);
-    --glass-tint-ceil: oklch(13% 0 0 / 0.78);
-    --glass-tint: linear-gradient(180deg, var(--glass-tint-floor), var(--glass-tint-ceil));
-    --glass-line: oklch(100% 0 0 / 0.13);
-    --glass-highlight: oklch(100% 0 0 / 0.5);
-    --glass-glow: oklch(100% 0 0 / 0.06);
-    --glass-shadow: oklch(0% 0 0 / 0.45);
-    --glass-frost-filter: blur(16px);
-  }
-
   body {
     background: var(--color-ground);
     color: var(--color-ink);
@@ -103,6 +78,10 @@
     caret-color: var(--color-accent);
     scrollbar-width: thin;
     scrollbar-color: var(--color-line) transparent;
+  }
+
+  select.glass option {
+    background: var(--color-ground);
   }
 
   ::selection {
@@ -117,5 +96,5 @@
 }
 
 .lg-fallback {
-  background: var(--glass-tint-ceil);
+  background: oklch(13% 0 0 / 0.78);
 }

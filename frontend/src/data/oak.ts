@@ -1,86 +1,87 @@
-import type { RunDetail, RunIndexEntry } from './types';
-
-export const FRAME_FLOATS = 11;
+export const FRAME_FLOATS = 10;
 export const OFF_DONE = 0;
 export const OFF_POSE = 1;
 export const POSE_LEN = 9;
 
-export class ApiError extends Error {
-  readonly status: number;
-  readonly url: string;
-  readonly body: string;
+export type Policy = 'oak' | 'ppo' | 'random';
 
-  constructor(status: number, url: string, body: string) {
-    super(`${status || 'network'} ${url}${body ? ` — ${body.slice(0, 200)}` : ''}`);
-    this.name = 'ApiError';
-    this.status = status;
-    this.url = url;
-    this.body = body;
-  }
+export interface RunIndexEntry {
+  id: string;
+  envIds: string[];
+  steps: number;
+  startedAt: string;
+  inFlight: boolean;
+  policy: Policy;
+  preset: string;
+  role: 'best' | null;
 }
 
-export function apiUrl(path: string): string {
-  return `/api${path.startsWith('/') ? path : `/${path}`}`;
+export interface RunMeta {
+  seeds: number[];
+  steps: number;
+  batch: number;
+  policy: Policy;
+  preset: string;
+  startedAt: string;
+  envSchedule: { envId: string; seedStart: number; seedEnd: number }[];
+  envCatalog: unknown;
 }
 
-async function request(url: string, signal?: AbortSignal): Promise<Response> {
-  let response: Response;
-  try {
-    response = await fetch(url, signal ? { signal } : {});
-  } catch (cause) {
-    if (cause instanceof DOMException && cause.name === 'AbortError') throw cause;
-    throw new ApiError(0, url, cause instanceof Error ? cause.message : String(cause));
-  }
-  if (!response.ok && response.status !== 204) {
-    throw new ApiError(response.status, url, await response.text().catch(() => ''));
-  }
+export interface RunDetail {
+  id: string;
+  meta: RunMeta;
+  baselines: Partial<Record<'ppo' | 'random', string>>;
+}
+
+export interface Tape {
+  rows: number;
+  laneCount: number;
+  stepEnd: Float64Array;
+  rewardSum: Float32Array;
+  rho: Float32Array;
+  deathStep: Float32Array;
+  deathDetector: Float32Array;
+}
+
+async function api(path: string): Promise<Response> {
+  const response = await fetch(`/api${path}`);
+  if (!response.ok) throw new Error(`${response.status} ${path}: ${await response.text()}`);
   return response;
 }
 
-async function getJson<T>(url: string, signal?: AbortSignal): Promise<T> {
-  const response = await request(url, signal);
-  try {
-    return (await response.json()) as T;
-  } catch (cause) {
-    throw new ApiError(response.status, url, `invalid JSON: ${String(cause)}`);
-  }
+export async function fetchRuns(): Promise<RunIndexEntry[]> {
+  return (await api('/runs')).json() as Promise<RunIndexEntry[]>;
 }
 
-async function getFloats(url: string, signal?: AbortSignal): Promise<Float32Array> {
-  const response = await request(url, signal);
-  if (response.status === 204) return new Float32Array(0);
-  return new Float32Array(await response.arrayBuffer());
+export async function fetchDetail(id: string): Promise<RunDetail> {
+  return (await api(`/runs/${encodeURIComponent(id)}`)).json() as Promise<RunDetail>;
 }
 
-export function fetchRuns(signal?: AbortSignal): Promise<RunIndexEntry[]> {
-  return getJson<RunIndexEntry[]>(apiUrl('/runs'), signal);
+async function series(id: string, column: string): Promise<{ rows: number; lanes: number; ends: Float64Array; values: Float32Array }> {
+  const bytes = await (await api(`/runs/${encodeURIComponent(id)}/series/${column}`)).arrayBuffer();
+  const [rows, lanes] = new Uint32Array(bytes, 0, 2) as unknown as [number, number];
+  return {
+    rows,
+    lanes,
+    ends: Float64Array.from(new Uint32Array(bytes, 8, rows)),
+    values: new Float32Array(bytes, 8 + 8 * rows, rows * lanes),
+  };
 }
 
-export function fetchRunDetail(id: string, signal?: AbortSignal): Promise<RunDetail> {
-  return getJson<RunDetail>(apiUrl(`/runs/${encodeURIComponent(id)}`), signal);
-}
-
-export interface Series {
-  windows: number;
-  lanes: number;
-  ends: Float64Array;
-  wall: Float32Array;
-  values: Float32Array;
-}
-
-export async function fetchSeries(id: string, column: string, signal?: AbortSignal): Promise<Series> {
-  const response = await request(apiUrl(`/runs/${encodeURIComponent(id)}/series/${encodeURIComponent(column)}`), signal);
-  const bytes = await response.arrayBuffer();
-  const view = new DataView(bytes);
-  const windows = view.getUint32(0, true);
-  const lanes = view.getUint32(4, true);
-  const ends = new Float64Array(windows);
-  for (let w = 0; w < windows; w++) ends[w] = view.getUint32(8 + 4 * w, true);
-  const wall = new Float32Array(bytes.slice(8 + 4 * windows, 8 + 8 * windows));
-  const values = new Float32Array(bytes.slice(8 + 8 * windows));
-  return { windows, lanes, ends, wall, values };
-}
-
-export function fetchFrames(id: string, lane: number, from: number, n: number, signal?: AbortSignal): Promise<Float32Array> {
-  return getFloats(apiUrl(`/runs/${encodeURIComponent(id)}/frames/${lane}?from=${from}&n=${n}`), signal);
+export async function loadTape(id: string): Promise<Tape> {
+  const [rewardSum, rho, deathStep, deathDetector] = await Promise.all([
+    series(id, 'rewardSum'),
+    series(id, 'rho'),
+    series(id, 'deathStep'),
+    series(id, 'deathDetector'),
+  ]);
+  return {
+    rows: rewardSum.rows,
+    laneCount: rewardSum.lanes,
+    stepEnd: rewardSum.ends,
+    rewardSum: rewardSum.values,
+    rho: rho.values,
+    deathStep: deathStep.values,
+    deathDetector: deathDetector.values,
+  };
 }

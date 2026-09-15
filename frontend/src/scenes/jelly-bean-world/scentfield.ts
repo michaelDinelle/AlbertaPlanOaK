@@ -7,7 +7,7 @@ export class ScentField {
   readonly kernel = bundleKernel(buildScentKernel());
   readonly texture = new THREE.DataTexture(new Uint16Array(FIELD_TEXELS * FIELD_TEXELS * 4), FIELD_TEXELS, FIELD_TEXELS, THREE.RGBAFormat, THREE.HalfFloatType);
   private readonly scratch = new THREE.DataTexture(new Uint16Array(TILE_VALUES), TILE_CELLS, TILE_CELLS, THREE.RGBAFormat, THREE.HalfFloatType);
-  private readonly worker = new Worker(new URL('./scentfield.worker.ts', import.meta.url), { type: 'module' });
+  private readonly worker = new Worker('/scentfield.worker.js', { type: 'module' });
   private readonly cached = new Map<number, string>();
   private readonly pending = new Map<number, FieldJob>();
   private readonly posting = new Map<number, number[]>();

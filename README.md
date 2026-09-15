@@ -38,7 +38,7 @@ Reward per step over the full 1,000,000-step best recording (`04320edcc1d7309177
 
 ## Setup and run
 
-Requires macOS 26+, Xcode with Metal tools, and Bun. Benchmark recordings stay local and are ignored by Git. From the repo root: `./setup.sh --preset base` builds the engine and the page, `./fleet.py` records a candidate and gates it against the best, and `cd frontend && bun run serve` serves the recordings; open http://127.0.0.1:5174. For page development, `cd frontend && bun run dev` and open http://localhost:5173.
+Requires macOS 26+, Xcode with Metal tools, and Bun. Benchmark recordings stay local and are ignored by Git. From the repo root: `./setup.sh --preset base` builds the engine and the page, `./fleet.py` records a candidate and gates it against the best, and `cd frontend && bun run dev` serves the recordings and prints the URL to open.
 
 Geometry is agent capacity, declared in `Sources/Geometry.metal`; larger presets use more compute and memory. Wide streams increase percept and feature counts above these declared sizes. Total parameters = features × [1 + options × (7 + action dimensions)]; counts below use 6 action dimensions.
 

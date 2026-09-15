@@ -3,7 +3,7 @@ import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { SVGLoader } from 'three/addons/loaders/SVGLoader.js';
 import type { WorldBuilder } from './world';
 import { TOKENS } from './tokens';
-import butterflySVG from '../../../butterfly_thick.svg?raw';
+import butterflySVG from '../../../butterfly_thick.svg' with { type: 'text' };
 
 const emblem = new SVGLoader().parse(butterflySVG).paths[0]!;
 const butterfly = emblem.toShapes();

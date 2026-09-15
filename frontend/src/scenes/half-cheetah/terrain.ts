@@ -118,23 +118,32 @@ diffuseColor.rgb *= mix(mix(grass, stone, vExposure), vec3(0.24, 0.17, 0.10), tr
   });
   const bounds = new THREE.Box3(), matrix = new THREE.Matrix4();
   const previous = new THREE.Matrix4();
+  let pending: { x: number; z: number; batch: (typeof batches)[number]; id: number; key: string }[] = [];
   return {
     material,
     setView(coverage: ViewCoverage, camera: THREE.Camera) {
       matrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
-      if (matrix.equals(previous)) return;
-      previous.copy(matrix);
-      const cx = Math.round(camera.position.x / 128), cz = Math.round(camera.position.z / 128);
-      for (const batch of batches) for (const slot of batch.slots.values()) batch.mesh.setVisibleAt(slot.instance, false);
-      for (let z = cz - 16; z <= cz + 16; z++) for (let x = cx - 16; x <= cx + 16; x++) {
-        bounds.min.set(x * 128 - 64, -32, z * 128 - 64);
-        bounds.max.set(x * 128 + 64, 110, z * 128 + 64);
-        if (!coverage.frustum.intersectsBox(bounds)) continue;
-        const batch = batches[Math.max(Math.abs(x - cx), Math.abs(z - cz)) <= 4 ? 0 : 1]!;
-        const id = THREE.MathUtils.euclideanModulo(x, batch.side) + THREE.MathUtils.euclideanModulo(z, batch.side) * batch.side;
-        const key = `${x},${z}`;
+      if (!matrix.equals(previous)) {
+        previous.copy(matrix);
+        const cx = Math.round(camera.position.x / 128), cz = Math.round(camera.position.z / 128);
+        for (const batch of batches) for (const slot of batch.slots.values()) batch.mesh.setVisibleAt(slot.instance, false);
+        pending = [];
+        for (let z = cz - 16; z <= cz + 16; z++) for (let x = cx - 16; x <= cx + 16; x++) {
+          bounds.min.set(x * 128 - 64, -32, z * 128 - 64);
+          bounds.max.set(x * 128 + 64, 110, z * 128 + 64);
+          if (!coverage.frustum.intersectsBox(bounds)) continue;
+          const batch = batches[Math.max(Math.abs(x - cx), Math.abs(z - cz)) <= 4 ? 0 : 1]!;
+          const id = THREE.MathUtils.euclideanModulo(x, batch.side) + THREE.MathUtils.euclideanModulo(z, batch.side) * batch.side;
+          pending.push({ x, z, batch, id, key: `${x},${z}` });
+        }
+        pending.sort((a, b) => (b.x - cx) ** 2 + (b.z - cz) ** 2 - (a.x - cx) ** 2 - (a.z - cz) ** 2);
+      }
+      const start = performance.now();
+      for (let i = pending.length - 1; i >= 0; i--) {
+        const { x, z, batch, id, key } = pending[i]!;
         let slot = batch.slots.get(id);
         if (slot?.key !== key) {
+          if (performance.now() - start > 3) break;
           const geometry = tileGeometry(x, z, batch.segments).translate(x * 128, 0, z * 128);
           if (slot) {
             batch.mesh.setGeometryAt(slot.geometry, geometry);
@@ -147,6 +156,7 @@ diffuseColor.rgb *= mix(mix(grass, stone, vExposure), vec3(0.24, 0.17, 0.10), tr
           geometry.dispose();
         }
         batch.mesh.setVisibleAt(slot!.instance, true);
+        pending.pop();
       }
     },
   };

@@ -1,148 +1,141 @@
-import { useMemo, useRef } from 'react';
-import { clsx } from 'clsx';
+import { memo, useCallback, useDeferredValue, useMemo, type RefObject } from 'react';
 import { Area, Line } from 'recharts';
-import type { Policy, RunDetail } from '../data/types';
-import { formatStep } from '../lib/format';
-import { envLanes } from '../lib/run';
-import { heroSeed } from '../lib/selection';
-import { useSelection } from '../state/selectionStore';
-import { STR } from '../strings';
-import { retentionWindow, type BinnedRates } from '../tape/derive';
-import { useTapeSnapshot, type DeriveSpec } from '../tape/store';
-import {
-  AXIS_WIDTH,
-  CHART_MARGIN,
-  Chip,
-  Label,
-  BEST_TOKEN,
-  POLICY_ORDER,
-  POLICY_TOKENS,
-  Playhead,
-  TXT,
-  TimeChart,
-  bandProps,
-  bandRows,
-  lineProps,
-  seriesRows,
-} from './charts';
-import { SeedList } from './SeedList';
-import { useStepScrub } from './useStepScrub';
+import type { EnvId } from '../data/envs';
+import type { RunDetail, Tape } from '../data/oak';
+import { cached, deathStep, deliveredRate, envLanes, rateWindow, windowedRates } from '../derive';
+import { formatCount, formatSigned, formatStep } from '../format';
+import { selectSeed, store } from '../store';
+import type { Stage } from '../theater/stage';
+import { Key, POLICY_NAMES, POLICY_TOKENS, Playhead, TimeChart, bandProps, bandRows, lineProps, scrubHandlers, seriesRows } from './charts';
 
-const SPARSE_SAMPLES = 4;
+const SPARK_H = 16;
+const SPARK_PAD = 3;
 
-type SeriesKey = Policy | 'best';
-
-function sparseOrigin(points: readonly { x: number }[], horizon: number): number {
-  if (points.length === 0 || points.length >= SPARSE_SAMPLES) return 0;
-  const first = points[0]?.x ?? 0;
-  return first >= horizon ? 0 : first;
+function sparkPath(values: readonly (number | null)[], xs: readonly number[]): { line: string; fill: string; zeroY: number | null } | null {
+  let min = 0;
+  let max = 0;
+  let any = false;
+  for (const v of values) {
+    if (v === null) continue;
+    any = true;
+    if (v < min) min = v;
+    if (v > max) max = v;
+  }
+  if (!any) return null;
+  if (min === max) {
+    min -= Math.abs(min) * 0.1 + 1e-6;
+    max += Math.abs(max) * 0.1 + 1e-6;
+  }
+  const xMax = Math.max(1, xs[xs.length - 1] ?? 0);
+  const yAt = (v: number): number => SPARK_H - SPARK_PAD - ((v - min) / (max - min)) * (SPARK_H - SPARK_PAD * 2);
+  const y0 = yAt(0);
+  const points: string[] = [`0,${y0.toFixed(2)}`];
+  let lastY = y0;
+  values.forEach((v, i) => {
+    if (v === null) return;
+    lastY = yAt(v);
+    points.push(`${(Math.min(1, (xs[i] ?? 0) / xMax) * 100).toFixed(3)},${lastY.toFixed(2)}`);
+  });
+  points.push(`100,${lastY.toFixed(2)}`);
+  const zero = min < 0 && max > 0;
+  const baseY = zero ? y0 : SPARK_H - SPARK_PAD;
+  return { line: points.join(' '), fill: `${points.join(' ')} 100,${baseY.toFixed(2)} 0,${baseY.toFixed(2)}`, zeroY: zero ? y0 : null };
 }
 
-export function RewardView({
-  runs,
-  best,
-  active,
-}: {
-  runs: Record<Policy, RunDetail | null>;
-  best: RunDetail | null;
-  active: RunDetail | null;
-}) {
-  const sel = useSelection();
-  const envId = sel.envId;
-  const lanes = useMemo(
-    () => (active === null || envId === null ? null : envLanes(active.meta, envId)),
-    [active, envId],
+const Spark = memo(function Spark({ path, stroke, xMax, seed, seek }: { path: ReturnType<typeof sparkPath>; stroke: string; xMax: number; seed: number; seek: (step: number) => void }) {
+  return (
+    <span className="block min-w-0 flex-1 cursor-ew-resize touch-none select-none" title="Drag to seek" {...scrubHandlers(seek, xMax, undefined, () => selectSeed(seed))} onClick={(event) => event.stopPropagation()}>
+      <svg viewBox={`0 0 100 ${SPARK_H}`} preserveAspectRatio="none" className="block w-full" style={{ height: SPARK_H }} aria-hidden="true">
+        {path !== null && (
+          <>
+            {path.zeroY !== null && <line x1="0" x2="100" y1={path.zeroY} y2={path.zeroY} stroke="var(--color-ink)" strokeOpacity={0.22} strokeDasharray="2 3" vectorEffect="non-scaling-stroke" />}
+            <polygon points={path.fill} fill={stroke} fillOpacity={0.13} />
+            <polyline points={path.line} fill="none" stroke={stroke} strokeWidth={1.25} strokeLinejoin="round" strokeLinecap="round" vectorEffect="non-scaling-stroke" />
+          </>
+        )}
+      </svg>
+    </span>
   );
-  const horizon = active?.meta.steps ?? runs.oak?.meta.steps ?? 0;
-  const spec = useMemo<(DeriveSpec & { mode: 'windowedRates' }) | null>(
-    () => (lanes === null || active === null ? null : { mode: 'windowedRates', lanes: lanes.lanes, win: retentionWindow(active.meta.steps) }),
-    [lanes, active],
-  );
-  const rates = useTapeSnapshot(active?.id ?? null, envId, 'windowedRates', spec);
+});
 
-  const compareSpec = (run: RunDetail | null): (DeriveSpec & { mode: 'windowedRates' }) | null =>
-    run === null || envId === null ? null : { mode: 'windowedRates', lanes: envLanes(run.meta, envId).lanes, win: retentionWindow(run.meta.steps) };
-  const oakCompare = useMemo(() => compareSpec(runs.oak), [runs.oak, envId]);
-  const ppoCompare = useMemo(() => compareSpec(runs.ppo), [runs.ppo, envId]);
-  const randomCompare = useMemo(() => compareSpec(runs.random), [runs.random, envId]);
-  const bestCompare = useMemo(() => compareSpec(best), [best, envId]);
-  const compared: Record<SeriesKey, BinnedRates | null> = {
-    oak: useTapeSnapshot(oakCompare === null ? null : runs.oak?.id ?? null, envId, 'windowedRates', oakCompare),
-    ppo: useTapeSnapshot(ppoCompare === null ? null : runs.ppo?.id ?? null, envId, 'windowedRates', ppoCompare),
-    random: useTapeSnapshot(randomCompare === null ? null : runs.random?.id ?? null, envId, 'windowedRates', randomCompare),
-    best: useTapeSnapshot(bestCompare === null ? null : best?.id ?? null, envId, 'windowedRates', bestCompare),
-  };
+export interface Comparison {
+  key: string;
+  label: string;
+  tone: string;
+  runId: string;
+}
 
-  const hero = heroSeed(sel.selection);
-  const heroIdx = hero === null || lanes === null ? -1 : lanes.seeds.indexOf(hero);
-  const tone = POLICY_TOKENS[sel.policy];
+const seriesFor = (tape: Tape, detail: RunDetail, envId: EnvId) =>
+  cached(tape, `reward/${envId}`, () => {
+    const lanes = envLanes(detail.meta, envId);
+    const rates = windowedRates(tape, lanes.lanes, rateWindow(detail.meta.steps));
+    const rows = lanes.seeds
+      .map((s, i) => ({ seed: s, rate: deliveredRate(tape, lanes.lanes[i]!), death: deathStep(tape, lanes.lanes[i]!), spark: sparkPath(rates.perLane[i] ?? [], rates.x) }))
+      .sort((a, b) => (b.rate ?? -Infinity) - (a.rate ?? -Infinity) || a.seed - b.seed);
+    return { lanes, rates, band: bandRows(rates.x, rates.p10, rates.p90), average: seriesRows(rates.x, rates.iqm), rows };
+  });
 
-  const avgPts = useMemo(() => (rates === null ? [] : seriesRows(rates.x, rates.iqm)), [rates]);
-  const band = useMemo(() => (rates === null ? [] : bandRows(rates.x, rates.p10, rates.p90)), [rates]);
-  const heroPts = useMemo(
-    () => (rates === null || heroIdx < 0 ? [] : seriesRows(rates.x, rates.perLane[heroIdx] ?? [])),
-    [rates, heroIdx],
-  );
-  const primaryLabel = STR.reward.average(STR.policy[sel.policy]);
-  const summaryLines = useMemo(
-    () => [
-      ...POLICY_ORDER.filter((policy) => policy !== sel.policy && runs[policy] !== null).map((policy) => ({ key: policy as SeriesKey, label: STR.policy[policy], token: POLICY_TOKENS[policy] })),
-      ...(best === null ? [] : [{ key: 'best' as SeriesKey, label: STR.best, token: BEST_TOKEN }]),
-    ].map((item) => {
-      const rates = compared[item.key];
-      return { ...item, pts: rates === null ? null : seriesRows(rates.x, rates.iqm) };
-    }),
-    [runs, best, sel.policy, compared.oak, compared.ppo, compared.random, compared.best],
-  );
+export function RewardView(props: { stage: RefObject<Stage | null>; runId: string; envId: EnvId; seed: number; compare: Comparison[] }) {
+  return <RewardPanel stage={props.stage} runId={useDeferredValue(props.runId)} envId={useDeferredValue(props.envId)} seed={useDeferredValue(props.seed)} compare={useDeferredValue(props.compare)} />;
+}
 
-  const xMax = Math.max(1, horizon);
-  const xMin = sparseOrigin(avgPts, horizon);
-  const chartRef = useRef<HTMLDivElement | null>(null);
-  const scrub = useStepScrub<HTMLDivElement>(
-    () => ({ min: xMin, max: xMax }),
-    { left: CHART_MARGIN.left + AXIS_WIDTH, right: CHART_MARGIN.right },
+const RewardPanel = memo(function RewardPanel({ stage, runId, envId, seed, compare }: { stage: RefObject<Stage | null>; runId: string; envId: EnvId; seed: number; compare: Comparison[] }) {
+  const picked = store.use((s) => s.seed);
+  const details = store.use((s) => s.details);
+  const tapes = store.use((s) => s.tapes);
+  const active = details[runId]!;
+  const tape = tapes[runId]!;
+  const policy = active.meta.policy;
+  const tone = POLICY_TOKENS[policy];
+  const horizon = Math.max(1, active.meta.steps);
+  const win = rateWindow(active.meta.steps);
+  const { lanes, rates, band, average, rows } = seriesFor(tape, active, envId);
+  const hero = useMemo(() => seriesRows(rates.x, rates.perLane[lanes.seeds.indexOf(seed)] ?? []), [rates, lanes, seed]);
+  const primary = `${POLICY_NAMES[policy]} average`;
+  const lines = useMemo(
+    () => [{ key: policy, label: primary, tone, width: 1.6, points: average }, ...compare.map((c) => ({ key: c.key, label: `${c.label} average`, tone: c.tone, width: 1.2, points: seriesFor(tapes[c.runId]!, details[c.runId]!, envId).average }))],
+    [policy, primary, tone, average, compare, tapes, details, envId],
   );
+  const seek = useCallback((step: number): void => stage.current?.seekStep(step), [stage]);
+  const last = rates.x[rates.x.length - 1] ?? 0;
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-2">
-      <div className="px-2">
-        <Label hint={STR.reward.titleHint(formatStep(retentionWindow(horizon)))}>{STR.reward.title}</Label>
-      </div>
+      <div className="px-2 text-2xs uppercase tracking-label" title={`trailing ${formatStep(win)}-step mean · IQM of seeds · band 10–90th percentile`}>Reward per step</div>
       <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 px-2">
-        <Chip swatch={tone} label={primaryLabel} />
-        <Chip swatch="var(--color-seed)" label={STR.reward.hero} />
-        <Chip swatch={tone} label={STR.reward.range} block />
-        {summaryLines.map(({ key, label, token, pts }) => pts !== null && <Chip key={key} swatch={token} label={STR.reward.average(label)} />)}
+        <Key tone={tone} label={primary} />
+        <Key tone="var(--color-seed)" label="selected seed" />
+        <Key tone={tone} label="10–90% of seeds" block />
+        {lines.slice(1).map((l) => <Key key={l.key} tone={l.tone} label={l.label} />)}
       </div>
-      <div
-        ref={chartRef}
-        className="relative cursor-ew-resize touch-none select-none rounded-md transition-colors hover:bg-white/5"
-        {...scrub}
-      >
-        <TimeChart
-          label={STR.reward.title}
-          height={188}
-          xMin={xMin}
-          xMax={xMax}
-          xLabel={STR.axis.steps}
-          yLabel={STR.axis.rewardRate}
-          overlay={<Playhead total={xMax} from={xMin} />}
-        >
-          <Area {...bandProps(tone)} data={band} />
-          <Line {...lineProps(tone, 1.6)} name={primaryLabel} data={avgPts} />
-          <Line {...lineProps('var(--color-seed)', 1.2)} name={STR.reward.hero} data={heroPts} />
-          {summaryLines.map(
-            ({ key, label, token, pts }) =>
-              pts !== null && <Line key={key} {...lineProps(token, 1.2)} name={STR.reward.average(label)} data={pts} />,
-          )}
-        </TimeChart>
-        {rates === null && (
-          <div className={clsx('absolute inset-0 flex items-center justify-center', TXT.bodyDim)}>
-            {active === null ? STR.reward.waiting : STR.reward.reading}
-          </div>
-        )}
+      <TimeChart label="Reward per step" height={188} xMax={horizon} yLabel="reward / step" overlay={<Playhead total={horizon} />} seek={seek}>
+        <Area key={runId} {...bandProps(tone)} data={band} />
+        {lines.map((l) => <Line key={l.key} {...lineProps(l.tone, l.width)} name={l.label} data={l.points} />)}
+        <Line key={`${runId}/${seed}`} {...lineProps('var(--color-seed)', 1.2)} name="selected seed" data={hero} />
+      </TimeChart>
+      <div className="flex items-center gap-2 px-2">
+        <span className="text-2xs uppercase tracking-label" title="lifetime reward per step · click to stage">Seeds</span>
+        <span className="font-mono text-xs text-ink-dim">{formatCount(rows.length)}</span>
       </div>
-      <SeedList active={active} />
+      <div className="min-h-0 flex-1 overflow-y-auto pr-1">
+        {rows.map((row, rank) => (
+          <button
+            key={rank}
+            type="button"
+            title={picked === row.seed ? `Release seed ${row.seed}` : `Put seed ${row.seed} on the stage`}
+            onClick={() => selectSeed(picked === row.seed ? null : row.seed)}
+            className={`flex h-7 w-full items-center gap-2 rounded-md px-2 text-left ${row.seed === seed ? 'bg-seed/10 ring-1 ring-inset ring-seed/40' : 'hover:bg-white/5'}`}
+          >
+            <span className="w-6 text-right font-mono text-xs text-ink-dim">{rank + 1}</span>
+            <span className={`w-10 font-mono text-xs ${row.seed === seed ? 'text-seed' : ''}`}>{row.seed}</span>
+            <span className={`w-16 text-right font-mono text-xs tabular-nums ${row.rate === null ? 'text-ink-faint' : row.rate > 0 ? 'text-good' : 'text-bad'}`}>{formatSigned(row.rate)}</span>
+            <Spark path={row.spark} stroke={row.death !== null ? 'var(--color-crit)' : row.seed === seed ? 'var(--color-seed)' : tone} xMax={last} seed={row.seed} seek={seek} />
+            {row.death !== null && (
+              <span className="rounded-sm border border-crit/40 bg-crit/10 px-1 font-mono text-2xs leading-4 text-crit" title={`diverged at step ${formatCount(row.death)}`}>diverged</span>
+            )}
+          </button>
+        ))}
+      </div>
     </div>
   );
-}
+});

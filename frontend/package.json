@@ -1,40 +1,25 @@
 {
   "name": "oak-frontend",
   "private": true,
-  "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "vite --host",
-    "build": "vite build",
-    "serve": "bun server.ts",
-    "test": "bun test",
+    "dev": "bun server.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
-    "@tanstack/react-query": "5",
-    "clsx": "^2.1.1",
-    "cmdk": "^1.1.1",
-    "lucide-react": "^1.31.0",
     "meshoptimizer": "^1.1.1",
     "react": "19",
     "react-dom": "19",
     "recharts": "^3.10.1",
-    "sonner": "^2.0.8",
-    "three": "^0.185.1",
-    "virtua": "^0.50.1"
+    "three": "^0.185.1"
   },
   "devDependencies": {
-    "@babel/core": "7",
-    "@rolldown/plugin-babel": "^0.2.3",
-    "@tailwindcss/vite": "4",
     "@types/bun": "^1.3.14",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.4",
     "@types/three": "^0.185.3",
-    "@vitejs/plugin-react": "^6.0.5",
-    "babel-plugin-react-compiler": "^1.0.0",
+    "bun-plugin-tailwind": "^0.1.2",
     "tailwindcss": "4",
-    "typescript": "^7.0.2",
-    "vite": "^8.2.0"
+    "typescript": "^7.0.2"
   }
 }

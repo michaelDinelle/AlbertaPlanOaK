@@ -1,6 +1,8 @@
 export interface RecordFieldSpec {
   slot: number;
   wrap: boolean;
+  scale: number;
+  anchor: boolean;
 }
 
 export interface EnvEntry {
@@ -43,6 +45,8 @@ function readField(v: unknown, what: string): RecordFieldSpec {
   return {
     slot: requireNumber(o?.['slot'], `${what}.slot`),
     wrap: o['wrap'] === true,
+    scale: requireNumber(o['scale'], `${what}.scale`),
+    anchor: o['anchor'] === true,
   };
 }
 
