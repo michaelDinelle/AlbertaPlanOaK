@@ -11,7 +11,6 @@ import { Label, TXT } from '../panels/charts';
 import { selectEnv, useSelection } from '../state/selectionStore';
 import { STR } from '../strings';
 import { useTapeSnapshot, type DeriveSpec } from '../tape/store';
-import { seedsFor } from '../theater/loader';
 import { envGradient, posterUrl } from './EnvTileButton';
 
 const COLUMNS = 4;
@@ -69,7 +68,6 @@ export function EnvWall({
   const sel = useSelection();
   const [query, setQuery] = useState('');
   const [sort, setSort] = useState<WallSort>('name');
-  const recordings = detail?.recordings ?? [];
   const spec = useMemo<(DeriveSpec & { mode: 'delivered' }) | null>(
     () => (detail === null ? null : { mode: 'delivered', lanes: detail.meta.seeds.map((_, lane) => lane) }),
     [detail],
@@ -79,7 +77,7 @@ export function EnvWall({
   const rows = useMemo(() => {
     const q = query.trim().toLowerCase();
     const shown = envList.filter((id) => q === '' || nameOf(id).toLowerCase().includes(q));
-    const seedCount = (id: EnvId): number => seedsFor(recordings, id).length;
+    const seedCount = (id: EnvId): number => (detail === null ? 0 : envLanes(detail.meta, id).seeds.length);
     const reward = (id: EnvId): number => {
       if (detail === null || delivered === null) return -Infinity;
       const lanes = envLanes(detail.meta, id).lanes;
@@ -95,7 +93,7 @@ export function EnvWall({
     const out: EnvId[][] = [];
     for (let i = 0; i < sorted.length; i += COLUMNS) out.push(sorted.slice(i, i + COLUMNS));
     return out;
-  }, [envList, query, sort, detail, recordings, delivered]);
+  }, [envList, query, sort, detail, delivered]);
 
   const pick = (envId: EnvId): void => {
     selectEnv(envId);
@@ -147,7 +145,7 @@ export function EnvWall({
                     <Tile
                       key={envId}
                       envId={envId}
-                      seedCount={seedsFor(recordings, envId).length}
+                      seedCount={detail === null ? 0 : envLanes(detail.meta, envId).seeds.length}
                       current={envId === sel.envId}
                       onPick={pick}
                     />

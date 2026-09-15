@@ -1,9 +1,7 @@
 import type { EnvEntry } from '@sim/catalog';
 import type { EnvId } from '../data/envs';
-import type { RecordingRef } from '../data/types';
 import type { LiveEdge, PlaybackSource } from './playbackSource';
 import { FRAME_FLOATS, fetchFrames } from '../data/oak';
-import { RUN_POLL_MS } from '../data/queries';
 import { lensRecording, type RecordingLens } from '@sim/decode';
 import { decoders } from '@sim/registry';
 import { EMPTY_EVENT_STREAM, NO_EVENTS, type EnvDecoder } from '@sim/types';
@@ -12,21 +10,6 @@ export interface TheaterTarget {
   runId: string;
   envId: EnvId;
   seed: number;
-}
-
-export function seedsFor(recordings: readonly RecordingRef[], envId: EnvId): number[] {
-  const set = new Set<number>();
-  for (const rec of recordings) if (rec.envId === envId) set.add(rec.seed);
-  return [...set].sort((a, b) => a - b);
-}
-
-export function recordingRef(
-  recordings: readonly RecordingRef[],
-  envId: EnvId,
-  seed: number,
-): RecordingRef | null {
-  for (const rec of recordings) if (rec.envId === envId && rec.seed === seed) return rec;
-  return null;
 }
 
 export const TICK_KINDS = [
@@ -116,7 +99,7 @@ export interface HeroOptions extends TheaterTarget {
   lane: number;
   horizonSteps: number;
   live: boolean;
-  startedAt: number | null;
+  startedAt: number;
   onUpdate?(): void;
   onError?(error: Error): void;
 }
@@ -128,6 +111,7 @@ export interface HeroHandle {
   readonly totalSteps: number;
   readonly bytes: number;
   ticks(): TimelineTick[];
+  pull(): void;
   setLive(live: boolean): void;
   setCallbacks(onUpdate: (() => void) | null, onError: ((error: Error) => void) | null): void;
   destroy(): void;
@@ -178,7 +162,6 @@ export function loadHero(options: HeroOptions): HeroHandle {
   let onUpdate = options.onUpdate ?? null;
   let onError = options.onError ?? null;
   const abort = new AbortController();
-  let unfollow: (() => void) | null = null;
   let pulling = false;
 
   const wrapMask = options.entry.fields.reduce(
@@ -262,22 +245,13 @@ export function loadHero(options: HeroOptions): HeroHandle {
     onError?.(error instanceof Error ? error : new Error(String(error)));
   };
 
-  const startFollow = (): void => {
-    if (unfollow !== null || destroyed) return;
-    const timer = setInterval(() => pull().catch(report), RUN_POLL_MS);
-    unfollow = () => clearInterval(timer);
-  };
-
   const run = async (): Promise<void> => {
     await pull();
     fullyFetched = true;
     edgeAt = performance.now();
     edgeSteps = decodedSteps;
-    if (options.startedAt !== null && decodedSteps > 0) {
-      edge.framesPerSecond = decodedSteps / Math.max(1, (Date.now() - options.startedAt) / 1000);
-    }
+    if (decodedSteps > 0) edge.framesPerSecond = decodedSteps / Math.max(1, (Date.now() - options.startedAt) / 1000);
     onUpdate?.();
-    if (live) startFollow();
   };
 
   void run().catch(report);
@@ -299,13 +273,11 @@ export function loadHero(options: HeroOptions): HeroHandle {
     ticks() {
       return lens !== null ? ticksFromLens(lens) : [];
     },
+    pull() {
+      if (fullyFetched) pull().catch(report);
+    },
     setLive(next) {
       live = next;
-      if (live && fullyFetched) startFollow();
-      if (!live && unfollow !== null) {
-        unfollow();
-        unfollow = null;
-      }
     },
     setCallbacks(update, error) {
       onUpdate = update;
@@ -315,8 +287,6 @@ export function loadHero(options: HeroOptions): HeroHandle {
     destroy() {
       destroyed = true;
       abort.abort();
-      unfollow?.();
-      unfollow = null;
       if (updateTimer !== null) cancelAnimationFrame(updateTimer);
     },
   };

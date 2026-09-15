@@ -47,7 +47,6 @@ export function keyAction(key: string, shift = false): KeyAction | null {
     case '1':
     case '2':
     case '3':
-    case '4':
       return { kind: 'view', index: Number(key) - 1 };
     case 'Escape':
       return { kind: 'escape' };

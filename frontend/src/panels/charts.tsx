@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import { motion, useReducedMotion } from 'motion/react';
 import { clsx } from 'clsx';
 import { CartesianGrid, ComposedChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import type { TooltipPayload } from 'recharts/types/state/tooltipSlice';
@@ -304,7 +303,6 @@ export function Hotkey({
 }) {
   const anchor = useRef<HTMLSpanElement | null>(null);
   const [box, setBox] = useState<DOMRect | null>(null);
-  const reduced = useReducedMotion() === true;
   const show = (): void => {
     const el = anchor.current;
     if (el !== null) setBox(el.getBoundingClientRect());
@@ -336,17 +334,12 @@ export function Hotkey({
                 : { top: box.bottom + 6 }),
             }}
           >
-            <motion.span
-              initial={reduced ? false : { opacity: 0 }}
-              animate={{ opacity: 1 }}
-              transition={{ duration: 0.12 }}
-              className="flex items-center gap-1.5 whitespace-nowrap rounded-md border border-white/15 bg-ground px-2 py-1 text-2xs text-ink shadow-lg"
-            >
+            <span className="flex items-center gap-1.5 whitespace-nowrap rounded-md border border-white/15 bg-ground px-2 py-1 text-2xs text-ink shadow-lg motion-safe:animate-fade-in">
               {label}
               {keyName !== undefined && (
                 <kbd className="rounded-sm border border-white/15 bg-white/10 px-1 font-mono leading-4">{keyName}</kbd>
               )}
-            </motion.span>
+            </span>
           </div>,
           document.body,
         )}

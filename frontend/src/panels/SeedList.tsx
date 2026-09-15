@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useEffect, useMemo, useRef } from 'react';
 import { clsx } from 'clsx';
 import { ArrowUpDown } from 'lucide-react';
 import type { RunDetail } from '../data/types';
@@ -7,9 +7,7 @@ import { heroSeed, sortPermutation } from '../lib/selection';
 import { cycleSortMode, promote, unpromote, useSelection } from '../state/selectionStore';
 import { STR } from '../strings';
 import { useTapeSnapshot, type DeriveSpec } from '../tape/store';
-import { penStore } from '../tape/penStore';
 import type { SeedRow } from '../tape/derive';
-import { seedsFor } from '../theater/loader';
 import { Hotkey, Label, TXT, cssVar, withAlpha } from './charts';
 import { useStepScrub } from './useStepScrub';
 
@@ -103,13 +101,11 @@ function Spark({
   xs,
   stroke,
   onStart,
-  liveLane,
 }: {
   values: Float64Array;
   xs: Float64Array;
   stroke: string;
   onStart: () => void;
-  liveLane: number;
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const holderRef = useRef<HTMLSpanElement | null>(null);
@@ -134,32 +130,16 @@ function Spark({
       state.current.schedule();
     });
     observer.observe(holder);
-    let unsubscribeLive = (): void => {};
-    if (liveLane >= 0) {
-      const onFrame = (): void => {
-        const frame = penStore.frame();
-        if (frame === null || (frame.index + liveLane) % LIVE_SPARK_PHASES !== 0) return;
-        const lane = frame.laneValues[liveLane];
-        if (lane === undefined) return;
-        state.current.values = lane;
-        state.current.xs = frame.xs;
-        state.current.schedule();
-      };
-      onFrame();
-      unsubscribeLive = penStore.subscribeFrame(onFrame);
-    }
     return () => {
       cancelAnimationFrame(frame);
       observer.disconnect();
-      unsubscribeLive();
     };
-  }, [liveLane]);
+  }, []);
 
   useEffect(() => {
-    state.current.stroke = stroke;
-    if (liveLane < 0) Object.assign(state.current, { values, xs });
+    Object.assign(state.current, { values, xs, stroke });
     state.current.schedule();
-  }, [values, xs, stroke, liveLane]);
+  }, [values, xs, stroke]);
 
   const scrub = useStepScrub<HTMLSpanElement>(
     () => ({ min: 0, max: state.current.xs[state.current.xs.length - 1] ?? 0 }),
@@ -185,55 +165,23 @@ const Row = memo(function Row({
   rank,
   isHero,
   isPromoted,
-  playable,
   tone,
-  liveLane,
 }: {
   row: SeedRow;
   rank: number;
   isHero: boolean;
   isPromoted: boolean;
-  playable: boolean;
-  liveLane: number;
   tone: string;
 }) {
-  const rateRef = useRef<HTMLSpanElement | null>(null);
-  useEffect(() => {
-    if (liveLane < 0) return;
-    let at = 0;
-    const write = (): void => {
-      const now = performance.now();
-      if (now - at < 100) return;
-      at = now;
-      const frame = penStore.frame();
-      const lane = frame?.laneValues[liveLane];
-      const el = rateRef.current;
-      if (lane === undefined || el === null) return;
-      let head = NaN;
-      for (let k = lane.length - 1; k >= 0; k--) {
-        const value = lane[k] ?? NaN;
-        if (Number.isFinite(value)) {
-          head = value;
-          break;
-        }
-      }
-      el.textContent = Number.isFinite(head) ? formatSigned(head, 3) : '—';
-      el.classList.toggle('text-good', head > 0);
-      el.classList.toggle('text-bad', Number.isFinite(head) && head <= 0);
-      el.classList.toggle('text-ink-faint', !Number.isFinite(head));
-    };
-    write();
-    return penStore.subscribeFrame(write);
-  }, [liveLane]);
   const dead = row.divergedAt !== null;
   const stroke = dead ? cssVar('--color-crit') : isHero ? cssVar('--color-seed') : tone;
   return (
     <button
       type="button"
-      title={isPromoted ? STR.seeds.release(row.seed) : playable ? STR.seeds.promote(row.seed) : STR.seeds.unplayable(row.seed)}
+      title={isPromoted ? STR.seeds.release(row.seed) : STR.seeds.promote(row.seed)}
       onClick={() => {
         if (isPromoted) unpromote();
-        else promote(row.seed, () => playable);
+        else promote(row.seed);
       }}
       className={clsx(
         'flex h-7 w-full items-center gap-2 rounded-md px-2 text-left transition-colors',
@@ -241,9 +189,8 @@ const Row = memo(function Row({
       )}
     >
       <span className={clsx('w-6 text-right', TXT.dataDim)}>{rank}</span>
-      <span className={clsx('w-10 font-mono text-xs', isHero && 'text-seed', !isHero && !playable && 'text-ink-faint')}>{row.seed}</span>
+      <span className={clsx('w-10 font-mono text-xs', isHero && 'text-seed')}>{row.seed}</span>
       <span
-        ref={rateRef}
         className={clsx(
           'w-14 text-right font-mono text-xs tabular-nums',
           row.rate === null ? 'text-ink-faint' : row.rate > 0 ? 'text-good' : 'text-bad',
@@ -251,7 +198,7 @@ const Row = memo(function Row({
       >
         {row.rate === null ? '—' : formatSigned(row.rate, 3)}
       </span>
-      <Spark values={row.spark} xs={row.sparkXs} stroke={stroke} onStart={() => promote(row.seed, () => playable)} liveLane={liveLane} />
+      <Spark values={row.spark} xs={row.sparkXs} stroke={stroke} onStart={() => promote(row.seed)} />
       {dead && (
         <span
           className="rounded-sm border border-crit/40 bg-crit/10 px-1 font-mono text-2xs leading-4 text-crit"
@@ -264,54 +211,8 @@ const Row = memo(function Row({
   );
 });
 
-const LIVE_ORDER_INTERVAL_MS = 500;
-const LIVE_SPARK_PHASES = 6;
-
-function useLiveHeads(live: boolean): Float64Array | null {
-  const [heads, setHeads] = useState<Float64Array | null>(null);
-  useEffect(() => {
-    if (!live) {
-      setHeads(null);
-      return;
-    }
-    let at = 0;
-    const onFrame = (): void => {
-      const now = performance.now();
-      if (now - at < LIVE_ORDER_INTERVAL_MS) return;
-      at = now;
-      const frame = penStore.frame();
-      if (frame === null) return;
-      const next = new Float64Array(frame.laneValues.length);
-      frame.laneValues.forEach((lane, li) => {
-        let head = NaN;
-        for (let k = lane.length - 1; k >= 0; k--) {
-          const value = lane[k] ?? NaN;
-          if (Number.isFinite(value)) {
-            head = value;
-            break;
-          }
-        }
-        next[li] = head;
-      });
-      setHeads(next);
-    };
-    onFrame();
-    return penStore.subscribeFrame(onFrame);
-  }, [live]);
-  return heads;
-}
-
-export function SeedList({
-  active,
-  live,
-  penSeeds,
-}: {
-  active: RunDetail | null;
-  live: boolean;
-  penSeeds: readonly number[] | null;
-}) {
+export function SeedList({ active }: { active: RunDetail | null }) {
   const sel = useSelection();
-  const heads = useLiveHeads(live);
   const spec = useMemo<(DeriveSpec & { mode: 'rows' }) | null>(() => {
     if (active === null || sel.envId === null) return null;
     return {
@@ -320,29 +221,9 @@ export function SeedList({
       envSchedule: active.meta.envSchedule,
       seeds: active.meta.seeds,
       steps: active.meta.steps,
-      recorded: seedsFor(active.recordings, sel.envId),
     };
   }, [active, sel.envId]);
-  const tapeRows = useTapeSnapshot(active?.id ?? null, sel.envId, 'rows', spec);
-  const liveRowCache = useRef(new Map<number, SeedRow>());
-  const rows = useMemo(() => {
-    if (tapeRows === null || !live || penSeeds === null) return tapeRows;
-    const cache = liveRowCache.current;
-    return tapeRows.map((row) => {
-      const li = penSeeds.indexOf(row.seed);
-      const head = heads === null || li < 0 ? NaN : heads[li] ?? NaN;
-      const rate = Number.isFinite(head) ? head : null;
-      const have = cache.get(row.seed);
-      if (have !== undefined && have.rate === rate && have.spark === row.spark) return have;
-      const next = { ...row, rate };
-      cache.set(row.seed, next);
-      return next;
-    });
-  }, [tapeRows, live, penSeeds, heads]);
-  const playableSeeds = useMemo(
-    () => new Set(sel.envId === null ? [] : seedsFor(active?.recordings ?? [], sel.envId)),
-    [active, sel.envId],
-  );
+  const rows = useTapeSnapshot(active?.id ?? null, sel.envId, 'rows', spec);
   const order = rows === null ? [] : sortPermutation(rows, sel.sort);
   const tone = cssVar(`--color-${sel.policy}`);
   const hero = heroSeed(sel.selection);
@@ -350,7 +231,7 @@ export function SeedList({
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex items-center gap-2 px-2">
-        <Label hint={live ? STR.seeds.titleHintSliced : STR.seeds.titleHint}>{STR.seeds.title}</Label>
+        <Label hint={STR.seeds.titleHint}>{STR.seeds.title}</Label>
         <span className={TXT.dataDim}>
           {rows !== null && rows.length > 0 ? formatCount(rows.length) : ''}
         </span>
@@ -383,9 +264,7 @@ export function SeedList({
                 rank={rank + 1}
                 isHero={row.seed === hero}
                 isPromoted={row.seed === sel.selection.promoted}
-                playable={playableSeeds.has(row.seed)}
                 tone={tone}
-                liveLane={live && penSeeds !== null ? penSeeds.indexOf(row.seed) : -1}
               />
             );
           })}

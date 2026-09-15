@@ -12,9 +12,9 @@ Recorded on a binned M4 Max.
 
 ## Base
 
-Geometry: 32 percepts, 480 features (96 active per step), 32 options; 200,160 total parameters (6 action dimensions). 976,711 SPS.
+Geometry: 32 percepts, 480 features (96 active per step), 32 options; 200,160 total parameters (6 action dimensions). 1,106,635 SPS.
 
-Reward per step over the full 1,000,000-step best recording (`11dc490fe8146916dd3f97466e823a22b9452ec5`), using all 16 environments, 64 seeds each, and matching recorded PPO and Random baselines. Mean reward per step over all 64 seeds; wins are paired per seed, ties count half.
+Reward per step over the full 1,000,000-step best recording (`04320edcc1d7309177bcaf94f79ecca46660a94c`), using all 16 environments, 64 seeds each, and matching recorded PPO and Random baselines. Mean reward per step over all 64 seeds; wins are paired per seed, ties count half.
 
 | Environment | OaK | PPO | Random | OaK vs PPO wins |
 |---|---:|---:|---:|---:|

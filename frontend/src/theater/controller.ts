@@ -1,5 +1,4 @@
-import type { EnvId } from '../data/envs';
-import type { Policy, RecordingRef, RunDetail } from '../data/types';
+import type { Policy, RunDetail } from '../data/types';
 import { entryFor, parseCatalog } from '@sim/catalog';
 import { nameOf } from '../scenes/table';
 import { envLanes } from '../lib/run';
@@ -12,14 +11,7 @@ import {
   setPendingSeek,
   subscribeSelection,
 } from '../state/selectionStore';
-import {
-  loadHero,
-  recordingRef,
-  seedsFor,
-  seekTargetForTick,
-  type HeroHandle,
-  type TimelineTick,
-} from './loader';
+import { loadHero, seekTargetForTick, type HeroHandle, type TimelineTick } from './loader';
 import { clampPosition } from './player';
 import { liveEdgeBufferFrames, type PlaybackSource } from './playbackSource';
 import { mountSceneHost, type HostFrameInfo, type SceneHostHandle } from './sceneHost';
@@ -64,7 +56,7 @@ const EMPTY_META: StageMeta = {
   ticks: [],
 };
 
-const meta = createStore<StageMeta>('stage', EMPTY_META);
+const meta = createStore<StageMeta>(EMPTY_META);
 
 export const stageMetaSnapshot = meta.get;
 export const useStageMeta = meta.use;
@@ -104,26 +96,6 @@ let attached = false;
 let inputs: TheaterInputs | null = null;
 let targetKey = '';
 let appliedDebug = false;
-
-function degradedReason(recordings: readonly RecordingRef[], envId: EnvId): string | null {
-  if (recordings.length === 0) return 'no recordings on this run';
-  if (seedsFor(recordings, envId).length === 0) return `no recordings for ${nameOf(envId)} in this run`;
-  return null;
-}
-
-function baselineReason(
-  recordings: readonly RecordingRef[],
-  envId: EnvId,
-  seed: number | null,
-  policy: 'ppo' | 'random',
-): string | null {
-  if (recordings.length === 0) return `no ${policy} recordings on this baseline`;
-  if (seedsFor(recordings, envId).length === 0) return `no ${policy} recordings for ${nameOf(envId)}`;
-  if (seed !== null && recordingRef(recordings, envId, seed) === null) {
-    return `no ${policy} recording for ${nameOf(envId)} seed ${seed}`;
-  }
-  return null;
-}
 
 function totalSteps(): number {
   return hero?.totalSteps ?? Math.max(1, frameCount() - 1);
@@ -289,15 +261,13 @@ function mountHero(): void {
     return;
   }
   const seed = heroSeed(sel.selection);
-  const reason =
-    sel.policy === 'oak'
-      ? degradedReason(run.recordings, env)
-      : baselineReason(run.recordings, env, seed, sel.policy);
-  if (reason !== null || seed === null) {
+  const { lanes, seeds } = envLanes(run.meta, env);
+  const lane = seed === null ? undefined : lanes[seeds.indexOf(seed)];
+  if (seed === null || lane === undefined) {
     setStageMeta({
       status: 'error',
       note: 'Nothing to replay here',
-      noteDetail: reason ?? 'no seed to play',
+      noteDetail: seed === null ? 'no seed to play' : `no ${sel.policy} lane for ${nameOf(env)} seed ${seed}`,
       envName: nameOf(env),
       seed,
       policy: sel.policy,
@@ -330,10 +300,10 @@ function mountHero(): void {
       runId: run.id,
       envId: env,
       seed,
-      lane: envLanes(run.meta, env).lanes[envLanes(run.meta, env).seeds.indexOf(seed)] ?? -1,
+      lane,
       horizonSteps: run.meta.steps,
       live: inp.live,
-      startedAt: run.meta.startedAt === undefined ? null : Date.parse(run.meta.startedAt),
+      startedAt: Date.parse(run.meta.startedAt),
     });
     heroCache.set(cacheKey, handle);
     for (const [oldKey, old] of heroCache) {
@@ -402,6 +372,10 @@ export function setTheaterInputs(next: TheaterInputs): void {
   inputs = next;
   hero?.setLive(next.live);
   retarget();
+}
+
+export function pullHero(): void {
+  hero?.pull();
 }
 
 export function mountStage(node: HTMLElement): void {

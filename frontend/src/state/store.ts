@@ -8,9 +8,7 @@ export interface Store<T> {
   use(): T;
 }
 
-export function createStore<T extends object>(key: string, initial: T): Store<T> {
-  const hot = import.meta.hot?.data;
-  if (hot?.[key]) return hot[key] as Store<T>;
+export function createStore<T extends object>(initial: T): Store<T> {
   let value = initial;
   const listeners = new Set<() => void>();
   const get = (): T => value;
@@ -24,13 +22,11 @@ export function createStore<T extends object>(key: string, initial: T): Store<T>
     value = next;
     for (const listener of listeners) listener();
   };
-  const store: Store<T> = {
+  return {
     get,
     set,
     subscribe,
     patch: (part) => set({ ...value, ...part }),
     use: () => useSyncExternalStore(subscribe, get),
   };
-  if (hot) hot[key] = store;
-  return store;
 }

@@ -10,11 +10,10 @@ export function heroSeed(selection: HeroSelection): number | null {
   return selection.promoted ?? selection.leader?.seed ?? null;
 }
 
-export function peakSeed(seeds: readonly number[], recorded: readonly number[], rates: BinnedRates, window: number): HeroSelection['leader'] {
+export function peakSeed(seeds: readonly number[], rates: BinnedRates, window: number): HeroSelection['leader'] {
   let leader: HeroSelection['leader'] = null, peak = -Infinity;
   for (let lane = 0; lane < seeds.length; lane++) {
     const seed = seeds[lane]!;
-    if (!recorded.includes(seed)) continue;
     const values = rates.perLane[lane]!;
     for (let row = 0; row < values.length; row++) {
       const rate = values[row];
@@ -27,12 +26,7 @@ export function peakSeed(seeds: readonly number[], recorded: readonly number[], 
   return leader;
 }
 
-export function promoteSeed(
-  selection: HeroSelection,
-  seed: number,
-  playable: (seed: number) => boolean,
-): HeroSelection {
-  if (!playable(seed)) return selection;
+export function promoteSeed(selection: HeroSelection, seed: number): HeroSelection {
   if (selection.promoted === seed) return selection;
   return { ...selection, promoted: seed };
 }

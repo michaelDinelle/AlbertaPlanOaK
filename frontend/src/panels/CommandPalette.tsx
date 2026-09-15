@@ -4,7 +4,7 @@ import type { EnvId } from '../data/envs';
 import { nameOf, slugOf } from '../scenes/table';
 import type { Policy, RunDetail, RunIndexEntry } from '../data/types';
 import { Panel } from '../glass/Panel';
-import { runLabel, sortRuns } from '../lib/run';
+import { envLanes, runLabel, sortRuns } from '../lib/run';
 import { setTransport, transportSnapshot } from '../playback/store';
 import {
   cycleSortMode,
@@ -16,7 +16,6 @@ import {
   useSelection,
 } from '../state/selectionStore';
 import { STR } from '../strings';
-import { seedsFor } from '../theater/loader';
 import { SPEEDS } from '../url/codec';
 import { PANEL_VIEWS, type PanelView } from './StatsPanel';
 
@@ -75,7 +74,7 @@ export function CommandPalette({
   const sel = useSelection();
   const runs = useMemo(() => sortRuns(entries ?? []).slice(0, 12), [entries]);
   const seeds = useMemo(
-    () => (detail === null || sel.envId === null ? [] : seedsFor(detail.recordings, sel.envId)),
+    () => (detail === null || sel.envId === null ? [] : envLanes(detail.meta, sel.envId).seeds),
     [detail, sel.envId],
   );
   const policies: Policy[] = ['oak', ...(['ppo', 'random'] as const).filter((p) => detail?.baselines[p] !== undefined)];
@@ -128,7 +127,7 @@ export function CommandPalette({
               </Command.Group>
               <Command.Group heading={STR.palette.seeds}>
                 {seeds.map((seed) => (
-                  <Item key={seed} onPick={done(() => promote(seed, () => true))} hint={STR.seeds.promote(seed)}>
+                  <Item key={seed} onPick={done(() => promote(seed))} hint={STR.seeds.promote(seed)}>
                     {STR.palette.seed(seed)}
                   </Item>
                 ))}

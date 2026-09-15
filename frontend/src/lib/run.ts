@@ -1,24 +1,13 @@
 import type { RunDetail, RunIndexEntry, RunMeta } from '../data/types';
-import { ENV_IDS, isEnvId, type EnvId } from '../data/envs';
+import { isEnvId, type EnvId } from '../data/envs';
 
-export interface EnvShare {
-  envId: EnvId;
-  lanes: number;
-  fraction: number;
-}
-
-export function envShares(meta: Pick<RunMeta, 'envSchedule'>): EnvShare[] {
-  const counts = new Map<EnvId, number>();
+export function runEnvs(meta: Pick<RunMeta, 'envSchedule'>): EnvId[] {
+  const out: EnvId[] = [];
   for (const entry of meta.envSchedule) {
     if (!isEnvId(entry.envId)) throw new Error(`run schedule names unknown env ${entry.envId}`);
-    const lanes = Math.max(0, entry.seedEnd - entry.seedStart + 1);
-    counts.set(entry.envId, (counts.get(entry.envId) ?? 0) + lanes);
+    if (!out.includes(entry.envId)) out.push(entry.envId);
   }
-  const total = [...counts.values()].reduce((sum, n) => sum + n, 0) || 1;
-  return ENV_IDS.filter((id) => counts.has(id)).map((envId) => {
-    const lanes = counts.get(envId) ?? 0;
-    return { envId, lanes, fraction: lanes / total };
-  });
+  return out;
 }
 
 export interface EnvLanes {
@@ -44,65 +33,26 @@ export function envLanes(meta: Pick<RunMeta, 'envSchedule' | 'seeds'>, envId: st
   return { lanes, seeds };
 }
 
-export function runEnvs(
-  meta: Pick<RunMeta, 'envSchedule'>,
-  recordings: readonly { envId: string }[],
-): EnvId[] {
-  const seen = new Set<EnvId>();
-  for (const share of envShares(meta)) seen.add(share.envId);
-  for (const rec of recordings) {
-    if (!isEnvId(rec.envId)) throw new Error(`recording names unknown env ${rec.envId}`);
-    seen.add(rec.envId);
-  }
-  return ENV_IDS.filter((id) => seen.has(id));
-}
-
 export function sortRuns(entries: readonly RunIndexEntry[]): RunIndexEntry[] {
   return [...entries].sort((a, b) => {
     if (a.inFlight !== b.inFlight) return a.inFlight ? -1 : 1;
     if (a.role !== b.role) return a.role === 'best' ? -1 : 1;
-    const ta = a.startedAt ? Date.parse(a.startedAt) : 0;
-    const tb = b.startedAt ? Date.parse(b.startedAt) : 0;
-    if (tb !== ta) return tb - ta;
-    return a.id.localeCompare(b.id);
+    const delta = Date.parse(b.startedAt) - Date.parse(a.startedAt);
+    return delta !== 0 ? delta : a.id.localeCompare(b.id);
   });
 }
 
 export function resolveFeaturedRun(entries: readonly RunIndexEntry[]): { runId: string | null } {
   const best = entries.find((entry) => entry.role === 'best');
-  if (best?.hasRecordings === true) return { runId: best.id };
-
-  const started = (entry: RunIndexEntry): number => (entry.startedAt ? Date.parse(entry.startedAt) : 0);
-  const newest = (list: readonly RunIndexEntry[]): RunIndexEntry | null =>
-    [...list].sort((a, b) => {
-      const ta = started(a);
-      const tb = started(b);
-      if (Number.isFinite(tb) && Number.isFinite(ta) && tb !== ta) return tb - ta;
-      return a.id.localeCompare(b.id);
-    })[0] ?? null;
-
-  const playable = entries.filter((entry) => entry.policy === 'oak' && entry.hasRecordings);
-  const complete = newest(playable.filter((entry) => entry.complete));
-  if (complete) return { runId: complete.id };
-  return { runId: newest(playable)?.id ?? null };
+  if (best !== undefined) return { runId: best.id };
+  const oak = sortRuns(entries.filter((entry) => entry.policy === 'oak'));
+  return { runId: (oak.find((entry) => entry.complete) ?? oak[0])?.id ?? null };
 }
 
 export type RunLabelSource = Pick<RunIndexEntry, 'id' | 'startedAt' | 'role' | 'policy'>;
 
 export function runShortId(id: string): string {
-  return id.slice(id.lastIndexOf('-') + 1).slice(0, 7);
-}
-
-export function runLabelSource(
-  id: string,
-  meta: Pick<RunMeta, 'startedAt' | 'policy'>,
-): RunLabelSource {
-  return {
-    id,
-    startedAt: meta.startedAt ?? null,
-    role: null,
-    policy: meta.policy,
-  };
+  return id.slice(0, 7);
 }
 
 export function runLabel(entry: RunLabelSource): string {
@@ -120,15 +70,12 @@ export function runLabelFor(
 ): string {
   const entry = entries?.find((run) => run.id === id);
   if (entry !== undefined) return runLabel(entry);
-  if (loaded !== null && loaded.id === id) return runLabel(runLabelSource(loaded.id, loaded.meta));
+  if (loaded !== null && loaded.id === id) return runLabel({ id, startedAt: loaded.meta.startedAt, role: null, policy: loaded.meta.policy });
   return runShortId(id);
 }
 
-export function runDateLabel(iso: string | null, now: Date = new Date()): string {
-  if (!iso) return 'undated';
-  const at = Date.parse(iso);
-  if (!Number.isFinite(at)) return 'undated';
-  const date = new Date(at);
+export function runDateLabel(iso: string, now: Date = new Date()): string {
+  const date = new Date(Date.parse(iso));
   const monthDay = date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
   return date.getFullYear() === now.getFullYear() ? monthDay : `${monthDay} ${date.getFullYear()}`;
 }

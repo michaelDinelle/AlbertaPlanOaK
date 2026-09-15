@@ -6,7 +6,6 @@ export const BENCH = resolve(import.meta.dir, process.argv[2] ?? '../.oak-benchm
 const DIST = resolve(import.meta.dir, 'dist');
 const BEST = resolve(import.meta.dir, '../best');
 const FRAME_FLOATS = 11;
-const COLUMNS = ['rewardSum', 'rho', 'deathStep', 'deathDetector'];
 const CHUNK_MAGIC = 0x524b4843;
 const LPC_ORDER = 8;
 const LPC_SHIFT = 14;
@@ -15,9 +14,10 @@ interface Field { slot: number; wrap: boolean; scale: number; anchor: boolean }
 interface Meta {
   seeds: number[];
   steps: number;
+  batch: number;
   policy: string;
-  preset?: string;
-  startedAt?: string;
+  preset: string;
+  startedAt: string;
   finishedAt?: string;
   envSchedule: { envId: string; seedStart: number; seedEnd: number }[];
   envCatalog: { envId: string; fields: Field[] }[];
@@ -41,9 +41,15 @@ function readRange(path: string, offset: number, length: number): ArrayBuffer {
   return out.buffer;
 }
 
-const meta = (root: string): Meta => JSON.parse(readFileSync(join(root, 'meta.json'), 'utf8'));
+const META_FIELDS = ['seeds', 'steps', 'batch', 'policy', 'preset', 'startedAt', 'envSchedule', 'envCatalog'];
+
+function meta(root: string): Meta {
+  const m = JSON.parse(readFileSync(join(root, 'meta.json'), 'utf8')) as Meta;
+  for (const field of META_FIELDS) if (!(field in m)) throw new HttpError(500, `${root}/meta.json lacks ${field}`);
+  return m;
+}
+
 const ends = (root: string): Uint32Array => existsSync(join(root, 'ends.u32')) ? new Uint32Array(bytes(join(root, 'ends.u32'))) : new Uint32Array(0);
-const hasPoses = (root: string): boolean => existsSync(join(root, 'poses')) && readdirSync(join(root, 'poses')).length > 0;
 
 function int(v: string | null, what: string): number {
   const n = Number(v);
@@ -86,28 +92,24 @@ function runs(): unknown[] {
       id,
       envIds: m.envSchedule.map((x) => x.envId),
       steps: m.steps,
-      startedAt: m.startedAt ?? null,
+      startedAt: m.startedAt,
       complete: m.finishedAt !== undefined && (e[e.length - 1] ?? 0) >= m.steps,
       inFlight: m.finishedAt === undefined,
-      hasRecordings: hasPoses(root),
       policy: m.policy,
-      preset: m.preset ?? '',
+      preset: m.preset,
       role: id === best ? 'best' : null,
       windows: e.length,
     };
   });
   return entries
     .filter((x) => x.windows > 0)
-    .sort((a, b) => (a.startedAt ?? '') !== (b.startedAt ?? '') ? ((a.startedAt ?? '') > (b.startedAt ?? '') ? -1 : 1) : a.id > b.id ? -1 : 1)
+    .sort((a, b) => a.startedAt !== b.startedAt ? (a.startedAt > b.startedAt ? -1 : 1) : a.id > b.id ? -1 : 1)
     .map(({ windows: _, ...entry }) => entry);
 }
 
 function detail(id: string): unknown {
   const root = runRoot(id);
   const m = meta(root);
-  const recordings: { envId: string; seed: number }[] = [];
-  let at = 0;
-  if (hasPoses(root)) for (const e of m.envSchedule) for (let w = e.seedEnd - e.seedStart + 1; w > 0; w--) recordings.push({ envId: e.envId, seed: m.seeds[at++]! });
   const baselines: Record<string, string> = {};
   if (m.policy === 'oak') {
     for (const policy of ['ppo', 'random']) {
@@ -115,11 +117,11 @@ function detail(id: string): unknown {
       if (existsSync(join(b, 'meta.json')) && meta(b).finishedAt !== undefined) baselines[policy] = `${id}:${policy}`;
     }
   }
-  return { id, meta: m, recordings, baselines };
+  return { id, meta: m, baselines };
 }
 
 function series(root: string, col: string): Blob {
-  if (!COLUMNS.includes(col)) throw new HttpError(404, `no column ${col}`);
+  if (!readdirSync(join(root, 'series')).includes(`${col}.f32`)) throw new HttpError(404, `no column ${col}`);
   const e = bytes(join(root, 'ends.u32'));
   const w = bytes(join(root, 'wall.f32'));
   const v = bytes(join(root, `series/${col}.f32`));
@@ -127,15 +129,6 @@ function series(root: string, col: string): Blob {
   const L = meta(root).seeds.length;
   if (w.byteLength !== W * 4 || v.byteLength !== W * L * 4) throw new HttpError(500, `${col}: ${W} windows, wall ${w.byteLength} B, values ${v.byteLength} B`);
   return new Blob([new Uint32Array([W, L]), e, w, v]);
-}
-
-function rewards(root: string, envId: string, from: number, n: number): ArrayBuffer | null {
-  const e = meta(root).envSchedule.find((x) => x.envId === envId);
-  if (e === undefined) throw new HttpError(404, `no environment ${envId}`);
-  const L = e.seedEnd - e.seedStart + 1;
-  const path = join(root, 'rewards', `${envId}.f32`);
-  const end = Math.min(from + n, Math.floor(statSync(path).size / (L * 4)));
-  return end > from ? readRange(path, from * L * 4, (end - from) * L * 4) : null;
 }
 
 const exact = (x: number): number => {
@@ -274,10 +267,7 @@ function staticFile(pathname: string): Response {
   return new Response(Bun.file(path));
 }
 
-const binary = (body: BlobPart | null): Response => {
-  const blob = body === null ? null : new Blob([body]);
-  return blob === null || blob.size === 0 ? new Response(null, { status: 204 }) : new Response(blob);
-};
+const binary = (body: Float32Array<ArrayBuffer>): Response => body.length === 0 ? new Response(null, { status: 204 }) : new Response(body);
 
 function route(url: URL): Response {
   const s = url.pathname.split('/').filter(Boolean).map(decodeURIComponent);
@@ -286,7 +276,6 @@ function route(url: URL): Response {
   if (s.length === 2 && s[1] === 'runs') return Response.json(runs());
   if (s.length === 3 && s[1] === 'runs') return Response.json(detail(s[2]!));
   if (s.length === 5 && s[1] === 'runs' && s[3] === 'series') return new Response(series(runRoot(s[2]!), s[4]!));
-  if (s.length === 5 && s[1] === 'runs' && s[3] === 'rewards') return binary(rewards(runRoot(s[2]!), s[4]!, q('from'), q('n')));
   if (s.length === 5 && s[1] === 'runs' && s[3] === 'frames') return binary(frames(runRoot(s[2]!), int(s[4]!, 'lane'), q('from'), q('n')));
   throw new HttpError(404, 'unknown endpoint');
 }

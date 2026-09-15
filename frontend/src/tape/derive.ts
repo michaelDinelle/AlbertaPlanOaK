@@ -222,14 +222,12 @@ export interface SeedRow {
   divergedAt: number | null;
   spark: Float64Array;
   sparkXs: Float64Array;
-  recorded: boolean;
 }
 
 export function buildSeedRows(
   tape: Tape,
   meta: Pick<RunMeta, 'envSchedule' | 'seeds' | 'steps'>,
   envId: string,
-  recorded: ReadonlySet<number>,
 ): SeedRow[] {
   const { lanes, seeds } = envLanes(meta, envId);
   const spark = windowedRates(tape, lanes, 1);
@@ -242,7 +240,6 @@ export function buildSeedRows(
     divergedAt: laneDeath(tape, lane)?.step ?? null,
     spark: Float64Array.from(spark.perLane[li] ?? [], (v) => v ?? NaN),
     sparkXs,
-    recorded: recorded.has(seeds[li] ?? 0),
   })).sort((a, b) => a.seed - b.seed);
 }
 

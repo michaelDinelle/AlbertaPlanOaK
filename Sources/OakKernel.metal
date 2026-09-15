@@ -1,6 +1,5 @@
 #pragma METAL fp math_mode(safe)
 
-constant uint OAK_SPEC_OBS_DIM [[function_constant(0)]];
 constant uint OAK_SPEC_ENV_KIND [[function_constant(2)]];
 constant uint OAK_MEGA_G [[function_constant(3)]];
 constant bool OAK_PROBE_FIXEDIDX_FC [[function_constant(5)]];
@@ -65,7 +64,7 @@ inline Shape shapeFor(uint obsDim, uint envActionCount) {
 }
 
 inline Shape shape() {
-    return shapeFor(OAK_SPEC_OBS_DIM, OAK_ENV_SPECS[OAK_SPEC_ENV_KIND].actionCount);
+    return shapeFor(OAK_ENV_SPECS[OAK_SPEC_ENV_KIND].obsDimNatural, OAK_ENV_SPECS[OAK_SPEC_ENV_KIND].actionCount);
 }
 
 struct Layout {
@@ -326,9 +325,9 @@ struct OakShapeProbe {
     uint stUtilOpt, stValueMeta, stOptionValueMeta, stModelMeta, stActorMeta;
     uint uOptFeature, uFeatureMeta, uNurseryMeta;
     uint simdWidth, threadgroupLanes, activeFeatures, featureTimeScale, optionsPerThread, actorAlphaDenom;
-    uint laneThreadgroupFloats;
+    uint laneThreadgroupFloats, laneSimdgroups;
 };
-static_assert(sizeof(OakShapeProbe) == 112, "OakShapeProbe layout drifted from the Swift mirror");
+static_assert(sizeof(OakShapeProbe) == 116, "OakShapeProbe layout drifted from the Swift mirror");
 
 kernel void oak_shape_probe(device OakShapeProbe *out [[buffer(0)]],
                             uint tid [[thread_position_in_grid]]) {
@@ -363,9 +362,17 @@ kernel void oak_shape_probe(device OakShapeProbe *out [[buffer(0)]],
     out->optionsPerThread = OAK_OPTIONS_PER_THREAD;
     out->actorAlphaDenom = uint(s.actorAlphaDenom);
     out->laneThreadgroupFloats = 6u * s.optionCount + 1u;
+    out->laneSimdgroups = OAK_ENV_SPECS[OAK_SPEC_ENV_KIND].laneThreads > 1u ? OAK_WIDE_LANE_SIMDGROUPS : 1u;
 }
 
-constant uint OAK_ENV_TABLE_STRIDE = 9u + OAK_POSE_LEN;
+constant uint OAK_ENV_TABLE_HEADER = 9u;
+constant uint OAK_ENV_TABLE_STRIDE = 10u + OAK_POSE_LEN;
+
+inline uint mjWorkWords(uint envK, device float *base) {
+    if (OAK_ENV_SPECS[envK].mjIndex != 0u) return 0u;
+    E0::Work w = E0::bindWork(base);
+    return uint((device float *)w.conRows - base) + uint(w.conRows - w.conDim);
+}
 
 kernel void oak_env_table_probe(device uint *out [[buffer(0)]],
                                 uint tid [[thread_position_in_grid]]) {
@@ -375,8 +382,12 @@ kernel void oak_env_table_probe(device uint *out [[buffer(0)]],
     out[2] = OAK_ENV_ACT_MAX;
     out[3] = OAK_ENV_WORDS_MAX;
     out[4] = OAK_ENV_CONSTANT_WORDS;
+    out[5] = PPO_PARAM_STRIDE;
+    out[6] = PPO_ROLL_STRIDE;
+    out[7] = PPO_SCRATCH_STRIDE;
+    out[8] = PPO_STATE_STRIDE;
     for (uint i = 0u; i < OAK_ENV_COUNT; ++i) {
-        device uint *row = out + 5u + i * OAK_ENV_TABLE_STRIDE;
+        device uint *row = out + OAK_ENV_TABLE_HEADER + i * OAK_ENV_TABLE_STRIDE;
         row[0] = OAK_ENV_SPECS[i].nameHash;
         row[1] = OAK_ENV_SPECS[i].obsDimNatural;
         row[2] = OAK_ENV_SPECS[i].actionKind;
@@ -387,6 +398,7 @@ kernel void oak_env_table_probe(device uint *out [[buffer(0)]],
         row[7] = OAK_ENV_SPECS[i].laneThreads;
         for (uint s = 0u; s < OAK_POSE_LEN; ++s) row[8u + s] = OAK_ENV_SPECS[i].slots[s];
         row[8u + OAK_POSE_LEN] = OAK_ENV_SPECS[i].persistentEntryWords;
+        row[9u + OAK_POSE_LEN] = mjWorkWords(i, (device float *)out);
     }
 }
 
@@ -1822,39 +1834,44 @@ kernel void oak_megastep(device float *params [[buffer(0)]],
                          uint tid [[thread_position_in_threadgroup]],
                          uint slane [[thread_index_in_simdgroup]],
                          uint sgrp [[simdgroup_index_in_threadgroup]]) {
+    const bool wideKind = OAK_ENV_SPECS[OAK_SPEC_ENV_KIND].laneThreads > 1u;
+    const bool planOnly = sgrp >= OAK_MEGA_G;
     uint laneBase = (tgIdx + dispatchSpan.z) * OAK_MEGA_G;
     uint laneShift = dispatchSpan.z * OAK_MEGA_G;
-    uint wideLane = laneBase + sgrp;
+    uint laneSg = planOnly ? sgrp - OAK_MEGA_G : sgrp;
+    uint wideLane = laneBase + laneSg;
     Shape s = shape();
     uint tgK = s.optionCount;
-    threadgroup float *lCont = tgCont + sgrp * tgK;
-    threadgroup float *lStash = tgCont + OAK_MEGA_G * tgK + sgrp * 5u * tgK;
-    threadgroup float *lDirty = tgCont + 6u * OAK_MEGA_G * tgK + sgrp;
+    threadgroup float *lCont = tgCont + laneSg * tgK;
+    threadgroup float *lStash = tgCont + OAK_MEGA_G * tgK + laneSg * 5u * tgK;
+    threadgroup float *lDirty = tgCont + 6u * OAK_MEGA_G * tgK + laneSg;
     for (uint it = 0u; it < dispatchSpan.x; ++it) {
-        Agent agent = make_agent(params, stateArena, uintArena, scalars, s, wideLane - laneShift, wideLane);
-        if ((OAK_MEGA_STAGES & 1u) != 0u) {
-            constructFeatures(agent, slane);
-            predictAndControl(agent, slane, lCont, lStash, lDirty);
+        if (!planOnly) {
+            Agent agent = make_agent(params, stateArena, uintArena, scalars, s, wideLane - laneShift, wideLane);
+            if ((OAK_MEGA_STAGES & 1u) != 0u) {
+                constructFeatures(agent, slane);
+                predictAndControl(agent, slane, lCont, lStash, lDirty);
+            }
+            simdSyncDev();
+            if ((OAK_MEGA_STAGES & 8u) != 0u)
+                replaceWorstFeature(agent, slane, lDirty);
+            simdgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
+            agent.stepCount = scalars[wideLane].stepCount;
+            agent.stateSlot = scalars[wideLane].stateSlot;
+            if ((OAK_MEGA_STAGES & 16u) != 0u) {
+                emitOptionActions(agent, slane, lDirty[0] != 0.0f);
+                simdgroup_barrier(mem_flags::mem_device);
+                blendKeyboard(agent, slane);
+            }
+            simdSyncDev();
+            if ((OAK_MEGA_STAGES & 32u) != 0u)
+                sampleAction(agent, lanes, envArena, envOff, laneSeeds, wideLane, slane);
         }
-        simdSyncDev();
-        if ((OAK_MEGA_STAGES & 8u) != 0u)
-            replaceWorstFeature(agent, slane, lDirty);
-        simdgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
-        agent.stepCount = scalars[wideLane].stepCount;
-        agent.stateSlot = scalars[wideLane].stateSlot;
-        if ((OAK_MEGA_STAGES & 16u) != 0u) {
-            emitOptionActions(agent, slane, lDirty[0] != 0.0f);
-            simdgroup_barrier(mem_flags::mem_device);
-            blendKeyboard(agent, slane);
-        }
-        simdSyncDev();
-        if ((OAK_MEGA_STAGES & 32u) != 0u)
-            sampleAction(agent, lanes, envArena, envOff, laneSeeds, wideLane, slane);
         threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
 
         if ((OAK_MEGA_STAGES & 64u) != 0u) {
-            if (OAK_ENV_SPECS[OAK_SPEC_ENV_KIND].laneThreads > 1u) {
-                stepEnvironment(params, stateArena, uintArena, scalars,
+            if (wideKind) {
+                if (!planOnly) stepEnvironment(params, stateArena, uintArena, scalars,
                                 lanes, envArena, envOff, mjModels, mjScratch, mjScratchOff, envConstants,
                                 laneSeeds, ecfg, recordSlot, recordBuf, wideLane,
                                 wideLane - laneShift, slane, true);
@@ -1870,9 +1887,14 @@ kernel void oak_megastep(device float *params [[buffer(0)]],
         uint planSkipPos = ((planStep % OAK_PLAN_PERIOD) + OAK_PLAN_PERIOD
                - (laneBase % OAK_PLAN_PERIOD)) % OAK_PLAN_PERIOD;
         bool skipInThisGroup = planSkipPos < OAK_MEGA_G;
-        if (!skipInThisGroup || sgrp > 0u) {
-            uint idx = skipInThisGroup ? (sgrp - 1u) : sgrp;
+        uint idx = laneSg;
+        bool plans = planOnly && !(skipInThisGroup && laneSg == planSkipPos);
+        if (!wideKind) {
+            plans = !skipInThisGroup || sgrp > 0u;
+            idx = skipInThisGroup ? (sgrp - 1u) : sgrp;
             if (skipInThisGroup && idx >= planSkipPos) idx += 1u;
+        }
+        if (plans) {
             uint wLane = laneBase + idx;
             Agent planAgent = make_agent(params, stateArena, uintArena, scalars, s, wLane - laneShift, wLane);
             uint pSlot = 1u - planAgent.stateSlot;

@@ -84,7 +84,3 @@ export async function fetchSeries(id: string, column: string, signal?: AbortSign
 export function fetchFrames(id: string, lane: number, from: number, n: number, signal?: AbortSignal): Promise<Float32Array> {
   return getFloats(apiUrl(`/runs/${encodeURIComponent(id)}/frames/${lane}?from=${from}&n=${n}`), signal);
 }
-
-export function fetchRewards(id: string, envId: string, from: number, n: number, signal?: AbortSignal): Promise<Float32Array> {
-  return getFloats(apiUrl(`/runs/${encodeURIComponent(id)}/rewards/${encodeURIComponent(envId)}?from=${from}&n=${n}`), signal);
-}

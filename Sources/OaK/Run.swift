@@ -3,8 +3,8 @@ import Foundation
 final class FrameEncoder: @unchecked Sendable {
   let encoders: [RecordWriter]
 
-  init(laneEnvKinds: [UInt32]) throws {
-    encoders = try laneEnvKinds.map { try RecordWriter(envKind: $0) }
+  init(codecs: [RecordCodec]) {
+    encoders = codecs.map(RecordWriter.init)
   }
 
   func encode(
@@ -51,26 +51,14 @@ final class RunWriter {
   let envLanes: [(envId: String, lanes: Range<Int>)]
   private(set) var bytesWritten = 0
 
-  init(root: URL, laneEnvKinds: [UInt32]) throws {
+  init(root: URL, laneEnvKinds: [UInt32], codecs: [RecordCodec]) throws {
     self.root = root
-    frames = try FrameEncoder(laneEnvKinds: laneEnvKinds)
+    frames = FrameEncoder(codecs: laneEnvKinds.map { codecs[Int($0)] })
     laneCount = laneEnvKinds.count
-    envLanes = Self.envLanes(laneEnvKinds).map { (Main.envIdsByKind[Int(laneEnvKinds[$0.lowerBound])], $0) }
+    envLanes = try laneRuns(laneEnvKinds).map { (Main.envIdsByKind[Int(laneEnvKinds[$0.lowerBound])], $0) }
     for d in ["series", "rewards", "poses"] {
       try FileManager.default.createDirectory(at: root.appendingPathComponent(d), withIntermediateDirectories: true)
     }
-  }
-
-  static func envLanes(_ laneEnvKinds: [UInt32]) -> [Range<Int>] {
-    var out: [Range<Int>] = []
-    var lane = 0
-    while lane < laneEnvKinds.count {
-      var end = lane
-      while end < laneEnvKinds.count && laneEnvKinds[end] == laneEnvKinds[lane] { end += 1 }
-      out.append(lane..<end)
-      lane = end
-    }
-    return out
   }
 
   func writeWindow(

@@ -31,12 +31,8 @@ def env_lanes(meta):
 
 def lane_means(root):
     meta = meta_of(root)
-    col, L = array("f", (root / "series/rewardSum.f32").read_bytes()), len(meta["seeds"])
-    out = [float("nan")] * L
-    for w in range(len(col) // L):
-        for l in range(L):
-            if col[w * L + l] == col[w * L + l]: out[l] = col[w * L + l] / meta["steps"]
-    return out
+    col = array("f", (root / "series/rewardSum.f32").read_bytes())
+    return [v / meta["steps"] for v in col[-len(meta["seeds"]):]]
 
 def env_mean(means, lanes): return sum(means[l] for l in lanes) / len(lanes)
 
@@ -77,8 +73,7 @@ def main():
     identical = all(filecmp.cmp(cand / "rewards" / f"{e}.f32", best / "rewards" / f"{e}.f32", shallow=False) for e in lanes)
     print(f"rewards bitwise identical: {'yes' if identical else 'no'}")
     bmeans = lane_means(best)
-    floor = 0.5 - 1.645 * math.sqrt(0.25 / 64)
-    worse = [e for e, ls in lanes.items() if not wins(means["oak"], bmeans, ls) >= floor]
+    worse = [e for e, ls in lanes.items() if not wins(means["oak"], bmeans, ls) >= 0.5 - 1.645 * math.sqrt(0.25 / len(ls))]
     same_hw = meta["hardwareKey"] == bmeta["hardwareKey"]
     print(f"steps/s {meta['stepsPerSecond']:,.0f} vs best {bmeta['stepsPerSecond']:,.0f} ({'same' if same_hw else 'different'} hardware)")
     if not worse and same_hw and meta["stepsPerSecond"] >= bmeta["stepsPerSecond"]:

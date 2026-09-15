@@ -2,13 +2,12 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { clsx } from 'clsx';
 import { ChevronDown, PanelRightOpen, RotateCcw } from 'lucide-react';
-import { ENV_IDS } from './data/envs';
 import type { Policy, RunDetail, RunIndexEntry } from './data/types';
-import { baselineDetailQuery, runDetailQuery, runsQuery } from './data/queries';
+import { runDetailQuery, runsQuery } from './data/queries';
 import { Panel } from './glass/Panel';
 import { formatStep } from './lib/format';
 import { cycleEnv, keyAction } from './lib/keymap';
-import { envLanes, envShares, resolveFeaturedRun, runDateLabel, runEnvs, runLabel, runLabelFor, runShortId, sortRuns } from './lib/run';
+import { envLanes, resolveFeaturedRun, runDateLabel, runEnvs, runLabel, runLabelFor, runShortId, sortRuns } from './lib/run';
 import { peakSeed } from './lib/selection';
 import { CommandPalette } from './panels/CommandPalette';
 import { Hotkey, POLICY_TOKENS } from './panels/charts';
@@ -31,10 +30,9 @@ import {
 } from './state/selectionStore';
 import { STR } from './strings';
 import { retentionWindow } from './tape/derive';
-import { setLive, useTapeProgress, useTapeSnapshot, type DeriveSpec } from './tape/store';
+import { reloadTape, useTapeSnapshot, type DeriveSpec } from './tape/store';
 import { setTransport, transportSnapshot } from './playback/store';
-import { resetCamera, setTheaterInputs, stepBySteps, useStageMeta } from './theater/controller';
-import { seedsFor } from './theater/loader';
+import { pullHero, resetCamera, setTheaterInputs, stepBySteps, useStageMeta } from './theater/controller';
 import { TheaterStage } from './theater/TheaterStage';
 import { sceneRegistry } from './scenes/table';
 import { EnvTileButton } from './wall/EnvTileButton';
@@ -76,7 +74,7 @@ function RunChip({
           <div className="flex flex-col">
             <span className="font-mono text-xs text-ink">{runLabelFor(active.id, entries, active)}</span>
             <span className="font-mono text-2xs text-ink-dim">
-              {STR.run.facts(envShares(active.meta).length, formatStep(active.meta.steps), active.meta.preset)}
+              {STR.run.facts(runEnvs(active.meta).length, formatStep(active.meta.steps), active.meta.preset)}
             </span>
           </div>
           {entry?.inFlight === true && (
@@ -125,19 +123,16 @@ export function App() {
   const entries = runsQ.data;
   const entry = useMemo(() => entries?.find((run) => run.id === sel.runId) ?? null, [entries, sel.runId]);
 
-  const detailQ = useQuery({
-    ...runDetailQuery(sel.runId ?? '', entry?.inFlight === true),
-    enabled: sel.runId !== null,
-  });
+  const detailQ = useQuery({ ...runDetailQuery(sel.runId ?? ''), enabled: sel.runId !== null });
   const detail = detailQ.data ?? null;
 
   const bestId = useMemo(() => entries?.find((run) => run.role === 'best')?.id, [entries]);
-  const bestQ = useQuery({ ...baselineDetailQuery(bestId ?? ''), enabled: bestId !== undefined && bestId !== sel.runId });
+  const bestQ = useQuery({ ...runDetailQuery(bestId ?? ''), enabled: bestId !== undefined && bestId !== sel.runId });
   const best = bestId !== undefined && bestId !== sel.runId ? bestQ.data ?? null : null;
   const ppoId = detail?.baselines.ppo;
   const randomId = detail?.baselines.random;
-  const ppoQ = useQuery({ ...baselineDetailQuery(ppoId ?? ''), enabled: ppoId !== undefined });
-  const randomQ = useQuery({ ...baselineDetailQuery(randomId ?? ''), enabled: randomId !== undefined });
+  const ppoQ = useQuery({ ...runDetailQuery(ppoId ?? ''), enabled: ppoId !== undefined });
+  const randomQ = useQuery({ ...runDetailQuery(randomId ?? ''), enabled: randomId !== undefined });
   const ppoDetail = ppoQ.data ?? null;
   const randomDetail = randomQ.data ?? null;
   const runs = useMemo<Record<Policy, RunDetail | null>>(
@@ -155,20 +150,16 @@ export function App() {
       ? detailQ.isPending
       : baselineId !== undefined && (sel.policy === 'ppo' ? ppoQ : randomQ).isPending);
 
-  const envList = useMemo(() => (detail === null ? [] : runEnvs(detail.meta, detail.recordings)), [detail]);
-  const wallEnvs = envList.length > 0 ? envList : ENV_IDS;
-  const progress = useTapeProgress(sel.runId);
-  const stride = Math.max(1, progress?.windowSteps ?? 1);
+  const envList = useMemo(() => (detail === null ? [] : runEnvs(detail.meta)), [detail]);
+  const stride = active === null ? 1 : active.meta.batch;
   const live = entry?.inFlight === true;
-  const candidates = useMemo(() => active === null || sel.envId === null ? null : {
-    ...envLanes(active.meta, sel.envId), recorded: seedsFor(active.recordings, sel.envId),
-  }, [active, sel.envId]);
+  const candidates = useMemo(() => active === null || sel.envId === null ? null : envLanes(active.meta, sel.envId), [active, sel.envId]);
   const peakSpec = useMemo<(DeriveSpec & { mode: 'windowedRates' }) | null>(() => active === null || candidates === null ? null : {
     mode: 'windowedRates', lanes: candidates.lanes, win: retentionWindow(active.meta.steps),
   }, [active, candidates]);
   const peakRates = useTapeSnapshot(active?.id ?? null, sel.envId, 'windowedRates', peakSpec);
-  const leader = useMemo(() => candidates === null || peakRates === null || peakSpec === null ? null : peakSeed(candidates.seeds, candidates.recorded, peakRates, peakSpec.win), [candidates, peakRates, peakSpec]);
-  const leaderPending = sel.selection.promoted === null && candidates !== null && candidates.recorded.length > 0 && (peakRates === null || (live && peakRates.x.length === 0));
+  const leader = useMemo(() => candidates === null || peakRates === null || peakSpec === null ? null : peakSeed(candidates.seeds, peakRates, peakSpec.win), [candidates, peakRates, peakSpec]);
+  const leaderPending = sel.selection.promoted === null && candidates !== null && candidates.lanes.length > 0 && (peakRates === null || (live && peakRates.x.length === 0));
 
   const [view, setView] = useState<PanelView>('reward');
   const [wallOpen, setWallOpen] = useState(false);
@@ -203,13 +194,13 @@ export function App() {
 
   useEffect(() => {
     if (detail === null || sel.envId !== null) return;
-    const first = envList.find((id) => seedsFor(detail.recordings, id).length > 0) ?? envList[0];
+    const first = envList[0];
     if (first !== undefined) adoptDefaultEnv(first);
   }, [detail, envList, sel.envId]);
 
   useEffect(() => {
     if (candidates === null || baselinePending || peakRates === null) return;
-    electLeader(leader, candidates.recorded);
+    electLeader(leader, candidates.seeds);
   }, [candidates, baselinePending, peakRates, leader, sel.selection.leader]);
 
   useEffect(() => {
@@ -223,11 +214,10 @@ export function App() {
   }, [active, sel.policy, baselineId, baselinePending, leaderPending, live, setTheaterInputs]);
 
   useEffect(() => {
-    const runId = sel.runId;
-    if (runId === null) return;
-    setLive(runId, live);
-    return () => setLive(runId, false);
-  }, [sel.runId, live]);
+    if (!live || sel.runId === null) return;
+    reloadTape(sel.runId);
+    pullHero();
+  }, [sel.runId, live, runsQ.dataUpdatedAt]);
 
   useEffect(() => {
     if (sel.envId !== null) void sceneRegistry[sel.envId]?.();
@@ -383,13 +373,13 @@ export function App() {
         </div>
       </div>
       {wallOpen && (
-        <EnvWall detail={detail} envList={wallEnvs} onClose={() => setWallOpen(false)} />
+        <EnvWall detail={detail} envList={envList} onClose={() => setWallOpen(false)} />
       )}
       {paletteOpen && (
         <CommandPalette
           entries={entries}
           detail={detail}
-          envList={wallEnvs}
+          envList={envList}
           setView={setView}
           openWall={() => setWallOpen(true)}
           panelHidden={panelHidden}

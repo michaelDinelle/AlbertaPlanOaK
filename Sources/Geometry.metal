@@ -5,6 +5,9 @@ constant uint OAK_THREADGROUP_LANES = 4u;
 static_assert(OAK_THREADGROUP_LANES > 0u && OAK_THREADGROUP_LANES <= OAK_SIMD_WIDTH
               && (OAK_THREADGROUP_LANES & (OAK_THREADGROUP_LANES - 1u)) == 0u,
               "packed environment steps must fit one wave");
+constant uint OAK_WIDE_LANE_SIMDGROUPS = 2u;
+static_assert(OAK_WIDE_LANE_SIMDGROUPS * OAK_THREADGROUP_LANES * OAK_SIMD_WIDTH <= 1024u,
+              "a wide threadgroup of acting and planning waves must fit the device threadgroup limit");
 
 constant uint OAK_CANDIDATES_PER_SLOT = 7u;
 constant uint OAK_CONSTRUCTED_PER_PERCEPT = 2u;

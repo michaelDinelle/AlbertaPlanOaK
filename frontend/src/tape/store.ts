@@ -1,7 +1,6 @@
 import { useMemo, useSyncExternalStore } from 'react';
 import type { EnvScheduleEntry } from '../data/types';
 import { fetchSeries } from '../data/oak';
-import { RUN_POLL_MS } from '../data/queries';
 import {
   buildSeedRows,
   cumulativeReward,
@@ -37,14 +36,7 @@ export type DeriveSpec =
       envSchedule: EnvScheduleEntry[];
       seeds: number[];
       steps: number;
-      recorded: number[];
     };
-
-export interface TapeProgress {
-  rows: number;
-  lastStep: number;
-  windowSteps: number;
-}
 
 export const TAPE_COLUMNS = ['rewardSum', 'rho', 'deathStep', 'deathDetector'] as const;
 
@@ -90,11 +82,6 @@ function rebuildTape(cache: SeriesCache): void {
       return c;
     },
   };
-  recordProgress(cache.runId, {
-    rows,
-    lastStep: cache.ends[rows - 1] ?? 0,
-    windowSteps: rows > 1 ? (cache.ends[rows - 1] ?? 0) - (cache.ends[rows - 2] ?? 0) : cache.ends[0] ?? 1,
-  });
 }
 
 function load(cache: SeriesCache): Promise<void> {
@@ -151,7 +138,6 @@ function derive(tape: Tape, spec: DeriveSpec): DeriveResults[DeriveMode] {
         tape,
         { envSchedule: spec.envSchedule, seeds: spec.seeds, steps: spec.steps },
         spec.envId,
-        new Set(spec.recorded),
       );
   }
 }
@@ -218,50 +204,8 @@ export function refreshRun(runId: string): void {
   }
 }
 
-interface RunProgress {
-  progress: TapeProgress | null;
-  listeners: Set<() => void>;
-}
-
-const progressByRun = new Map<string, RunProgress>();
-
-function runProgressSlot(runId: string): RunProgress {
-  let slot = progressByRun.get(runId);
-  if (slot === undefined) {
-    slot = { progress: null, listeners: new Set() };
-    progressByRun.set(runId, slot);
-  }
-  return slot;
-}
-
-function recordProgress(runId: string, progress: TapeProgress): void {
-  const slot = runProgressSlot(runId);
-  if (slot.progress !== null && slot.progress.rows === progress.rows) return;
-  slot.progress = progress;
-  for (const listener of slot.listeners) listener();
-}
-
-export function tapeProgress(runId: string): TapeProgress | null {
-  return progressByRun.get(runId)?.progress ?? null;
-}
-
-export function subscribeProgress(runId: string, listener: () => void): () => void {
-  const slot = runProgressSlot(runId);
-  slot.listeners.add(listener);
-  return () => {
-    slot.listeners.delete(listener);
-  };
-}
-
-const polls = new Map<string, ReturnType<typeof setInterval>>();
-
-export function setLive(runId: string, live: boolean): void {
-  if (live === polls.has(runId)) return;
-  if (live) polls.set(runId, setInterval(() => void load(cacheFor(runId)), RUN_POLL_MS));
-  else {
-    clearInterval(polls.get(runId));
-    polls.delete(runId);
-  }
+export function reloadTape(runId: string): void {
+  void load(cacheFor(runId));
 }
 
 const noopSubscribe = (): (() => void) => () => {};
@@ -277,12 +221,4 @@ export function useTapeSnapshot<M extends DeriveMode>(
     return (listener: () => void) => subscribeSnapshot(runId, envId, mode, spec, listener);
   }, [runId, envId, mode, spec]);
   return useSyncExternalStore(subscribe, () => (runId === null ? null : snapshot(runId, envId, mode)));
-}
-
-export function useTapeProgress(runId: string | null): TapeProgress | null {
-  const subscribe = useMemo(() => {
-    if (runId === null) return noopSubscribe;
-    return (listener: () => void) => subscribeProgress(runId, listener);
-  }, [runId]);
-  return useSyncExternalStore(subscribe, () => (runId === null ? null : tapeProgress(runId)));
 }

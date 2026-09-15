@@ -10,7 +10,6 @@ import {
   Pause,
   Play,
   ScanEye,
-  Scissors,
 } from 'lucide-react';
 import type { Policy, RunDetail, RunIndexEntry } from '../data/types';
 import { Panel } from '../glass/Panel';
@@ -83,7 +82,6 @@ export function PolicySwitch({
   entries: readonly RunIndexEntry[] | undefined;
 }) {
   const sel = useSelection();
-  const transport = useTransport();
   const labelOf = (policy: Policy): string | null => {
     const id = policy === 'oak' ? runs.oak?.id : runs.oak?.baselines[policy];
     return id === undefined ? null : runLabelFor(id, entries, runs[policy]);
@@ -120,10 +118,6 @@ export function PolicySwitch({
           </Hotkey>
         );
       })}
-      <Divider />
-      <BarButton on={transport.slice} title={transport.slice ? STR.bar.sliceOff : STR.bar.slice} onClick={() => setTransport({ slice: !transport.slice })}>
-        <Scissors size={14} />
-      </BarButton>
     </Panel>
   );
 }

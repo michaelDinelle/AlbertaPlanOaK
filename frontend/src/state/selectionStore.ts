@@ -23,7 +23,7 @@ export interface SelectionState {
   debug: boolean;
 }
 
-const store = createStore<SelectionState>('selection', {
+const store = createStore<SelectionState>({
   runId: null,
   envId: null,
   policy: 'oak',
@@ -86,9 +86,9 @@ export function selectPolicy(policy: Policy): void {
   navigate({ policy, at: at ?? 0 });
 }
 
-export function electLeader(leader: HeroSelection['leader'], recorded: readonly number[]): void {
+export function electLeader(leader: HeroSelection['leader'], seeds: readonly number[]): void {
   const state = store.get(), previous = state.selection;
-  const promoted = previous.promoted !== null && recorded.includes(previous.promoted) ? previous.promoted : null;
+  const promoted = previous.promoted !== null && seeds.includes(previous.promoted) ? previous.promoted : null;
   const next = { leader, promoted };
   if (leader?.seed === previous.leader?.seed && leader?.step === previous.leader?.step && promoted === previous.promoted) return;
   const changed = promoted === null && heroSeed(next) !== heroSeed(previous);
@@ -97,8 +97,8 @@ export function electLeader(leader: HeroSelection['leader'], recorded: readonly 
   if (changed || promoted !== previous.promoted) navigate({ seed: promoted, at: at ?? 0 });
 }
 
-export function promote(seed: number, playable: (seed: number) => boolean): void {
-  const next = promoteSeed(store.get().selection, seed, playable);
+export function promote(seed: number): void {
+  const next = promoteSeed(store.get().selection, seed);
   if (next === store.get().selection) return;
   const at = clockStep();
   store.patch({ selection: next, pendingSeekStep: at });
