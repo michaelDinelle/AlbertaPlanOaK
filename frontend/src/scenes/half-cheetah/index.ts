@@ -1,7 +1,7 @@
 import { Matrix4 } from 'three';
 import { defaultFkToWorld, type GroundTruthOptions } from '@kit/debug';
 import { type OrbitRigOptions } from '@kit/rigs';
-import { makeSceneView, type SceneView } from '@kit/view';
+import { makeSceneView, trackPose, type SceneView } from '@kit/view';
 import { StageScene, type Stage } from '@kit/stage';
 import type { FrameUpdate, SceneContext, SceneFactory } from '@kit/types';
 import { FK_FLOATS, FK_POINT_INDEX } from '@sim/fk/cheetah';
@@ -67,9 +67,9 @@ class AlbertaPrairieScene extends StageScene<WorldHandle> {
     for (let i = 0; i < this.renderPose.length; i++) this.renderPose[i] = frame.state.pose[i] ?? 0;
     this.applyPose(this.renderPose);
     world.setTime(time);
-    const rootX = this.fkOut[FK_POINT_INDEX.o1 * 2] ?? 0;
+    const followX = trackPose(frame, 0);
     if (this.view) {
-      const coverage = this.view.update(rig, frame.dtReal, [rootX, TRACK_Y, 0]);
+      const coverage = this.view.update(rig, frame.dtReal, [followX, TRACK_Y, 0]);
       this.camera.position.y = Math.max(this.camera.position.y, prairieHeight(this.camera.position.x, this.camera.position.z) + 1.2);
       this.camera.lookAt(rig.target);
       this.camera.far = coverage.far = Math.max(coverage.far, 5000);

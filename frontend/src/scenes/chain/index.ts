@@ -6,7 +6,7 @@ import { StageScene, type Stage } from '@kit/stage';
 import type { FrameUpdate, SceneContext, SceneFactory } from '@kit/types';
 import type { GridGeometry } from '@sim/types';
 import { CHAIN_L, CHAIN_POS } from '@sim/envs/chain';
-import { makeSceneView, type SceneView } from '@kit/view';
+import { makeSceneView, trackPose, type SceneView } from '@kit/view';
 import { buildCrossing, buildRover, chainX, deckHeight } from './actors';
 import { buildWorld, type WorldHandle } from './world';
 
@@ -16,9 +16,6 @@ class RiverCrossingScene extends StageScene<WorldHandle> {
   private rover: ReturnType<typeof buildRover> | null = null;
   private crossing: ReturnType<typeof buildCrossing> | null = null;
   private grid!: GridGeometry;
-  private position = -1;
-  private origin = 0;
-  private movedAt = 0;
   private goalAt = -Infinity;
   private readonly goal = new THREE.Vector3();
   private readonly cell = { x: 0, y: 0 };
@@ -53,36 +50,24 @@ class RiverCrossingScene extends StageScene<WorldHandle> {
   }
 
   protected tick(frame: FrameUpdate, { world, pool, rig, time }: Stage<WorldHandle>): void {
-    const rover = this.rover!, position = Math.round(frame.state.pose[CHAIN_POS]!);
+    const rover = this.rover!, position = trackPose(frame, CHAIN_POS);
     let achievedAt: number | null = null;
-    const teleport = frame.events.some(event => event.type === 'teleport');
     pool.update(frame.dtReal, time);
-    if (frame.scrubbed || teleport || this.position < 0) {
-      rover.setPosition(chainX(position, this.grid), true);
-      this.position = position;
-      this.origin = rover.position.x;
-      this.movedAt = time;
-      if (frame.scrubbed) {
-        pool.clear(); this.goalAt = -Infinity;
-        const log = frame.eventLog;
-        let low = 0, high = log.count;
-        while (low < high) {
-          const mid = (low + high) >>> 1;
-          if (log.steps[mid]! <= frame.state.step) low = mid + 1;
-          else high = mid;
-        }
-        for (let i = low - 1; i >= 0; i--) if (log.types[log.kinds[i]!] === 'goal') {
-          achievedAt = (log.steps[i]! + 1) * frame.state.simTime / frame.state.step;
-          break;
-        }
+    rover.setPosition(chainX(position, this.grid), frame.scrubbed);
+    if (frame.scrubbed) {
+      pool.clear(); this.goalAt = -Infinity;
+      const log = frame.eventLog;
+      let low = 0, high = log.count;
+      while (low < high) {
+        const mid = (low + high) >>> 1;
+        if (log.steps[mid]! <= frame.state.step) low = mid + 1;
+        else high = mid;
       }
-    } else if (position !== this.position) {
-      this.origin = rover.position.x;
-      this.position = position;
-      this.movedAt = time;
+      for (let i = low - 1; i >= 0; i--) if (log.types[log.kinds[i]!] === 'goal') {
+        achievedAt = (log.steps[i]! + 1) * frame.state.simTime / frame.state.step;
+        break;
+      }
     }
-    const blend = THREE.MathUtils.smoothstep(time - this.movedAt, 0, 0.11);
-    rover.setPosition(THREE.MathUtils.lerp(this.origin, chainX(position, this.grid), blend), frame.scrubbed || teleport);
     for (const event of frame.events) if (event.type === 'goal') achievedAt = time;
     if (achievedAt !== null) {
       this.goalAt = achievedAt;
@@ -90,7 +75,7 @@ class RiverCrossingScene extends StageScene<WorldHandle> {
       pool.pulse.fire(Math.max(0, 0.16 - (time - achievedAt) / PULSE_SECONDS));
       pool.update(0, time);
     }
-    this.crossing!.setState(position, Math.exp(-(time - this.goalAt) / 1.4));
+    this.crossing!.setState(Math.round(position), Math.exp(-(time - this.goalAt) / 1.4));
     world.setTime(time);
     world.setView(this.view!.update(rig, frame.dtReal), this.camera);
   }

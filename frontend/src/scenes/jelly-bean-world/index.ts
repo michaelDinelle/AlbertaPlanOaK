@@ -8,13 +8,12 @@ import { buildForager } from './actors';
 import { CollectionLog } from './collectionlog';
 import { scentAtCell } from './fieldmath';
 import { buildWorld, type ParklandWorld } from './world';
-import { makeSceneView, type SceneView } from '@kit/view';
+import { makeSceneView, trackPose, type SceneView } from '@kit/view';
 
 class WinterCandyScene extends StageScene<ParklandWorld> {
   protected readonly stageName = 'winterCandyLand';
   private readonly collections = new CollectionLog();
   private readonly position = new THREE.Vector3();
-  private readonly previous = new THREE.Vector3();
   private readonly groundNormal = new THREE.Vector3();
   private readonly groundTilt = new THREE.Quaternion();
   private readonly eventPosition = new THREE.Vector3();
@@ -23,7 +22,6 @@ class WinterCandyScene extends StageScene<ParklandWorld> {
   private robot!: ReturnType<typeof buildForager>;
   private x = NaN;
   private y = NaN;
-  private movedAt = 0;
   private heading = 0;
   private sensorStep = -1;
 
@@ -42,14 +40,8 @@ class WinterCandyScene extends StageScene<ParklandWorld> {
     const step = frame.state.step, x = Math.round(frame.state.pose[JBW_X]!), y = Math.round(frame.state.pose[JBW_Y]!);
     const heading = Math.round(frame.state.pose[JBW_HEADING]!) & 3;
     if (this.collections.sync(frame.eventLog)) world.scent.sync(this.collections.log, this.collections.version);
-    if (x !== this.x || y !== this.y || frame.scrubbed) {
-      this.previous.copy(this.position); this.x = x; this.y = y; this.movedAt = time;
-      if (frame.scrubbed || !Number.isFinite(this.previous.x) || this.sensorStep < 0) {
-        this.previous.set(x, world.heightAt(x, y), y); this.movedAt = -Infinity;
-      }
-    }
-    const blend = THREE.MathUtils.smoothstep(time - this.movedAt, 0, 0.11);
-    this.position.copy(this.previous).lerp(this.eventPosition.set(x, world.heightAt(x, y), y), blend);
+    this.x = x; this.y = y;
+    this.position.set(trackPose(frame, JBW_X), 0, trackPose(frame, JBW_Y));
     this.position.y = world.heightAt(this.position.x, this.position.z);
     const travel = frame.scrubbed ? 0 : this.robot.group.position.distanceTo(this.position);
     this.robot.group.position.copy(this.position);

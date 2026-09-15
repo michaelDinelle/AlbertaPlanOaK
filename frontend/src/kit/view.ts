@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { oakUniforms } from './materials';
 import { DEFAULT_ORBIT_LIMITS, type OrbitRig, type OrbitRigOptions, type OrbitState } from './rigs';
 import { makeTileBank, type TileBankOptions } from './tiles';
-import type { SceneContext, SceneSize } from './types';
+import type { FrameUpdate, SceneContext, SceneSize } from './types';
 
 export type ViewAnchor = readonly [number, number, number];
 
@@ -48,7 +48,6 @@ export function makeSceneView(
     polar: composition.polar,
     target: anchor,
     distance: composition.distance,
-    follow: 0,
     limits: { maxDistance: Math.max(composition.distance, Math.min(DEFAULT_ORBIT_LIMITS.maxDistance, composition.distance * 4)), maxPolar: Math.max(DEFAULT_ORBIT_LIMITS.maxPolar, composition.polar) },
   };
   return {
@@ -87,6 +86,23 @@ export function makeSceneView(
       rig.resize(aspect);
     },
   };
+}
+
+const TRACK_SECONDS = 0.5;
+
+export function trackPose(frame: FrameUpdate, slot: number): number {
+  const half = Math.ceil(TRACK_SECONDS * frame.controlHz);
+  const centre = Math.floor(frame.position);
+  let lo = centre - half, hi = centre + half + 1;
+  for (let i = centre + 1; i <= hi; i++) if (frame.frameAt(i).done !== 0) { hi = i - 1; break; }
+  for (let i = centre; i > lo; i--) if (frame.frameAt(i).done !== 0) { lo = i; break; }
+  let sum = 0, weight = 0;
+  for (let i = centre - half; i <= centre + half + 1; i++) {
+    const w = 1 + Math.cos(Math.PI * Math.min(1, Math.abs(i - frame.position) / (half + 1)));
+    sum += w * (frame.frameAt(Math.min(hi, Math.max(lo, i))).pose[slot] ?? 0);
+    weight += w;
+  }
+  return sum / weight;
 }
 
 export interface ContinuousSurfaceOptions {

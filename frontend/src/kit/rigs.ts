@@ -86,7 +86,6 @@ export interface OrbitRigOptions extends BaseCameraOptions {
   damping?: number;
   rotateSpeed?: number;
   zoomSpeed?: number;
-  follow?: number;
 }
 
 export interface OrbitRig extends RigHandle {
@@ -100,7 +99,6 @@ export interface OrbitRig extends RigHandle {
   pan(dx: number, dy: number): void;
   setDesired(azimuth: number, polar: number, distance: number): void;
   setTarget(x: number, y: number, z: number): void;
-  follow(x: number, y: number, z: number): void;
 }
 
 export function orbitFromPose(
@@ -134,15 +132,12 @@ export function makeOrbitRig(opts: OrbitRigOptions = {}): OrbitRig {
   const rate = opts.damping ?? 5;
   const rotateSpeed = opts.rotateSpeed ?? 0.004;
   const zoomSpeed = opts.zoomSpeed ?? 0.0012;
-  const followRate = opts.follow ?? 0;
   const scratch = new THREE.Vector3();
   const panOffset = new THREE.Vector3();
-  const followTarget = new THREE.Vector3(...(opts.target ?? [0, 0, 0]));
   const anchor = new THREE.Vector3(...(opts.target ?? [0, 0, 0]));
   const right = new THREE.Vector3();
   const up = new THREE.Vector3();
   const forward = new THREE.Vector3();
-  let followPrimed = followRate <= 0;
 
   const apply = (): void => {
     target.copy(anchor).add(panOffset);
@@ -235,13 +230,6 @@ export function makeOrbitRig(opts: OrbitRigOptions = {}): OrbitRig {
       const k = PAN_SPEED * state.distance;
       panOffset.addScaledVector(right, dx * k).addScaledVector(up, dy * k);
     },
-    follow(x, y, z) {
-      followTarget.set(x, y, z);
-      if (!followPrimed) {
-        anchor.copy(followTarget);
-        followPrimed = true;
-      }
-    },
     setDesired(azimuth, polar, distance) {
       desired.azimuth = azimuth;
       desired.polar = polar;
@@ -250,11 +238,9 @@ export function makeOrbitRig(opts: OrbitRigOptions = {}): OrbitRig {
     },
     setTarget(x, y, z) {
       anchor.set(x, y, z);
-      followTarget.set(x, y, z);
     },
     update(dt) {
       const k = damp(rate, dt);
-      if (followRate > 0) anchor.lerp(followTarget, damp(followRate, dt));
       state.azimuth += (desired.azimuth - state.azimuth) * k;
       state.polar += (desired.polar - state.polar) * k;
       state.distance += (desired.distance - state.distance) * k;
@@ -269,7 +255,6 @@ export function makeOrbitRig(opts: OrbitRigOptions = {}): OrbitRig {
       state.azimuth = desired.azimuth;
       state.polar = desired.polar;
       state.distance = desired.distance;
-      if (followRate > 0) anchor.copy(followTarget);
       apply();
     },
     dispose() {

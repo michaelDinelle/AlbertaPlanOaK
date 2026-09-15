@@ -118,7 +118,7 @@ export function mountStage(container: HTMLElement): Stage {
   const state = frameState();
   const previous = frameState();
   const events: SimEvent[] = [];
-  const update: FrameUpdate = { state, prev: null, events, eventLog: EMPTY_EVENT_STREAM, dtReal: 0, scrubbed: true };
+  const update: FrameUpdate = { state, prev: null, events, eventLog: EMPTY_EVENT_STREAM, dtReal: 0, scrubbed: true, position: 0, controlHz: 1, frameAt: () => ({ pose: state.pose, done: 0, step: 0 }) };
   const frame: Frame = { step: -1, simTime: 0 };
 
   const sizeOf = (): SceneSize => ({
@@ -228,6 +228,9 @@ export function mountStage(container: HTMLElement): Stage {
     update.eventLog = source.events;
     update.dtReal = dt;
     update.scrubbed = !sequential;
+    update.position = Math.min(lastFrame(), Math.max(0, position));
+    update.controlHz = source.controlHz;
+    update.frameAt = (i) => source.frameAt(Math.min(lastFrame(), Math.max(0, i)));
     lastIndex = index;
     hasPrevious = true;
     scene.update(update);
