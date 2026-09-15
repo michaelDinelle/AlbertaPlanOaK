@@ -22,11 +22,10 @@ struct LaneSnapshot {
   var rewardSum, rho: Float
   var deathStep, deathDetector: UInt32
 }
-let fleetLaneStride = 44
+let fleetLaneStride = 36
 
 enum OakConst: Int {
   case specObsDim = 0
-  case specActionParams = 1
   case specEnvKind = 2
   case megaG = 3
   case megaStageMask = 4
@@ -38,39 +37,12 @@ enum OakBuf: Int {
   case aux0 = 9
   case aux1 = 10
   case aux2 = 11
-  case ppoAccum = 12
-  case ppoRecord = 13
 }
 
 enum Ppo {
   static let hidden = 64
-  static let gram = hidden * hidden
-  static let accumFloats = gram + 2 * hidden
   static func params(obsMax: Int, actMax: Int) -> Int {
     (2 * obsMax * hidden + 2 * hidden + hidden * actMax + 2 * actMax + hidden + 1 + 3) & ~3
-  }
-  static func recordFloats(_ params: Int) -> Int { 2 * hidden + 2 + params + gram }
-}
-
-struct BenchmarkRequest {
-  let policy: String
-  let seeds: [Int]
-  let steps: Int
-  let envs: String
-  let root: URL
-
-  init(json: Data) throws {
-    guard let obj = try JSONSerialization.jsonObject(with: json) as? [String: Any] else {
-      throw err("benchmark request is not an object")
-    }
-    guard let policy = obj["policy"] as? String, let seeds = obj["seeds"] as? [Int],
-      let steps = obj["steps"] as? Int, let envs = obj["envs"] as? String, let root = obj["root"] as? String
-    else { throw err("benchmark request needs policy, seeds, steps, envs, root") }
-    self.root = URL(fileURLWithPath: root, isDirectory: true)
-    self.policy = policy
-    self.seeds = seeds
-    self.steps = steps
-    self.envs = envs
   }
 }
 
@@ -83,26 +55,6 @@ func require(_ p: String, _ what: String) throws -> URL {
     throw err("Missing \(what). Run ./setup.sh first.")
   }
   return u
-}
-func requireFreshMetallib() throws -> URL {
-  let lib = try require(".build/OakKernel.metallib", "non-empty Metal library")
-  let fm = FileManager.default
-  let sourcesDir = root("Sources")
-  let sources = try fm.subpathsOfDirectory(atPath: sourcesDir.path)
-    .filter { $0.hasSuffix(".metal") }
-    .map { sourcesDir.appendingPathComponent($0) }
-  guard !sources.isEmpty else { throw err("No .metal sources under \(sourcesDir.path).") }
-  let libTime = try fm.attributesOfItem(atPath: lib.path)[.modificationDate] as? Date
-  let staleSource = try sources.first { src in
-    guard let libTime,
-      let srcTime = try fm.attributesOfItem(atPath: src.path)[.modificationDate] as? Date
-    else { return false }
-    return libTime < srcTime
-  }
-  if let staleSource {
-    throw err("Stale Metal library: \(staleSource.path) is newer than .build/OakKernel.metallib. Rebuild with `./setup.sh`.")
-  }
-  return lib
 }
 func presetName(_ lib: MTLLibrary) throws -> String {
   let markers = lib.functionNames.filter { $0.hasPrefix("oak_preset_") }
@@ -121,7 +73,7 @@ func sha256Hex(_ buf: UnsafeRawBufferPointer) -> String {
 }
 
 struct ShapeProbe {
-  var featureCount, optionCount, nursery, traceLevels, perceptCount: UInt32
+  var featureCount, optionCount, nursery, traceLevels, perceptCount, actionCount: UInt32
   var paramStride, stateStride, uintStride: UInt32
   var pOption, recordFloats, recordValue, recordPolicy: UInt32
   var stUtilOpt, stValueMeta, stOptionValueMeta, stModelMeta, stActorMeta: UInt32
@@ -163,11 +115,10 @@ func runProbe(_ queue: MTLCommandQueue, _ function: MTLFunction, _ buffers: [MTL
 }
 struct EnvSpec {
   static let poseLen = 9
-  static let stride = 12 + poseLen
+  static let stride = 9 + poseLen
   let nameHash: UInt32
   let naturalO: Int
   let actionCount: Int
-  let actionParams: Int
   let controlHz: Int
   let envStateWords: Int
   let mjIndex: Int
@@ -282,16 +233,14 @@ final class Engine {
     let constants = MTLFunctionConstantValues()
     var o32 = UInt32(spec.naturalO)
     constants.setConstantValue(&o32, type: .uint, index: OakConst.specObsDim.rawValue)
-    var d32 = UInt32(spec.actionParams)
-    constants.setConstantValue(&d32, type: .uint, index: OakConst.specActionParams.rawValue)
     var k32 = kind
     constants.setConstantValue(&k32, type: .uint, index: OakConst.specEnvKind.rawValue)
     return constants
   }
   static func runShapeProbe(_ queue: MTLCommandQueue, _ lib: MTLLibrary, _ spec: EnvSpec, kind: UInt32) throws -> ShapeProbe {
-    precondition(MemoryLayout<ShapeProbe>.stride == 108, "ShapeProbe layout drifted from OakShapeProbe")
+    precondition(MemoryLayout<ShapeProbe>.stride == 112, "ShapeProbe layout drifted from OakShapeProbe")
     let fn = try lib.makeFunction(name: "oak_shape_probe", constantValues: specConstants(spec, kind: kind))
-    let outB = sharedBuffer(queue.device, 108)
+    let outB = sharedBuffer(queue.device, 112)
     try runProbe(queue, fn, [outB])
     return outB.contents().bindMemory(to: ShapeProbe.self, capacity: 1).pointee
   }
@@ -308,11 +257,11 @@ final class Engine {
       let row = 5 + i * EnvSpec.stride
       return EnvSpec(
         nameHash: tbl[row], naturalO: Int(tbl[row + 1]),
-        actionCount: Int(tbl[row + 3]), actionParams: Int(tbl[row + 4]),
-        controlHz: Int(tbl[row + 7]), envStateWords: Int(tbl[row + 8]),
-        mjIndex: tbl[row + 9] == 0xffff_ffff ? -1 : Int(tbl[row + 9]),
-        slots: (0..<EnvSpec.poseLen).map { Int(tbl[row + 11 + $0]) },
-        persistentEntryWords: Int(tbl[row + 11 + EnvSpec.poseLen]))
+        actionCount: Int(tbl[row + 3]),
+        controlHz: Int(tbl[row + 4]), envStateWords: Int(tbl[row + 5]),
+        mjIndex: tbl[row + 6] == 0xffff_ffff ? -1 : Int(tbl[row + 6]),
+        slots: (0..<EnvSpec.poseLen).map { Int(tbl[row + 8 + $0]) },
+        persistentEntryWords: Int(tbl[row + 8 + EnvSpec.poseLen]))
     }
     guard tbl[1] == UInt32(specs.map(\.naturalO).max()!),
       tbl[2] == UInt32(specs.map(\.actionCount).max()!),
@@ -355,7 +304,7 @@ final class Engine {
         Int(sp.perceptCount) % Int(sp.simdWidth) == 0, "perception budget must tile the simd width")
       precondition(Int(sp.stateStride) % 4 == 0, "stateStride must stay 16B-aligned")
       let kd = Kind(
-        kind: r.kind, naturalO: spec.naturalO, d: spec.actionParams, count: r.count, firstLane: r.firstLane,
+        kind: r.kind, naturalO: spec.naturalO, d: Int(sp.actionCount), count: r.count, firstLane: r.firstLane,
         off: sp, paramBase: pBase, stateBase: sBase, uintBase: uBase)
       built.append(kd)
       pBase += r.count * Int(sp.paramStride)
@@ -550,7 +499,7 @@ final class RecordWriter: @unchecked Sendable {
     buf.append(contentsOf: repeatElement(0, count: (live + 7) / 8))
     for i in 0..<live where cell(i, 0) != 0 { buf[i >> 3] |= UInt8(1 << (i & 7)) }
 
-    var plans: [(varint: ColumnPlan, full: ColumnPlan, seed: UInt64?)] = []
+    var plans: [(plan: ColumnPlan, seed: UInt64?)] = []
     for f in fields {
       var q = [Int64](repeating: 0, count: live)
       var seed: UInt64? = nil
@@ -567,40 +516,24 @@ final class RecordWriter: @unchecked Sendable {
       } else {
         for i in 0..<live { q[i] = quantized(i, f)! }
       }
-      let (varint, full) = Self.encodeColumn(q)
-      plans.append((varint, full, seed))
+      plans.append((Self.encodeColumn(q), seed))
     }
-    func assemble(_ pick: (ColumnPlan, ColumnPlan, UInt64?) -> ColumnPlan) -> [UInt8] {
-      var out = buf
-      for plan in plans {
-        let chosen = pick(plan.varint, plan.full, plan.seed)
-        out.append(UInt8(chosen.pred | (chosen.coder << 2)))
+    for plan in plans { buf.append(UInt8(plan.plan.pred | (plan.plan.coder << 2))) }
+    for plan in plans {
+      if let seed = plan.seed {
+        withUnsafeBytes(of: seed.littleEndian) { buf.append(contentsOf: $0) }
       }
-      for plan in plans {
-        let chosen = pick(plan.varint, plan.full, plan.seed)
-        if let seed = plan.seed {
-          withUnsafeBytes(of: seed.littleEndian) { out.append(contentsOf: $0) }
-        }
-        out.append(contentsOf: chosen.bytes)
-      }
-      return out
+      buf.append(contentsOf: plan.plan.bytes)
     }
-    let payloadA = Data(assemble { varint, _, _ in varint })
-    let payloadB = Data(assemble { _, full, _ in full })
-    let compA = try (payloadA as NSData).compressed(using: .zlib) as Data
-    let compB = try (payloadB as NSData).compressed(using: .zlib) as Data
-    let optionA: (payload: Data, stored: Data, flags: UInt32) = (
-      payloadA, compA.count < payloadA.count ? compA : payloadA,
-      compA.count < payloadA.count ? 1 << 31 : 0)
-    let optionB: (payload: Data, stored: Data, flags: UInt32) = (
-      payloadB, compB.count < payloadB.count ? compB : payloadB,
-      compB.count < payloadB.count ? 1 << 31 : 0)
-    let pick = optionB.stored.count < optionA.stored.count ? optionB : optionA
-    var out = Data(capacity: 20 + pick.stored.count)
+    let payload = Data(buf)
+    let comp = try (payload as NSData).compressed(using: .zlib) as Data
+    let stored = comp.count < payload.count ? comp : payload
+    var out = Data(capacity: 20 + stored.count)
     for v: UInt32 in [
-      Self.chunkMagic, UInt32(live), UInt32(pick.payload.count), UInt32(pick.stored.count), pick.flags,
+      Self.chunkMagic, UInt32(live), UInt32(payload.count), UInt32(stored.count),
+      comp.count < payload.count ? 1 << 31 : 0,
     ] { out.appendLE(v) }
-    out.append(pick.stored)
+    out.append(stored)
     return out
   }
 
@@ -715,7 +648,7 @@ final class RecordWriter: @unchecked Sendable {
 
   typealias ColumnPlan = (pred: UInt32, coder: UInt32, bytes: [UInt8])
 
-  static func encodeColumn(_ q: [Int64]) -> (varint: ColumnPlan, full: ColumnPlan) {
+  static func encodeColumn(_ q: [Int64]) -> ColumnPlan {
     var d1 = q
     for i in stride(from: q.count - 1, through: 1, by: -1) { d1[i] &-= d1[i - 1] }
     var d2 = d1
@@ -728,16 +661,10 @@ final class RecordWriter: @unchecked Sendable {
       }
       candidates.append((2, extra, lpc.res))
     }
-    var bestVarint: (plan: ColumnPlan, size: Int)? = nil
     var best: (plan: ColumnPlan, size: Int)? = nil
     for cand in candidates {
       let vs = cand.extra.count + varintSize(cand.res)
-      if bestVarint == nil || vs < bestVarint!.size {
-        var b = cand.extra
-        for v in cand.res { putVarint(&b, v) }
-        if cand.pred < 2 { bestVarint = ((cand.pred, 0, b), vs) }
-        if best == nil || vs < best!.size { best = ((cand.pred, 0, b), vs) }
-      } else if best == nil || vs < best!.size {
+      if best == nil || vs < best!.size {
         var b = cand.extra
         for v in cand.res { putVarint(&b, v) }
         best = ((cand.pred, 0, b), vs)
@@ -750,7 +677,7 @@ final class RecordWriter: @unchecked Sendable {
         }
       }
     }
-    return (bestVarint!.plan, best!.plan)
+    return best!.plan
   }
 }
 
@@ -758,13 +685,29 @@ final class RecordWriter: @unchecked Sendable {
   static func main() {
     _ = pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0)
     do {
-      guard CommandLine.arguments.count == 1 else { throw err("Run `OaK` with no arguments.") }
-      let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
-      let port = UInt16(ProcessInfo.processInfo.environment["OAK_PORT"] ?? "") ?? 5174
-      try Daemon(
-        bench: cwd.appendingPathComponent(".oak-benchmarks", isDirectory: true),
-        dist: cwd.appendingPathComponent("frontend/dist", isDirectory: true), port: port
-      ).run()
+      let args = CommandLine.arguments
+      guard args.count == 4 else { throw err("Usage: OaK oak|ppo|random <steps> <root>") }
+      let policy = args[1]
+      guard ["oak", "ppo", "random"].contains(policy), let steps = Int(args[2]), steps > 0 else {
+        throw err("Usage: OaK oak|ppo|random <steps> <root>")
+      }
+      let root = URL(fileURLWithPath: args[3], isDirectory: true)
+      guard !FileManager.default.fileExists(atPath: root.path) else {
+        throw err("\(root.path) exists; refusing to write beside existing data.")
+      }
+      try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+      let seeds = schedule.flatMap { $0.seedStart..<($0.seedStart + seedsPerEnv) }
+      let laneEnvs = schedule.flatMap { Array(repeating: $0.envId, count: seedsPerEnv) }
+      pendingMeta = [
+        "batch": seeds.count, "seeds": seeds, "steps": steps, "policy": policy,
+        "startedAt": ISO8601DateFormatter().string(from: Date()),
+        "envSchedule": schedule.map {
+          ["envId": $0.envId, "seedStart": $0.seedStart, "seedEnd": $0.seedStart + seedsPerEnv - 1] as [String: Any]
+        },
+      ]
+      fputs("OaK fleet: policy=\(policy) B=\(seeds.count) lanes × \(steps) steps (dir=\(root.path))\n", stderr)
+      try fleetGPU(policy, seeds, steps, root, laneEnvs)
+      print(String(format: "%.0f steps/s", pendingMeta["stepsPerSecond"] as! Double))
     } catch {
       fputs("\(error)\n", stderr)
       Foundation.exit(1)
@@ -780,7 +723,7 @@ final class RecordWriter: @unchecked Sendable {
         "envId": envId,
         "controlHz": spec.controlHz,
         "category": codec.category,
-        "fields": codec.fields.map { f in ["slot": f.idx, "wrap": f.wrap] as [String: Any] },
+        "fields": codec.fields.map { f in ["slot": f.idx, "wrap": f.wrap, "scale": f.scale, "anchor": f.anchor] as [String: Any] },
       ]
     }
     try JSONSerialization.data(
@@ -798,13 +741,15 @@ final class RecordWriter: @unchecked Sendable {
     let parts = "\(sysctlString("hw.model"))|\(dev.name)|\(ProcessInfo.processInfo.processorCount)"
     return String(sha256Hex(Array(parts.utf8).withUnsafeBytes { UnsafeRawBufferPointer($0) }).prefix(16))
   }
-  static let envIdsByKind: [String] = [
-    "HalfCheetah-v4", "FourRooms-cont-v0", "DeepSea-cont-v0", "KeyCorridor-cont-v0",
-    "Acrobot-cont-v0", "MountainCar-cont-v0", "Pendulum-cont-v0",
-    "Chain-cont-v0", "LargeDeepSea-cont-v0", "MultiKeyCorridor-cont-v0", "MemoryChain-cont-v0",
-    "ProceduralMaze-cont-v0", "HighDimMaze-cont-v0", "POMaze-cont-v0", "DelayedChain-cont-v0",
-    "JellyBeanWorld-cont-v0",
+  static let schedule: [(envId: String, seedStart: Int)] = [
+    ("HalfCheetah-v4", 0), ("FourRooms-cont-v0", 64), ("DeepSea-cont-v0", 128), ("KeyCorridor-cont-v0", 192),
+    ("Acrobot-cont-v0", 256), ("MountainCar-cont-v0", 320), ("Pendulum-cont-v0", 448), ("Chain-cont-v0", 512),
+    ("LargeDeepSea-cont-v0", 576), ("MultiKeyCorridor-cont-v0", 640), ("MemoryChain-cont-v0", 704),
+    ("ProceduralMaze-cont-v0", 768), ("HighDimMaze-cont-v0", 832), ("POMaze-cont-v0", 896),
+    ("DelayedChain-cont-v0", 960), ("JellyBeanWorld-cont-v0", 1024),
   ]
+  static let seedsPerEnv = 64
+  static var envIdsByKind: [String] { schedule.map(\.envId) }
   static func fnv1a(_ s: String) -> UInt32 {
     var h: UInt32 = 0x811c_9dc5
     for b in Array(s.utf8) { h = (h ^ UInt32(b)) &* 16_777_619 }
@@ -1014,8 +959,7 @@ final class RecordWriter: @unchecked Sendable {
     )
   }
   static func fleetGPU(
-    _ policy: String, _ seeds: [Int], _ steps: Int, _ root: URL, _ laneEnvs: [String],
-    onWindow: @escaping (Int) -> Void
+    _ policy: String, _ seeds: [Int], _ steps: Int, _ root: URL, _ laneEnvs: [String]
   ) throws {
     guard laneEnvs.count == seeds.count else {
       throw err("laneEnvs (\(laneEnvs.count)) must match seed count (\(seeds.count)).")
@@ -1023,7 +967,7 @@ final class RecordWriter: @unchecked Sendable {
     let laneEnvKinds = try laneEnvs.map(envKind)
     let e = ProcessInfo.processInfo.environment
     guard let dev = MTLCreateSystemDefaultDevice() else { throw err("Metal unavailable.") }
-    let lib = try dev.makeLibrary(URL: try requireFreshMetallib())
+    let lib = try dev.makeLibrary(URL: try require(".build/OakKernel.metallib", "Metal library"))
     let preset = try presetName(lib)
     Self.pendingMeta["preset"] = preset
     fputs("OaK preset: \(preset)\n", stderr)
@@ -1057,7 +1001,7 @@ final class RecordWriter: @unchecked Sendable {
       pipes = try baselinePipes(policy, lib, dev, bufs, envTable, laneEnvKinds, e)
     }
     let gpuSeconds = try runFleetLoop(
-      q, bufs, pipes, steps: steps, root: root, laneEnvKinds: laneEnvKinds, onWindow: onWindow)
+      q, bufs, pipes, steps: steps, root: root, laneEnvKinds: laneEnvKinds)
     Self.pendingMeta["stepsPerSecond"] = gpuSeconds > 0
       ? Double(steps) * Double(seeds.count) / gpuSeconds : 0
     Self.pendingMeta["finishedAt"] = ISO8601DateFormatter().string(from: Date())
@@ -1101,8 +1045,6 @@ final class RecordWriter: @unchecked Sendable {
     let snapPipe = try pipeline(isPpo ? "ppo_fleet_snapshot" : "baseline_fleet_snapshot")
     let B = bufs.B
     let ppoBufs: [MTLBuffer]
-    let ppoAccum: MTLBuffer
-    let ppoRecord: MTLBuffer
     if isPpo {
       guard stepPipe.maxTotalThreadsPerThreadgroup >= 32 else {
         throw err("ppo_megastep supports only \(stepPipe.maxTotalThreadsPerThreadgroup) threads/threadgroup.")
@@ -1114,14 +1056,8 @@ final class RecordWriter: @unchecked Sendable {
         sharedBuffer(dev, B * ppoScratchStride * 4),
         sharedBuffer(dev, B * ppoStateStride * 4),
       ]
-      ppoAccum = sharedBuffer(dev, B * Ppo.accumFloats * 4)
-      ppoRecord = sharedBuffer(dev, 2 * B * Ppo.recordFloats(ppoParamStride) * 4)
-      memset(ppoAccum.contents(), 0, ppoAccum.length)
-      memset(ppoRecord.contents(), 0, ppoRecord.length)
     } else {
       ppoBufs = []
-      ppoAccum = sharedBuffer(dev, 16)
-      ppoRecord = sharedBuffer(dev, 16)
     }
     let laneTG = mtlSize(min(
       64, initPipe.maxTotalThreadsPerThreadgroup, stepPipe.maxTotalThreadsPerThreadgroup,
@@ -1142,7 +1078,6 @@ final class RecordWriter: @unchecked Sendable {
         enc.setBuffer(bufs.recordBuf, offset: 0, index: OakBuf.aux1.rawValue)
         var span = SIMD3<UInt32>(UInt32(n), UInt32(base), 0)
         enc.setBytes(&span, length: MemoryLayout<SIMD3<UInt32>>.stride, index: OakBuf.aux2.rawValue)
-        if isPpo { enc.setBuffer(ppoAccum, offset: 0, index: OakBuf.ppoAccum.rawValue) }
         enc.dispatchThreads(mtlSize(stepThreads), threadsPerThreadgroup: stepTG)
         enc.memoryBarrier(scope: [.buffers])
         enc.endEncoding()
@@ -1152,31 +1087,22 @@ final class RecordWriter: @unchecked Sendable {
         enc.setBuffer(bufs.snapBuf, offset: 0, index: OakBuf.aux0.rawValue)
         var snapBase = UInt32(half * B)
         enc.setBytes(&snapBase, length: 4, index: OakBuf.aux1.rawValue)
-        if isPpo {
-          enc.setBuffer(ppoAccum, offset: 0, index: OakBuf.ppoAccum.rawValue)
-          enc.setBuffer(ppoRecord, offset: 0, index: OakBuf.ppoRecord.rawValue)
-        }
         enc.dispatchThreads(mtlSize(B), threadsPerThreadgroup: laneTG)
       }
     )
   }
   static func runFleetLoop(
     _ q: MTLCommandQueue, _ bufs: FleetBuffers, _ pipes: FleetPipes,
-    steps: Int, root: URL, laneEnvKinds: [UInt32], onWindow: @escaping (Int) -> Void
+    steps: Int, root: URL, laneEnvKinds: [UInt32]
   ) throws -> Double {
-    let e = ProcessInfo.processInfo.environment
     let B = bufs.B
     pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0)
-    let runWriter = try RunWriter(root: root, laneCount: B, steps: steps, laneEnvKinds: laneEnvKinds)
-    let maxChunkSteps = bufs.maxChunkSteps
+    let runWriter = try RunWriter(root: root, laneEnvKinds: laneEnvKinds)
     let windowSteps = bufs.windowSteps
     let recordCapacity = bufs.recordCapacity
     let staging = UnsafeMutablePointer<Float>.allocate(capacity: windowSteps * recordFloats * B)
     let snapPtr = bufs.snapBuf.contents().bindMemory(to: LaneSnapshot.self, capacity: 2 * B)
-    defer {
-      try? runWriter.close()
-      staging.deallocate()
-    }
+    defer { staging.deallocate() }
     guard let initCb = q.makeCommandBuffer(), let initEnc = initCb.makeComputeCommandEncoder() else {
       throw err("Failed to encode Metal command.")
     }
@@ -1246,7 +1172,7 @@ final class RecordWriter: @unchecked Sendable {
     func writeWindow(half: Int, stepStart: Int, step: Int) throws {
       latchDeaths(half: half, step: step)
       let t0 = DispatchTime.now().uptimeNanoseconds
-      let before = runWriter.payload.bytesWritten
+      let before = runWriter.bytesWritten
       try runWriter.writeWindow(
         stepStart: stepStart, stepCount: step - stepStart, wallSeconds: now(),
         snap: UnsafePointer(snapPtr + half * B), deadStep: st.deadStep,
@@ -1255,14 +1181,13 @@ final class RecordWriter: @unchecked Sendable {
       ) { st.error = $0 }
       if st.didFail, let e = st.error { throw e }
       let ms = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1e6
-      let wrote = runWriter.payload.bytesWritten - before
+      let wrote = runWriter.bytesWritten - before
       let raw = B * (step - stepStart) * recordFloats * 4
       fputs(
         String(
           format: "[record] step %d | %d lanes x %d rows | %.1f ms | %.2f MiB -> %.2f MiB (%.1fx)\n",
           step, B, step - stepStart, ms, Double(raw) / 1_048_576,
           Double(wrote) / 1_048_576, wrote > 0 ? Double(raw) / Double(wrote) : 0), stderr)
-      onWindow(step)
       let alive = B - st.deadCount
       let wall = now()
       fputs(
@@ -1271,23 +1196,13 @@ final class RecordWriter: @unchecked Sendable {
           step, alive, B, st.gpuSeconds, wall,
           wall > 0 ? Double(step) * Double(B) / wall : 0), stderr)
     }
-    let explicitN = e["OAK_STEPS_PER_CB"].flatMap(Int.init)
-    if let n = explicitN, n > maxChunkSteps {
-      throw err("OAK_STEPS_PER_CB \(n) exceeds the record ring span \(maxChunkSteps).")
-    }
-    let tuneLock = NSLock()
-    var tunedN = max(explicitN ?? 32, 1)
-    guard let chunkOrder = q.device.makeEvent() else { throw err("Failed to create Metal event.") }
-    var chunkSeq: UInt64 = 0
+    let n = bufs.maxChunkSteps
     let inflight = DispatchSemaphore(value: 2)
     let windowSlots = DispatchSemaphore(value: 1)
     var snapHalf = 0
     var lastWindowStep = 0
     var step = 0
     while step < steps {
-      tuneLock.lock()
-      let n = tunedN
-      tuneLock.unlock()
       let boundary = min(((step / windowSteps) + 1) * windowSteps, steps)
       let target = min(boundary, step + n)
       let isWindow = target % windowSteps == 0 || target == steps
@@ -1306,7 +1221,6 @@ final class RecordWriter: @unchecked Sendable {
       guard let cb = q.makeCommandBuffer() else {
         throw err("Failed to encode Metal command.")
       }
-      cb.encodeWaitForEvent(chunkOrder, value: chunkSeq)
       pipes.encodeMegastep(cb, target - step, step)
       if isWindow {
         guard let enc = cb.makeComputeCommandEncoder(dispatchType: .concurrent) else {
@@ -1315,8 +1229,6 @@ final class RecordWriter: @unchecked Sendable {
         pipes.encodeSnapshot(enc, snapHalf)
         enc.endEncoding()
       }
-      chunkSeq += 1
-      cb.encodeSignalEvent(chunkOrder, value: chunkSeq)
       let thisHalf = snapHalf
       if isWindow { snapHalf ^= 1 }
       let tStep = target
@@ -1325,12 +1237,6 @@ final class RecordWriter: @unchecked Sendable {
       if isWindow { lastWindowStep = target }
       cb.addCompletedHandler { cb in
         let gpuT = cb.gpuEndTime - cb.gpuStartTime
-        if gpuT > 0, nSteps > 0 {
-          let perStep = gpuT / Double(nSteps)
-          tuneLock.lock()
-          if explicitN == nil { tunedN = max(1, min(max(1, min(Int(0.016 / perStep), maxChunkSteps)), tunedN * 4)) }
-          tuneLock.unlock()
-        }
         let cbError = cb.error
         writer.async {
           st.gpuSeconds += gpuT
@@ -1359,65 +1265,5 @@ final class RecordWriter: @unchecked Sendable {
     inflight.signal()
     if let err = st.error { throw err }
     return st.gpuSeconds
-  }
-  static func benchmark(_ request: BenchmarkRequest, onWindow: @escaping (Int) -> Void) throws {
-    let policy = request.policy
-    guard ["oak", "random", "ppo"].contains(policy) else {
-      throw err("policy must be one of oak,random,ppo (got \(policy)).")
-    }
-    let fm = FileManager.default
-    let seedValues = request.seeds
-    guard !seedValues.isEmpty else { throw err("seeds are required.") }
-    let steps = max(request.steps, 1)
-    let raw = request.envs.trimmingCharacters(in: .whitespaces)
-    guard !raw.isEmpty else {
-      throw err("envs is required (EnvId:count,... covering every lane).")
-    }
-    var laneEnvs = [String](repeating: "", count: seedValues.count)
-    var entries: [(envId: String, seedStart: Int, seedEnd: Int)] = []
-    var offset = 0
-    for item in raw.split(separator: ",") {
-      let parts = item.split(separator: ":")
-      guard parts.count == 2, let count = Int(parts[1].trimmingCharacters(in: .whitespaces)),
-        count > 0
-      else {
-        throw err("Bad envs entry '\(item)' (expected EnvId:count).")
-      }
-      let name = String(parts[0]).trimmingCharacters(in: .whitespaces)
-      _ = try Main.envKind(name)
-      guard offset + count <= seedValues.count else {
-        throw err(
-          "envs schedule overflows the fleet: \(offset + count) lanes > B=\(seedValues.count).")
-      }
-      for i in 0..<count { laneEnvs[offset + i] = name }
-      entries.append((name, seedValues[offset], seedValues[offset + count - 1]))
-      offset += count
-    }
-    guard offset == seedValues.count else {
-      throw err("envs schedule covers \(offset) of B=\(seedValues.count) lanes.")
-    }
-    let dir = request.root
-    if fm.fileExists(atPath: dir.path),
-      !(try fm.contentsOfDirectory(atPath: dir.path).filter {
-        $0 != ".DS_Store" && $0 != "identity.json" && $0 != "baselines"
-      }).isEmpty
-    {
-      throw err("\(dir.path) is not empty; refusing to write beside existing data.")
-    }
-    try fm.createDirectory(at: dir, withIntermediateDirectories: true)
-    Self.pendingMeta = [
-      "batch": seedValues.count, "seeds": seedValues, "steps": steps,
-      "policy": policy,
-      "startedAt": ISO8601DateFormatter().string(from: Date()),
-      "envSchedule": entries.map { e in
-        ["envId": e.envId, "seedStart": e.seedStart, "seedEnd": e.seedEnd] as [String: Any]
-      },
-    ]
-    let envDesc = entries.map { "\($0.envId):\($0.seedEnd - $0.seedStart + 1)" }.joined(
-      separator: ",")
-    fputs(
-      "OaK fleet: policy=\(policy) B=\(seedValues.count) lanes × \(steps) steps on \(envDesc) (dir=\(dir.path))\n",
-      stderr)
-    try fleetGPU(policy, seedValues, steps, dir, laneEnvs, onWindow: onWindow)
   }
 }

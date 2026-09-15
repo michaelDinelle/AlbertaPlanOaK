@@ -8,7 +8,7 @@ import { heroSeed } from '../lib/selection';
 import { useTransport } from '../playback/store';
 import { useSelection } from '../state/selectionStore';
 import { STR } from '../strings';
-import { retentionWindow, type CumulativeReward } from '../tape/derive';
+import { retentionWindow, type BinnedRates, type CumulativeReward } from '../tape/derive';
 import type { PenCurves } from '../tape/pen';
 import { PEN_KEYS, penStore, type PenKey, type PenSource } from '../tape/penStore';
 import { RewardsCache } from '../data/rewards';
@@ -34,15 +34,6 @@ import {
 } from './charts';
 import { SeedList } from './SeedList';
 import { useStepScrub } from './useStepScrub';
-
-function summaryPoints(run: RunDetail | null, envId: string | null): XY[] | null {
-  if (run === null || envId === null) return null;
-  const summary = run.summary;
-  const env = summary?.envs[envId];
-  const iqm = env?.curves.iqm;
-  if (summary === null || summary === undefined || env === undefined || iqm === undefined) return null;
-  return seriesRows(summary.curveSteps, iqm);
-}
 
 const SPARSE_SAMPLES = 4;
 const TRAIL_WINDOWS = 100;
@@ -421,6 +412,18 @@ export function RewardView({
     random: useTapeSnapshot(randomSpec === null ? null : runs.random?.id ?? null, envId, 'cumulativeReward', randomSpec),
     best: useTapeSnapshot(bestSpec === null ? null : best?.id ?? null, envId, 'cumulativeReward', bestSpec),
   };
+  const compareSpec = (run: RunDetail | null): (DeriveSpec & { mode: 'windowedRates' }) | null =>
+    slicing || run === null || envId === null ? null : { mode: 'windowedRates', lanes: envLanes(run.meta, envId).lanes, win: retentionWindow(run.meta.steps) };
+  const oakCompare = useMemo(() => compareSpec(runs.oak), [slicing, runs.oak, envId]);
+  const ppoCompare = useMemo(() => compareSpec(runs.ppo), [slicing, runs.ppo, envId]);
+  const randomCompare = useMemo(() => compareSpec(runs.random), [slicing, runs.random, envId]);
+  const bestCompare = useMemo(() => compareSpec(best), [slicing, best, envId]);
+  const compared: Record<PenKey, BinnedRates | null> = {
+    oak: useTapeSnapshot(oakCompare === null ? null : runs.oak?.id ?? null, envId, 'windowedRates', oakCompare),
+    ppo: useTapeSnapshot(ppoCompare === null ? null : runs.ppo?.id ?? null, envId, 'windowedRates', ppoCompare),
+    random: useTapeSnapshot(randomCompare === null ? null : runs.random?.id ?? null, envId, 'windowedRates', randomCompare),
+    best: useTapeSnapshot(bestCompare === null ? null : best?.id ?? null, envId, 'windowedRates', bestCompare),
+  };
   const windowSteps = Math.max(1, useTapeProgress(active?.id ?? null)?.windowSteps ?? 1024);
   const streams: Record<PenKey, RewardsCache | null> = {
     oak: useRewardStream(slicing ? runs.oak : null, envId, windowSteps),
@@ -459,10 +462,12 @@ export function RewardView({
     [runs, best, sel.policy],
   );
   const summaryLines = useMemo(
-    () => comparisons.map((item) => ({ ...item, pts: item.key === 'best' ? summaryPoints(best, envId) : summaryPoints(runs[item.key as Policy], envId) })),
-    [comparisons, best, runs, envId],
+    () => comparisons.map((item) => {
+      const rates = compared[item.key];
+      return { ...item, pts: rates === null ? null : seriesRows(rates.x, rates.iqm) };
+    }),
+    [comparisons, compared.oak, compared.ppo, compared.random, compared.best],
   );
-  const stale = slicing ? [] : summaryLines.filter(({ pts }) => pts === null).map(({ label }) => label);
 
   const xMax = slicing ? axis.xMax : Math.max(1, horizon);
   const chartRef = useRef<HTMLDivElement | null>(null);
@@ -530,9 +535,6 @@ export function RewardView({
           </div>
         )}
       </div>
-      {stale.length > 0 && (
-        <div className={clsx('px-2', TXT.bodyDim)}>{STR.reward.stale(stale.join(' and '))}</div>
-      )}
       <SeedList active={active} live={slicing} penSeeds={lanes?.seeds ?? null} />
     </div>
   );

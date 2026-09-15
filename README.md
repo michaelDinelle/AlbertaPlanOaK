@@ -12,33 +12,33 @@ Recorded on a binned M4 Max.
 
 ## Base
 
-Geometry: 32 percepts, 480 features (96 active per step), 32 options; 200,160 total parameters (6 action dimensions). 917,550 SPS.
+Geometry: 32 percepts, 480 features (96 active per step), 32 options; 200,160 total parameters (6 action dimensions). 976,711 SPS.
 
-Reward per step over the full 1,000,000-step best recording (`2a45d82af1debfc0219c2c4c45df19614abbadef`), using all 16 environments, 64 seeds each, and matching recorded PPO and Random baselines. IQM averages the middle 50% of scores; Total pools all 1,024 scores. Wins compare all seed pairs within each environment, counting ties as half a win; Total averages those percentages across environments.
+Reward per step over the full 1,000,000-step best recording (`11dc490fe8146916dd3f97466e823a22b9452ec5`), using all 16 environments, 64 seeds each, and matching recorded PPO and Random baselines. Mean reward per step over all 64 seeds; wins are paired per seed, ties count half.
 
-| Environment | OaK mean | OaK IQM | PPO mean | PPO IQM | Random mean | Random IQM | OaK vs PPO wins | OaK vs Random wins | PPO vs Random wins |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| Acrobot-cont-v0 | 0.0059618 | 0.00592066 | 0.00885534 | 0.00909559 | 0.000386531 | 0.000385812 | 3.12% | 100.00% | 98.44% |
-| Chain-cont-v0 | 0.0654791 | 0.0655594 | 0.0664122 | 0.0664693 | 0.00417067 | 0.00417069 | 1.56% | 100.00% | 100.00% |
-| DeepSea-cont-v0 | 0.140243 | 0.140262 | 0.0938155 | 0.117435 | 0.000500562 | 0.000500166 | 86.21% | 100.00% | 70.31% |
-| DelayedChain-cont-v0 | 0.0308337 | 0.030964 | 0.0274261 | 0.0321192 | 0.00101069 | 0.00101266 | 18.55% | 100.00% | 87.50% |
-| FourRooms-cont-v0 | 0.0063565 | 0.00665075 | 0.104155 | 0.104583 | 0.0026182 | 0.00262144 | 0.00% | 84.40% | 100.00% |
-| HalfCheetah-v4 | 1.5768 | 1.50755 | 3.18892 | 3.28864 | -0.309297 | -0.30943 | 6.32% | 100.00% | 100.00% |
-| HighDimMaze-cont-v0 | 0.00747594 | 0.00742872 | 0.0462514 | 0.0562211 | 0.00204973 | 0.00205053 | 20.31% | 100.00% | 79.69% |
-| JellyBeanWorld-cont-v0 | 1.31563e-05 | 8.3125e-06 | 0.000107281 | 5.45e-05 | 7.8125e-07 | 9.375e-08 | 27.08% | 59.96% | 79.68% |
-| KeyCorridor-cont-v0 | 0.0479658 | 0.0502806 | 0.0914313 | 0.101761 | 0.00369542 | 0.00369712 | 8.79% | 100.00% | 100.00% |
-| LargeDeepSea-cont-v0 | 0.00103251 | -0.000207463 | -2.21188e-06 | -1.53514e-06 | -0.000309996 | -0.000310154 | 4.69% | 100.00% | 100.00% |
-| MemoryChain-cont-v0 | 0.0208138 | 0.0213984 | 0.0121761 | 0.0144191 | 0.000503094 | 0.0005005 | 96.69% | 100.00% | 87.50% |
-| MountainCar-cont-v0 | 0.00486516 | 0.00510931 | 0.00396341 | 0.00466794 | 2.40469e-05 | 2.40625e-05 | 43.62% | 98.44% | 74.80% |
-| MultiKeyCorridor-cont-v0 | 0.00434253 | 0.00431931 | 0.0192767 | 0.0215977 | 0.000716188 | 0.000717531 | 40.62% | 100.00% | 60.94% |
-| POMaze-cont-v0 | 0.00308941 | 0.00246344 | 0.0333905 | 0.0268092 | 0.00153345 | 0.00153422 | 51.34% | 50.44% | 48.44% |
-| Pendulum-cont-v0 | -0.487612 | -0.188046 | -0.0671477 | -0.0109328 | -3.89198 | -3.88951 | 23.56% | 96.88% | 100.00% |
-| ProceduralMaze-cont-v0 | 0.000277875 | 0.000178719 | 7.25e-06 | 4.125e-06 | 0.000730344 | 0.000734781 | 99.78% | 10.18% | 0.00% |
-| Total | 0.0892461 | 0.0104641 | 0.226815 | 0.0237883 | -0.261478 | 0.000676238 | 33.27% | 87.52% | 80.46% |
+| Environment | OaK | PPO | Random | OaK vs PPO wins |
+|---|---:|---:|---:|---:|
+| Acrobot-cont-v0 | 0.0059618 | 0.00885534 | 0.000386531 | 3.12% |
+| Chain-cont-v0 | 0.0654791 | 0.0664122 | 0.00417067 | 1.56% |
+| DeepSea-cont-v0 | 0.140243 | 0.0938155 | 0.000500562 | 86.21% |
+| DelayedChain-cont-v0 | 0.0308337 | 0.0274261 | 0.00101069 | 18.55% |
+| FourRooms-cont-v0 | 0.0063565 | 0.104155 | 0.0026182 | 0.00% |
+| HalfCheetah-v4 | 1.5768 | 3.18892 | -0.309297 | 6.32% |
+| HighDimMaze-cont-v0 | 0.00747594 | 0.0462514 | 0.00204973 | 20.31% |
+| JellyBeanWorld-cont-v0 | 1.31563e-05 | 0.000107281 | 7.8125e-07 | 27.08% |
+| KeyCorridor-cont-v0 | 0.0479658 | 0.0914313 | 0.00369542 | 8.79% |
+| LargeDeepSea-cont-v0 | 0.00103251 | -2.21188e-06 | -0.000309996 | 4.69% |
+| MemoryChain-cont-v0 | 0.0208138 | 0.0121761 | 0.000503094 | 96.69% |
+| MountainCar-cont-v0 | 0.00486516 | 0.00396341 | 2.40469e-05 | 43.62% |
+| MultiKeyCorridor-cont-v0 | 0.00434253 | 0.0192767 | 0.000716188 | 40.62% |
+| POMaze-cont-v0 | 0.00308941 | 0.0333905 | 0.00153345 | 51.34% |
+| Pendulum-cont-v0 | -0.487612 | -0.0671477 | -3.89198 | 23.56% |
+| ProceduralMaze-cont-v0 | 0.000277875 | 7.25e-06 | 0.000730344 | 99.78% |
+| Total | 0.0892461 | 0.226815 | -0.261478 | 33.27% |
 
 ## Setup and run
 
-Requires macOS 26+, Xcode with Metal tools, Python 3.11, and Bun. Benchmark recordings stay local and are ignored by Git. From the repo root: `./setup.sh --preset base` builds the engine and the page, then `./fleet.py run` records a candidate. Everything is served by one process, `.build/release/OaK`, which `./fleet.py` starts; open http://127.0.0.1:5174. For page development, `cd frontend && bun run dev` and open http://localhost:5173.
+Requires macOS 26+, Xcode with Metal tools, and Bun. Benchmark recordings stay local and are ignored by Git. From the repo root: `./setup.sh --preset base` builds the engine and the page, `./fleet.py` records a candidate and gates it against the best, and `cd frontend && bun run serve` serves the recordings; open http://127.0.0.1:5174. For page development, `cd frontend && bun run dev` and open http://localhost:5173.
 
 Geometry is agent capacity, declared in `Sources/Geometry.metal`; larger presets use more compute and memory. Wide streams increase percept and feature counts above these declared sizes. Total parameters = features × [1 + options × (7 + action dimensions)]; counts below use 6 action dimensions.
 

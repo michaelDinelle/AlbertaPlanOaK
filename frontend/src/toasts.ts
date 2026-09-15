@@ -16,7 +16,6 @@ export function watchRuns(entries: readonly RunIndexEntry[] | undefined): void {
         continue;
       }
       if (before.inFlight && !entry.inFlight) toast.success(STR.toasts.finished(runLabel(entry)));
-      if (!before.hasSummary && entry.hasSummary) toast(STR.toasts.scored(runLabel(entry)));
     }
   }
   known = next;

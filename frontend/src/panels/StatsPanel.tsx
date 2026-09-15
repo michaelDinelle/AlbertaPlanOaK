@@ -4,7 +4,6 @@ import type { Policy, RunDetail } from '../data/types';
 import { Panel } from '../glass/Panel';
 import { Hotkey } from './charts';
 import { STR } from '../strings';
-import { ComputeView } from './ComputeView';
 import { HealthView } from './HealthView';
 import { RewardView } from './RewardView';
 import { StandingsView } from './StandingsView';
@@ -79,7 +78,6 @@ export function StatsPanel({
       </div>
       {view === 'reward' && <RewardView runs={runs} best={best} active={active} />}
       {view === 'standings' && <StandingsView runs={runs} />}
-      {view === 'compute' && <ComputeView runs={runs} />}
       {view === 'health' && <HealthView active={active} />}
     </Panel>
   );

@@ -1,9 +1,11 @@
 import { useMemo, useSyncExternalStore } from 'react';
 import type { EnvScheduleEntry } from '../data/types';
-import { fetchSeries, follow } from '../data/oak';
+import { fetchSeries } from '../data/oak';
+import { RUN_POLL_MS } from '../data/queries';
 import {
   buildSeedRows,
   cumulativeReward,
+  deliveredRate,
   rhoBinned,
   survivalSeries,
   windowedRates,
@@ -21,12 +23,13 @@ export interface DeriveResults {
   survival: SurvivalSeries;
   rows: SeedRow[];
   cumulativeReward: CumulativeReward;
+  delivered: (number | null)[];
 }
 
 export type DeriveMode = keyof DeriveResults;
 
 export type DeriveSpec =
-  | { mode: 'rho' | 'survival' | 'cumulativeReward'; lanes: number[] }
+  | { mode: 'rho' | 'survival' | 'cumulativeReward' | 'delivered'; lanes: number[] }
   | { mode: 'rates' | 'windowedRates'; lanes: number[]; win: number }
   | {
       mode: 'rows';
@@ -53,7 +56,6 @@ interface SeriesCache {
   wall: number[];
   loading: Promise<void> | null;
   error: string | null;
-  columnOrder: string[] | null;
 }
 
 const caches = new Map<string, SeriesCache>();
@@ -61,7 +63,7 @@ const caches = new Map<string, SeriesCache>();
 function cacheFor(runId: string): SeriesCache {
   let cache = caches.get(runId);
   if (cache === undefined) {
-    cache = { runId, tape: null, columns: new Map(), ends: [], wall: [], loading: null, error: null, columnOrder: null };
+    cache = { runId, tape: null, columns: new Map(), ends: [], wall: [], loading: null, error: null };
     caches.set(runId, cache);
   }
   return cache;
@@ -117,24 +119,6 @@ function load(cache: SeriesCache): Promise<void> {
   return cache.loading;
 }
 
-function appendWindow(cache: SeriesCache, end: number, wall: number, values: Float32Array): void {
-  const order = cache.columnOrder;
-  if (order === null || cache.tape === null) return;
-  if (end <= (cache.ends[cache.ends.length - 1] ?? -1)) return;
-  const laneCount = cache.tape.laneCount;
-  if (values.length !== order.length * laneCount) return;
-  if (TAPE_COLUMNS.some((column) => order.indexOf(column) < 0 || !cache.columns.has(column))) return;
-  cache.ends.push(end);
-  cache.wall.push(wall);
-  for (const column of TAPE_COLUMNS) {
-    const f = order.indexOf(column);
-    const dst = cache.columns.get(column)!;
-    for (let lane = 0; lane < laneCount; lane++) dst.push(values[f * laneCount + lane] ?? NaN);
-  }
-  rebuildTape(cache);
-  refreshRun(cache.runId);
-}
-
 interface Slot {
   runId: string;
   spec: DeriveSpec;
@@ -160,6 +144,8 @@ function derive(tape: Tape, spec: DeriveSpec): DeriveResults[DeriveMode] {
       return survivalSeries(tape, spec.lanes);
     case 'cumulativeReward':
       return cumulativeReward(tape, spec.lanes);
+    case 'delivered':
+      return spec.lanes.map((lane) => deliveredRate(tape, lane));
     case 'rows':
       return buildSeedRows(
         tape,
@@ -267,29 +253,15 @@ export function subscribeProgress(runId: string, listener: () => void): () => vo
   };
 }
 
-const follows = new Map<string, () => void>();
+const polls = new Map<string, ReturnType<typeof setInterval>>();
 
 export function setLive(runId: string, live: boolean): void {
-  const current = follows.get(runId);
-  if (live === (current !== undefined)) return;
-  if (!live) {
-    current?.();
-    follows.delete(runId);
-    return;
+  if (live === polls.has(runId)) return;
+  if (live) polls.set(runId, setInterval(() => void load(cacheFor(runId)), RUN_POLL_MS));
+  else {
+    clearInterval(polls.get(runId));
+    polls.delete(runId);
   }
-  const cache = cacheFor(runId);
-  follows.set(runId, follow(runId, -1, {
-    columns(names) {
-      cache.columnOrder = names;
-    },
-    window(_index, end, wall, values) {
-      if (cache.tape === null) {
-        void load(cache);
-        return;
-      }
-      appendWindow(cache, end, wall, values);
-    },
-  }));
 }
 
 const noopSubscribe = (): (() => void) => () => {};

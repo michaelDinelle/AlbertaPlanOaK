@@ -25,9 +25,8 @@ struct OakFleetLane {
     uint deathStep, deathDetector;
 
     uint envKind;
-    uint envObservationCount, envActionCount;
 };
-static_assert(sizeof(OakFleetLane) == 44, "OakFleetLane layout drifted from the Swift mirror");
+static_assert(sizeof(OakFleetLane) == 36, "OakFleetLane layout drifted from the Swift mirror");
 
 inline device uint *laneEnvState(device uint *envArena, device const uint *envOff, uint gid) {
     return envArena + envOff[gid];
@@ -63,28 +62,6 @@ struct OakLaneSnapshot {
 };
 static_assert(sizeof(OakLaneSnapshot) == 36, "OakLaneSnapshot layout drifted from the Swift mirror");
 
-constant uint OAK_DIAG_PPO_PARAMS =
-    ((2u * OAK_ENV_OBS_MAX * OAK_DIAG_K + 2u * OAK_DIAG_K + OAK_DIAG_K * OAK_ENV_ACT_MAX
-      + 2u * OAK_ENV_ACT_MAX + OAK_DIAG_K + 1u) + 3u) & ~3u;
-
-struct OakDiagAccum {
-    float gram[OAK_DIAG_GRAM];
-    float sumAbsHiddenActor[OAK_DIAG_K];
-    float sumAbsHiddenCritic[OAK_DIAG_K];
-};
-static_assert(sizeof(OakDiagAccum) == 16896, "OakDiagAccum layout drifted from the Swift mirror");
-
-struct PpoDiagRecord {
-    float sumAbsHiddenActor[OAK_DIAG_K];
-    float sumAbsHiddenCritic[OAK_DIAG_K];
-    float weightAbsMean;
-    float adamT;
-    float adamV[OAK_DIAG_PPO_PARAMS];
-    float gram[OAK_DIAG_GRAM];
-};
-
-constant uint OAK_DIAG_OUT_FLOATS = sizeof(PpoDiagRecord) / 4u;
-
 inline float finiteOrZero(float x) { return isfinite(x) ? x : 0.0f; }
 
 constant uint OAK_MEGA_STAGE_MASK [[function_constant(4)]];
@@ -104,8 +81,6 @@ inline void resetLane(device OakFleetLane *lane, device uint *envState,
                       constant uint *mjModels,
                       uint storedEnvKind, uint laneSeed) {
     lane->envKind = storedEnvKind;
-    lane->envObservationCount = OAK_ENV_SPECS[storedEnvKind].obsDimNatural;
-    lane->envActionCount = OAK_ENV_SPECS[storedEnvKind].actionCount;
     uint elapsed = 0u, resets = 0u;
     uint actionCount = OAK_ENV_SPECS[storedEnvKind].actionCount;
     device float *pending = lanePendingAction(envState);

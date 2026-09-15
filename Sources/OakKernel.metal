@@ -1,7 +1,6 @@
 #pragma METAL fp math_mode(safe)
 
 constant uint OAK_SPEC_OBS_DIM [[function_constant(0)]];
-constant uint OAK_SPEC_ACTION_PARAMS [[function_constant(1)]];
 constant uint OAK_SPEC_ENV_KIND [[function_constant(2)]];
 constant uint OAK_MEGA_G [[function_constant(3)]];
 constant bool OAK_PROBE_FIXEDIDX_FC [[function_constant(5)]];
@@ -43,16 +42,16 @@ struct Shape {
     float invFeatureTimeScale, invOptionCount, metaEta, sampleSigma, invTwoSigmaSquared, actorAlphaDenom;
 };
 
-inline Shape shapeFor(uint obsDim, uint actionParams, uint envActionCount) {
+inline Shape shapeFor(uint obsDim, uint envActionCount) {
     Shape s;
     s.observationCount = obsDim;
-    s.actionCount = actionParams;
-    s.perceptCount = perceptsForStream(obsDim, actionParams);
+    s.actionCount = OAK_ACTION_PARAMS;
+    s.perceptCount = perceptsForStream(obsDim, OAK_ACTION_PARAMS);
     s.featureCount = featureCountForPercepts(s.perceptCount);
     s.optionCount = OAK_OPTION_COUNT;
     s.nurseryCount = nurseryForPercepts(s.perceptCount);
     s.traceLevels = OAK_CANDIDATES_PER_SLOT;
-    s.policyCount = max(actionParams / 2u, 1u);
+    s.policyCount = max(OAK_ACTION_PARAMS / 2u, 1u);
     s.recordFloats = ((RECORD_POLICY + s.policyCount) + 3u) & ~3u;
     s.envActionCount = envActionCount;
     uint featureTimeScale = featureTimeScaleForPercepts(s.perceptCount);
@@ -66,7 +65,7 @@ inline Shape shapeFor(uint obsDim, uint actionParams, uint envActionCount) {
 }
 
 inline Shape shape() {
-    return shapeFor(OAK_SPEC_OBS_DIM, OAK_SPEC_ACTION_PARAMS, OAK_ENV_SPECS[OAK_SPEC_ENV_KIND].actionCount);
+    return shapeFor(OAK_SPEC_OBS_DIM, OAK_ENV_SPECS[OAK_SPEC_ENV_KIND].actionCount);
 }
 
 struct Layout {
@@ -321,7 +320,7 @@ inline device float *state_at(Agent agent, uint slot) { return agent.state + slo
 inline uint perceptSourceCount(Agent agent) { return agent.observationCount + agent.envActionCount + 1u; }
 
 struct OakShapeProbe {
-    uint featureCount, optionCount, nursery, traceLevels, perceptCount;
+    uint featureCount, optionCount, nursery, traceLevels, perceptCount, actionCount;
     uint paramStride, stateStride, uintStride;
     uint pOption, recordFloats, recordValue, recordPolicy;
     uint stUtilOpt, stValueMeta, stOptionValueMeta, stModelMeta, stActorMeta;
@@ -329,7 +328,7 @@ struct OakShapeProbe {
     uint simdWidth, threadgroupLanes, activeFeatures, featureTimeScale, optionsPerThread, actorAlphaDenom;
     uint laneThreadgroupFloats;
 };
-static_assert(sizeof(OakShapeProbe) == 108, "OakShapeProbe layout drifted from the Swift mirror");
+static_assert(sizeof(OakShapeProbe) == 112, "OakShapeProbe layout drifted from the Swift mirror");
 
 kernel void oak_shape_probe(device OakShapeProbe *out [[buffer(0)]],
                             uint tid [[thread_position_in_grid]]) {
@@ -341,6 +340,7 @@ kernel void oak_shape_probe(device OakShapeProbe *out [[buffer(0)]],
     out->nursery = s.nurseryCount;
     out->traceLevels = s.traceLevels;
     out->perceptCount = s.perceptCount;
+    out->actionCount = s.actionCount;
     out->paramStride = L.paramStride;
     out->stateStride = L.stateStride;
     out->uintStride = L.uintStride;
@@ -365,7 +365,7 @@ kernel void oak_shape_probe(device OakShapeProbe *out [[buffer(0)]],
     out->laneThreadgroupFloats = 6u * s.optionCount + 1u;
 }
 
-constant uint OAK_ENV_TABLE_STRIDE = 12u + OAK_POSE_LEN;
+constant uint OAK_ENV_TABLE_STRIDE = 9u + OAK_POSE_LEN;
 
 kernel void oak_env_table_probe(device uint *out [[buffer(0)]],
                                 uint tid [[thread_position_in_grid]]) {
@@ -381,15 +381,12 @@ kernel void oak_env_table_probe(device uint *out [[buffer(0)]],
         row[1] = OAK_ENV_SPECS[i].obsDimNatural;
         row[2] = OAK_ENV_SPECS[i].actionKind;
         row[3] = OAK_ENV_SPECS[i].actionCount;
-        row[4] = OAK_ENV_SPECS[i].actionParams;
-        row[5] = OAK_ENV_SPECS[i].gridW;
-        row[6] = OAK_ENV_SPECS[i].gridH;
-        row[7] = OAK_ENV_SPECS[i].controlHz;
-        row[8] = OAK_ENV_SPECS[i].envStateWords;
-        row[9] = OAK_ENV_SPECS[i].mjIndex;
-        row[10] = OAK_ENV_SPECS[i].laneThreads;
-        for (uint s = 0u; s < OAK_POSE_LEN; ++s) row[11u + s] = OAK_ENV_SPECS[i].slots[s];
-        row[11u + OAK_POSE_LEN] = OAK_ENV_SPECS[i].persistentEntryWords;
+        row[4] = OAK_ENV_SPECS[i].controlHz;
+        row[5] = OAK_ENV_SPECS[i].envStateWords;
+        row[6] = OAK_ENV_SPECS[i].mjIndex;
+        row[7] = OAK_ENV_SPECS[i].laneThreads;
+        for (uint s = 0u; s < OAK_POSE_LEN; ++s) row[8u + s] = OAK_ENV_SPECS[i].slots[s];
+        row[8u + OAK_POSE_LEN] = OAK_ENV_SPECS[i].persistentEntryWords;
     }
 }
 

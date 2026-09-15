@@ -2,61 +2,55 @@ import { useMemo } from 'react';
 import { clsx } from 'clsx';
 import { isEnvId } from '../data/envs';
 import { nameOf } from '../scenes/table';
-import type { Ci95, Policy, RunDetail } from '../data/types';
+import type { Policy, RunDetail } from '../data/types';
 import { formatPercent, formatRate } from '../lib/format';
+import { envLanes } from '../lib/run';
 import { selectEnv, useSelection } from '../state/selectionStore';
 import { STR } from '../strings';
+import { useTapeSnapshot, type DeriveSpec } from '../tape/store';
 import { POLICY_ORDER, POLICY_TOKENS, TXT } from './charts';
 
-interface Mark {
-  policy: Policy;
-  value: number;
-  ci: Ci95;
-}
+const allLanes = (run: RunDetail | null): (DeriveSpec & { mode: 'delivered' }) | null =>
+  run === null ? null : { mode: 'delivered', lanes: run.meta.seeds.map((_, lane) => lane) };
 
 export function StandingsView({ runs }: { runs: Record<Policy, RunDetail | null> }) {
   const selection = useSelection();
-  const oakSummary = runs.oak?.summary ?? null;
-  const { rows, oakAhead, ppoAhead, close } = useMemo(() => {
-    if (oakSummary === null) return { rows: [], oakAhead: 0, ppoAhead: 0, close: 0 };
-    let oakAhead = 0;
-    let ppoAhead = 0;
-    let close = 0;
-    const rows = Object.keys(oakSummary.envs).map((envId) => {
-      const marks = POLICY_ORDER.flatMap((policy): Mark[] => {
-        const final = runs[policy]?.summary?.envs[envId]?.finalRate;
-        return final === undefined || !Number.isFinite(final.iqm)
-          ? []
-          : [{ policy, value: final.iqm, ci: final.ci95 }];
-      });
-      const oak = marks.find((mark) => mark.policy === 'oak');
-      const ppo = marks.find((mark) => mark.policy === 'ppo');
-      if (oak !== undefined && ppo !== undefined) {
-        if (oak.ci[0] > ppo.ci[1]) oakAhead++;
-        else if (ppo.ci[0] > oak.ci[1]) ppoAhead++;
-        else close++;
-      }
-      return {
-        envId,
-        name: isEnvId(envId) ? nameOf(envId) : envId,
-        marks,
-        oak: oak?.value ?? -Infinity,
-        probability: oakSummary.vsBaselines?.ppo?.probImprovement.envs[envId],
-      };
+  const oakSpec = useMemo(() => allLanes(runs.oak), [runs.oak]);
+  const ppoSpec = useMemo(() => allLanes(runs.ppo), [runs.ppo]);
+  const randomSpec = useMemo(() => allLanes(runs.random), [runs.random]);
+  const delivered: Record<Policy, (number | null)[] | null> = {
+    oak: useTapeSnapshot(runs.oak?.id ?? null, null, 'delivered', oakSpec),
+    ppo: useTapeSnapshot(runs.ppo?.id ?? null, null, 'delivered', ppoSpec),
+    random: useTapeSnapshot(runs.random?.id ?? null, null, 'delivered', randomSpec),
+  };
+  const rows = useMemo(() => {
+    const oak = runs.oak;
+    if (oak === null) return [];
+    const perEnv = (policy: Policy, envId: string): number[] | null => {
+      const run = runs[policy];
+      const values = delivered[policy];
+      return run === null || values === null ? null : envLanes(run.meta, envId).lanes.map((lane) => values[lane] ?? NaN);
+    };
+    const rows = [...new Set(oak.meta.envSchedule.map((entry) => entry.envId))].map((envId) => {
+      const means = Object.fromEntries(POLICY_ORDER.map((policy) => {
+        const values = perEnv(policy, envId);
+        return [policy, values === null ? null : values.reduce((sum, v) => sum + v, 0) / values.length];
+      })) as Record<Policy, number | null>;
+      const a = perEnv('oak', envId);
+      const b = perEnv('ppo', envId);
+      const wins = a === null || b === null ? null
+        : a.reduce((sum, v, i) => sum + (v === b[i] ? 0.5 : v > (b[i] ?? NaN) ? 1 : 0), 0) / a.length;
+      return { envId, name: isEnvId(envId) ? nameOf(envId) : envId, means, wins };
     });
-    rows.sort((a, b) => b.oak - a.oak);
-    return { rows, oakAhead, ppoAhead, close };
-  }, [oakSummary, runs]);
-
-  if (oakSummary === null) {
-    return <div className={clsx('px-2 py-6 text-center', TXT.bodyDim)}>{STR.standings.needsSummary}</div>;
-  }
+    return rows.sort((x, y) => (y.means.oak ?? -Infinity) - (x.means.oak ?? -Infinity));
+  }, [runs, delivered.oak, delivered.ppo, delivered.random]);
+  const ahead = rows.filter((row) => row.wins !== null && row.wins > 0.5).length;
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto">
       <div className="px-2">
-        <span className={clsx(TXT.body, 'cursor-help')} title={STR.standings.headlineHint}>
-          {STR.standings.headline(oakAhead, ppoAhead, close)}
+        <span className={clsx(TXT.body, 'cursor-help')} title={STR.standings.winsHint}>
+          {STR.standings.headline(ahead, rows.length)}
         </span>
       </div>
       <table className="w-full table-fixed border-separate border-spacing-0 px-1">
@@ -68,8 +62,8 @@ export function StandingsView({ runs }: { runs: Record<Policy, RunDetail | null>
                 {STR.policy[policy]}
               </th>
             ))}
-            <th className="w-16 pb-1 pr-2 text-right font-normal" title={STR.standings.probHint}>
-              {STR.standings.probability}
+            <th className="w-16 pb-1 pr-2 text-right font-normal" title={STR.standings.winsHint}>
+              {STR.standings.wins}
             </th>
           </tr>
         </thead>
@@ -93,28 +87,13 @@ export function StandingsView({ runs }: { runs: Record<Policy, RunDetail | null>
               )}
             >
               <td className="truncate rounded-l-md pl-2 font-mono text-xs text-ink-dim">{row.name}</td>
-              {POLICY_ORDER.map((policy) => {
-                const mark = row.marks.find((candidate) => candidate.policy === policy);
-                return (
-                  <td
-                    key={policy}
-                    className={clsx('text-right', TXT.data)}
-                    title={mark === undefined ? undefined : STR.standings.rateCell(
-                      STR.policy[policy], formatRate(mark.ci[0]), formatRate(mark.ci[1]))}
-                  >
-                    {formatRate(mark?.value ?? null)}
-                  </td>
-                );
-              })}
-              <td
-                className={clsx('rounded-r-md pr-2 text-right', TXT.data)}
-                title={row.probability === undefined ? undefined : STR.standings.probCell(
-                  formatPercent(row.probability.p, 0),
-                  formatPercent(row.probability.ci95[0], 0),
-                  formatPercent(row.probability.ci95[1], 0),
-                )}
-              >
-                {row.probability === undefined ? '—' : formatPercent(row.probability.p, 0)}
+              {POLICY_ORDER.map((policy) => (
+                <td key={policy} className={clsx('text-right', TXT.data)}>
+                  {formatRate(row.means[policy])}
+                </td>
+              ))}
+              <td className={clsx('rounded-r-md pr-2 text-right', TXT.data)}>
+                {row.wins === null ? '—' : formatPercent(row.wins, 0)}
               </td>
             </tr>
           ))}

@@ -2,7 +2,8 @@ import type { EnvEntry } from '@sim/catalog';
 import type { EnvId } from '../data/envs';
 import type { RecordingRef } from '../data/types';
 import type { LiveEdge, PlaybackSource } from './playbackSource';
-import { FRAME_FLOATS, fetchFrames, follow } from '../data/oak';
+import { FRAME_FLOATS, fetchFrames } from '../data/oak';
+import { RUN_POLL_MS } from '../data/queries';
 import { lensRecording, type RecordingLens } from '@sim/decode';
 import { decoders } from '@sim/registry';
 import { EMPTY_EVENT_STREAM, NO_EVENTS, type EnvDecoder } from '@sim/types';
@@ -256,13 +257,15 @@ export function loadHero(options: HeroOptions): HeroHandle {
     }
   };
 
+  const report = (error: unknown): void => {
+    if (destroyed || (error instanceof DOMException && error.name === 'AbortError')) return;
+    onError?.(error instanceof Error ? error : new Error(String(error)));
+  };
+
   const startFollow = (): void => {
     if (unfollow !== null || destroyed) return;
-    unfollow = follow(runId, lane, {
-      frames(_lane, from, values) {
-        if (!append(from, values)) void pull();
-      },
-    });
+    const timer = setInterval(() => pull().catch(report), RUN_POLL_MS);
+    unfollow = () => clearInterval(timer);
   };
 
   const run = async (): Promise<void> => {
@@ -277,10 +280,7 @@ export function loadHero(options: HeroOptions): HeroHandle {
     if (live) startFollow();
   };
 
-  void run().catch((error: unknown) => {
-    if (destroyed || (error instanceof DOMException && error.name === 'AbortError')) return;
-    onError?.(error instanceof Error ? error : new Error(String(error)));
-  });
+  void run().catch(report);
 
   return {
     source,

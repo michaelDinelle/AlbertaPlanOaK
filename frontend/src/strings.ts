@@ -98,7 +98,7 @@ export const STR = {
     facts: (envs: number, steps: string, preset: string) => `${envs} envs · ${steps} steps · ${preset}`,
     switchTo: (label: string) => `Watch this run: ${label}`,
   },
-  panels: { reward: 'Reward', standings: 'Standings', compute: 'Compute', health: 'Health' },
+  panels: { reward: 'Reward', standings: 'Standings', health: 'Health' },
   axis: {
     steps: 'steps',
     seconds: 'elapsed seconds',
@@ -115,7 +115,6 @@ export const STR = {
     reading: 'reading the tape…',
     waiting: 'waiting for a run',
     average: (name: string) => `${name} average`,
-    stale: (names: string) => `${names} not scored yet — no curve`,
   },
   seeds: {
     title: 'Seeds',
@@ -131,36 +130,16 @@ export const STR = {
     empty: 'No seeds ran this environment.',
   },
   standings: {
-    headline: (oak: number, ppo: number, close: number) =>
-      `OaK ahead in ${oak}, PPO ahead in ${ppo}, too close in ${close}`,
-    headlineHint: 'ahead = non-overlapping 95% CIs on final reward per step',
+    headline: (oak: number, total: number) => `OaK ahead in ${oak} of ${total}`,
     colEnv: 'Environment',
-    probHint: 'P(random OaK seed beats random PPO seed) · independent bootstrap',
-    probability: 'P(O>P)',
-    rateCell: (name: string, lo: string, hi: string) =>
-      `${name} final reward per step — 95% CI [${lo}, ${hi}]`,
-    probCell: (pct: string, lo: string, hi: string) => `P(OaK > PPO) = ${pct} — 95% CI [${lo}, ${hi}]`,
-    needsSummary: 'Standings appear once this run is scored.',
-  },
-  compute: {
-    efficiencyEnv: (name: string) => `Reward over compute — ${name}`,
-    titleHint: 'reward-per-step IQM vs measured elapsed seconds · log x',
-    chooseEnvironment: 'Choose an environment to compare compute.',
-    needsSummary: 'Compute appears once this run is scored.',
+    wins: 'OaK wins',
+    winsHint: 'mean reward per step over all seeds · wins paired per seed vs PPO, ties count half',
   },
   health: {
-    diverged: 'seeds diverged',
-    divergedTitle: (rate: string, lo: string, hi: string) =>
-      `divergence rate ${rate} — Wilson 95% CI [${lo}, ${hi}]`,
-    alive: 'expected steps survived (RMST)',
-    aliveTitle: (lo: string, hi: string) =>
-      `Greenwood/Wald 95% CI [${lo}, ${hi}] — the upper end may exceed the horizon`,
     faded: 'Φ — reward rate lost from peak',
-    fadedTitle: (lo: string, hi: string) => `95% CI [${lo}, ${hi}]`,
     survival: 'Survival',
-    survivalHint: 'Kaplan–Meier · band = 95% CI',
+    survivalHint: 'share of seeds still alive',
     surviving: 'surviving',
-    kmBand: '95% CI',
     positive: 'cumulative reward > 0',
     retention: 'Retention',
     retentionHint: 'Φ = IQM reward rate below its running peak',
@@ -172,7 +151,6 @@ export const STR = {
   toasts: {
     appeared: (label: string) => `New run: ${label}`,
     finished: (label: string) => `Run finished: ${label}`,
-    scored: (label: string) => `Run scored: ${label}`,
   },
   notices: {
     apiDown: 'Could not reach the server',

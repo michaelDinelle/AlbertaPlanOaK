@@ -6,9 +6,11 @@ import type { EnvId } from '../data/envs';
 import { SCENES, nameOf } from '../scenes/table';
 import type { RunDetail } from '../data/types';
 import { Panel } from '../glass/Panel';
+import { envLanes } from '../lib/run';
 import { Label, TXT } from '../panels/charts';
 import { selectEnv, useSelection } from '../state/selectionStore';
 import { STR } from '../strings';
+import { useTapeSnapshot, type DeriveSpec } from '../tape/store';
 import { seedsFor } from '../theater/loader';
 import { envGradient, posterUrl } from './EnvTileButton';
 
@@ -68,12 +70,21 @@ export function EnvWall({
   const [query, setQuery] = useState('');
   const [sort, setSort] = useState<WallSort>('name');
   const recordings = detail?.recordings ?? [];
+  const spec = useMemo<(DeriveSpec & { mode: 'delivered' }) | null>(
+    () => (detail === null ? null : { mode: 'delivered', lanes: detail.meta.seeds.map((_, lane) => lane) }),
+    [detail],
+  );
+  const delivered = useTapeSnapshot(detail?.id ?? null, null, 'delivered', spec);
 
   const rows = useMemo(() => {
     const q = query.trim().toLowerCase();
     const shown = envList.filter((id) => q === '' || nameOf(id).toLowerCase().includes(q));
     const seedCount = (id: EnvId): number => seedsFor(recordings, id).length;
-    const reward = (id: EnvId): number => detail?.summary?.envs[id]?.finalRate.iqm ?? -Infinity;
+    const reward = (id: EnvId): number => {
+      if (detail === null || delivered === null) return -Infinity;
+      const lanes = envLanes(detail.meta, id).lanes;
+      return lanes.reduce((sum, lane) => sum + (delivered[lane] ?? NaN), 0) / lanes.length;
+    };
     const sorted = [...shown].sort((a, b) =>
       sort === 'name'
         ? nameOf(a).localeCompare(nameOf(b))
@@ -84,7 +95,7 @@ export function EnvWall({
     const out: EnvId[][] = [];
     for (let i = 0; i < sorted.length; i += COLUMNS) out.push(sorted.slice(i, i + COLUMNS));
     return out;
-  }, [envList, query, sort, detail, recordings]);
+  }, [envList, query, sort, detail, recordings, delivered]);
 
   const pick = (envId: EnvId): void => {
     selectEnv(envId);

@@ -56,8 +56,8 @@ constant uint OAK_PERCEPTS_MAX =
 constant uint OAK_ACTIVE_SLOTS_MAX =
     OAK_PERCEPTS_MAX * (1u + OAK_CONSTRUCTED_PER_PERCEPT) / OAK_SIMD_WIDTH;
 constant uint OAK_POLICY_MAX = OAK_ENV_ACT_MAX;
-constant uint OAK_DIAG_K = 2u * OAK_SIMD_WIDTH;
-constant uint OAK_DIAG_GRAM = OAK_DIAG_K * OAK_DIAG_K;
+constant uint OAK_ACTION_PARAMS = 2u * OAK_ENV_ACT_MAX;
+static_assert(OAK_ACTION_PARAMS / 2u == OAK_POLICY_MAX, "every policy steers one action pair");
 
 static_assert(OAK_OPTION_COUNT % OAK_SIMD_WIDTH == 0u,
               "options must tile the simd width");

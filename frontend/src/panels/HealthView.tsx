@@ -1,21 +1,12 @@
 import { useMemo } from 'react';
-import { Area, Line } from 'recharts';
+import { Line } from 'recharts';
 import type { RunDetail } from '../data/types';
-import { formatCount, formatPercent, formatRate, formatStep } from '../lib/format';
+import { formatPercent } from '../lib/format';
 import { envLanes } from '../lib/run';
 import { useSelection } from '../state/selectionStore';
 import { STR } from '../strings';
 import { useTapeSnapshot, type DeriveSpec } from '../tape/store';
-import { Chip, Label, TXT, TimeChart, bandProps, bandRows, lineProps, seriesRows } from './charts';
-
-function Stat({ label, value, title }: { label: string; value: string; title?: string }) {
-  return (
-    <div className="flex min-w-0 flex-1 flex-col" title={title}>
-      <span className={TXT.data}>{value}</span>
-      <span className={TXT.bodyDim}>{label}</span>
-    </div>
-  );
-}
+import { Chip, Label, TimeChart, lineProps, seriesRows } from './charts';
 
 interface HeadChip {
   swatch: string;
@@ -37,7 +28,6 @@ function Head({ label, hint, chips }: { label: string; hint: string; chips?: Hea
 
 export function HealthView({ active }: { active: RunDetail | null }) {
   const sel = useSelection();
-  const summary = active?.summary ?? null;
   const lanes = useMemo(
     () => (active === null || sel.envId === null ? null : envLanes(active.meta, sel.envId)),
     [active, sel.envId],
@@ -78,47 +68,18 @@ export function HealthView({ active }: { active: RunDetail | null }) {
     };
   }, [rates, rho]);
 
-  const kmBand = useMemo(() => {
-    const km = sel.envId === null ? undefined : summary?.envs[sel.envId]?.km;
-    if (km === undefined || km.steps.length === 0) return null;
-    return bandRows(km.steps, km.ci95[0], km.ci95[1]);
-  }, [summary, sel.envId]);
-
   const horizon = Math.max(1, active?.meta.steps ?? 1);
-  const lanesTotal = summary === null ? 0 : summary.seedsPerEnv * Object.keys(summary.envs).length;
-  const divergence = summary?.aggregate.divergence ?? null;
-  const forgetting = sel.envId === null ? null : summary?.envs[sel.envId]?.forgetting ?? null;
-
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-1.5 overflow-y-auto px-2 pb-1">
-      <div className="flex gap-3">
-        <Stat
-          label={STR.health.diverged}
-          value={divergence === null ? '—' : `${formatCount(divergence.diverged)} / ${formatCount(lanesTotal)}`}
-          title={divergence === null ? undefined : STR.health.divergedTitle(formatPercent(divergence.rate, 2), formatPercent(divergence.rateCi95[0], 2), formatPercent(divergence.rateCi95[1], 2))}
-        />
-        <Stat
-          label={STR.health.alive}
-          value={divergence === null ? '—' : formatStep(divergence.expectedAliveSteps)}
-          title={divergence === null ? undefined : STR.health.aliveTitle(formatStep(divergence.expectedAliveCi95[0]), formatStep(divergence.expectedAliveCi95[1]))}
-        />
-        <Stat
-          label={STR.health.faded}
-          value={forgetting === null ? '—' : formatRate(forgetting.iqm)}
-          title={forgetting === null ? undefined : STR.health.fadedTitle(formatRate(forgetting.ci95[0]), formatRate(forgetting.ci95[1]))}
-        />
-      </div>
       <Head
         label={STR.health.survival}
         hint={STR.health.survivalHint}
         chips={[
           { swatch: 'var(--color-good)', label: STR.health.surviving },
-          { swatch: 'var(--color-good)', label: STR.health.kmBand, block: true },
           { swatch: 'var(--color-ramp-2)', label: STR.health.positive },
         ]}
       />
       <TimeChart label={STR.health.survival} height={100} xMax={horizon} yFormat={(v) => formatPercent(v, 0)} xLabel={STR.axis.steps} yLabel={STR.axis.seedShare}>
-        {kmBand !== null && <Area {...bandProps('var(--color-good)')} type="stepAfter" data={kmBand} />}
         {survival !== null && (
           <Line
             {...lineProps('var(--color-good)', 1.5)}
