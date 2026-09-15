@@ -251,7 +251,6 @@ export function mountStage(container: HTMLElement): Stage {
       }
       const same = target !== null && target.runId === next.runId && target.envId === next.envId && target.seed === next.seed && target.lane === next.lane;
       const sameEnv = target?.envId === next.envId;
-      const carry = sameEnv ? Math.max(0, frame.step) : 0;
       const rebuild = !sameEnv || (decoders[next.envId].seedGeometry && target?.seed !== next.seed);
       target = next;
       const gen = same ? generation : ++generation;
@@ -268,8 +267,8 @@ export function mountStage(container: HTMLElement): Stage {
         return;
       }
       broken = null;
-      seekPosition((next.startStep ?? carry) + 1);
-      if (next.startStep !== null) patch({ playing: true });
+      seekPosition((sameEnv ? Math.max(0, frame.step) : next.startStep ?? 0) + 1);
+      if (!sameEnv) patch({ playing: true });
       frame.step = -1;
       publish();
       if (rebuild) buildScene(gen, next.envId, opened).catch((error: unknown) => { if (gen === generation) failStage(`Could not build ${next.envId}`, error); });
