@@ -74,12 +74,14 @@ const float BORDER = 0.07;
 const float MAP_BLUR = 12.0;
 const float BLUR = 3.0;
 const float SATURATE = 1.5;
-float coverage(vec2 p, vec4 rect, float radius) {
+float rounded(vec2 p, vec4 rect, float inset, float radius) {
   vec2 half_ = rect.zw * 0.5;
-  float inset = BORDER * min(rect.z, rect.w);
   float r = max(radius - inset, 2.0);
   vec2 q = abs(p - rect.xy - half_) - (half_ - inset - r);
-  float sd = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+  return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+}
+float coverage(vec2 p, vec4 rect, float radius) {
+  float sd = rounded(p, rect, BORDER * min(rect.z, rect.w), radius);
   return 0.93 * (1.0 - smoothstep(-MAP_BLUR, MAP_BLUR, sd));
 }
 vec3 blurred(vec2 px) {
@@ -96,7 +98,7 @@ void main() {
   for (int i = 0; i < ${GLASS_RECTS}; i++) {
     if (i >= uCount) break;
     vec4 r = uRects[i];
-    if (px.x < r.x || px.y < r.y || px.x > r.x + r.z || px.y > r.y + r.w) continue;
+    if (rounded(px, r, 0.0, uRadii[i]) > 0.0) continue;
     float area = r.z * r.w;
     if (area < best) { best = area; rect = r; radius = uRadii[i]; }
   }
