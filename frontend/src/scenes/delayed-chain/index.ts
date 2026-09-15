@@ -1,8 +1,8 @@
 import { PULSE_SECONDS } from '@kit/celebrate';
-import { makeSceneView, type SceneView } from '@kit/view';
+import { makeSceneView, trackPose, type SceneView } from '@kit/view';
 import { DELAYEDCHAIN_ACTION, DELAYEDCHAIN_POS } from '@sim/envs/delayedchain';
 import type { GroundTruthOptions } from '@kit/debug';
-import { cellToWorld, cellToWorldVec, type GridSize } from '@kit/grid';
+import { CELL, cellToWorld, cellToWorldVec, type GridSize } from '@kit/grid';
 import { clamp01, envelope } from '@kit/mix';
 import type { OrbitRigOptions } from '@kit/rigs';
 import { StageScene, type Stage } from '@kit/stage';
@@ -41,9 +41,8 @@ export const PULSE_STRENGTH = 0.6;
 const SURGE_SECONDS = 2.6;
 const WISP_FLARE = 0.32;
 
-const HOP_SECONDS = 0.11;
-const HOP_HEIGHT = 0.15;
 const WISP_LEAN = 0.15;
+const HOP_HEIGHT = 0.15;
 
 function readState(state: FrameState, grid: GridSize, out: GridCell): number {
   const pos = Math.round(state.pose[DELAYEDCHAIN_POS] ?? 0);
@@ -137,7 +136,6 @@ class LongNightRoadScene extends StageScene<WorldHandle> {
       {
         color: accent,
         radius: 0.165,
-        hop: { duration: HOP_SECONDS, height: HOP_HEIGHT },
         name: 'roadWisp',
       },
       grid,
@@ -244,7 +242,6 @@ class LongNightRoadScene extends StageScene<WorldHandle> {
       }
     }
 
-    let teleported = false;
     let paid = false;
     for (let i = 0; i < frame.events.length; i++) {
       const ev = frame.events[i];
@@ -261,20 +258,16 @@ class LongNightRoadScene extends StageScene<WorldHandle> {
         this.waveAt = time;
         this.surgeAt = time;
         this.burstAt = time;
-      } else if (ev.type === 'teleport') {
-        teleported = true;
       }
     }
 
-    if (teleported) {
-      wisp.setCell(agent.x, agent.y, grid);
-      wisp.snap();
-    }
     if (paid) wisp.flare(WISP_FLARE);
 
-    if (agent.x !== wisp.cellX) wisp.hopTo(agent, time);
     wisp.avatar.rotation.z = lastA === 1 ? -WISP_LEAN : WISP_LEAN;
     wisp.update(frame.dtReal, time);
+    const step = Math.floor(frame.position);
+    const hopping = frame.frameAt(step + 1).pose[DELAYEDCHAIN_POS] !== frame.frameAt(step).pose[DELAYEDCHAIN_POS];
+    wisp.place((trackPose(frame, DELAYEDCHAIN_POS) - (grid.w - 1) / 2) * CELL, hopping ? HOP_HEIGHT * Math.sin(Math.PI * (frame.position - step)) : 0);
 
     const age = time - this.waveAt;
     const active = age >= 0 && age <= WAVE_SPAN;

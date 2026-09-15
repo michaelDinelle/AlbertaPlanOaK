@@ -284,6 +284,12 @@ export class Wisp {
     this.flareAmount = Math.max(this.flareAmount, strength);
   }
 
+  place(x: number, lift: number): void {
+    this.avatar.position.x = x;
+    this.avatar.position.y = this.motion.position.y + lift;
+    this.syncShade();
+  }
+
   snap(): void {
     this.motion.snap();
     this.avatar.position.copy(this.motion.position);
