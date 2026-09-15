@@ -1,84 +1,75 @@
 #!/usr/bin/env python3
-import filecmp, hashlib, json, math, os, subprocess, sys
+import filecmp
+import hashlib
+import json
+import os
+import subprocess
 from array import array
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent
 BENCH = REPO / ".oak-benchmarks"
-OAK = REPO / ".build/release/OaK"
-STEPS = 1_000_000
-ENV_SOURCES = ("Sources/EnvCore.metal", "Sources/Env.metal", "Sources/Baseline.metal", "Sources/envs", "Sources/OaK/Resources")
-CANDIDATE_SOURCES = ("Sources", "Package.swift", "setup.sh", "fleet.py", ".build/release/OaK", ".build/OakKernel.metallib")
+SCHEDULE = ("envSchedule", "seeds", "steps", "batch")
+ENV_SOURCES = (
+    "Sources/EnvCore.metal", "Sources/Env.metal", "Sources/Random.metal",
+    "Sources/PPO.metal", "Sources/Fleet.metal", "Sources/envs", "Sources/OaK/Resources",
+)
 
-def files(entries):
-    return [p for e in entries for base in [REPO / e]
-            for p in (sorted(q for q in base.rglob("*") if q.is_file()) if base.is_dir() else [base])]
+def digest(entries):
+    result = hashlib.sha256()
+    for entry in entries:
+        path = REPO / entry
+        files = sorted(p for p in path.rglob("*") if p.is_file()) if path.is_dir() else [path]
+        for path in files:
+            result.update(str(path.relative_to(REPO)).encode() + b"\0" + path.read_bytes() + b"\0")
+    return result.hexdigest()
 
-def digest(paths):
-    h = hashlib.sha256()
-    for p in paths:
-        h.update(str(p.relative_to(REPO)).encode() + b"\0" + p.read_bytes() + b"\0")
-    return h.hexdigest()
+def read(root, expected=None, keys=SCHEDULE):
+    meta = json.loads((root / "meta.json").read_text())
+    ends = array("I", (root / "ends.u32").read_bytes())
+    size = (root / "series/rewardSum.f32").stat().st_size
+    if "finishedAt" not in meta or not ends or ends[-1] != meta["steps"] or size != 4 * len(ends) * meta["batch"]:
+        raise SystemExit(f"Incomplete recording: {root}")
+    for entry in meta["envSchedule"]:
+        lanes = entry["seedEnd"] - entry["seedStart"] + 1
+        if (root / "rewards" / f"{entry['envId']}.f32").stat().st_size != 4 * meta["steps"] * lanes:
+            raise SystemExit(f"Incomplete rewards: {root}/{entry['envId']}")
+    if expected and any(meta[key] != expected[key] for key in keys):
+        raise SystemExit(f"Recording does not match the best: {root}")
+    return meta
 
-def meta_of(root): return json.loads((root / "meta.json").read_text())
-
-def env_lanes(meta):
-    lanes, at = {}, 0
-    for e in meta["envSchedule"]:
-        n = e["seedEnd"] - e["seedStart"] + 1
-        lanes[e["envId"]], at = range(at, at + n), at + n
-    return lanes
-
-def lane_means(root):
-    meta = meta_of(root)
-    col = array("f", (root / "series/rewardSum.f32").read_bytes())
-    return [v / meta["steps"] for v in col[-len(meta["seeds"]):]]
-
-def env_mean(means, lanes): return sum(means[l] for l in lanes) / len(lanes)
-
-def wins(a, b, lanes): return sum(0.5 if a[l] == b[l] else a[l] > b[l] for l in lanes) / len(lanes)
-
-def record(policy, root):
-    if (root / "meta.json").is_file() and "finishedAt" in meta_of(root): print(f"{policy}: reusing {root.relative_to(BENCH)}")
-    elif root.exists(): raise SystemExit(f"{root}: incomplete recording; delete it to re-record")
-    else: subprocess.run(["caffeinate", "-i", OAK, policy, str(STEPS), root], cwd=REPO, check=True)
-
-def main():
-    subprocess.run([REPO / "setup.sh"], cwd=REPO, check=True)
-    best_id = (REPO / "best").read_text().strip()
-    cand_id = digest(files(CANDIDATE_SOURCES))[:40]
-    if cand_id == best_id: raise SystemExit(f"{cand_id} is already the best")
-    cand = BENCH / cand_id
-    record("oak", cand)
-    meta = meta_of(cand)
-    base_id = hashlib.sha256(json.dumps({k: meta[k] for k in ("envSchedule", "seeds", "steps", "batch")}, sort_keys=True).encode()
-                             + digest(files(ENV_SOURCES)).encode()).hexdigest()[:40]
-    runs = {"oak": cand}
-    for policy in ("ppo", "random"):
-        runs[policy] = BENCH / "baselines" / base_id / policy
-        record(policy, runs[policy])
-        link = cand / "baselines" / policy
-        link.parent.mkdir(exist_ok=True)
-        if not link.is_symlink(): link.symlink_to(os.path.relpath(runs[policy], link.parent))
-    means = {p: lane_means(r) for p, r in runs.items()}
-    lanes = env_lanes(meta)
-    print("| Environment | OaK | PPO | Random | OaK vs PPO wins |\n|---|---:|---:|---:|---:|")
-    for env, ls in lanes.items():
-        print(f"| {env} | {env_mean(means['oak'], ls):.6g} | {env_mean(means['ppo'], ls):.6g} | {env_mean(means['random'], ls):.6g} | {wins(means['oak'], means['ppo'], ls):.2%} |")
-    if not best_id:
-        (REPO / "best").write_text(cand_id + "\n"); return print(f"PROMOTE: bootstrap best {cand_id}")
-    best = BENCH / best_id
-    bmeta = meta_of(best)
-    if any(meta[k] != bmeta[k] for k in ("envSchedule", "seeds", "steps", "batch", "preset")): raise SystemExit("candidate schedule or preset differs from the best")
-    identical = all(filecmp.cmp(cand / "rewards" / f"{e}.f32", best / "rewards" / f"{e}.f32", shallow=False) for e in lanes)
-    print(f"rewards bitwise identical: {'yes' if identical else 'no'}")
-    bmeans = lane_means(best)
-    worse = [e for e, ls in lanes.items() if not wins(means["oak"], bmeans, ls) >= 0.5 - 1.645 * math.sqrt(0.25 / len(ls))]
-    same_hw = meta["hardwareKey"] == bmeta["hardwareKey"]
-    print(f"steps/s {meta['stepsPerSecond']:,.0f} vs best {bmeta['stepsPerSecond']:,.0f} ({'same' if same_hw else 'different'} hardware)")
-    if not worse and same_hw and meta["stepsPerSecond"] >= bmeta["stepsPerSecond"]:
-        (REPO / "best").write_text(cand_id + "\n"); return print(f"PROMOTE {cand_id}")
-    print(f"REJECT: best stays {best_id}" + (f"; regressed in {', '.join(worse)}" if worse else ""))
-    sys.exit(1)
-
-if __name__ == "__main__": main()
+best_root = BENCH / (REPO / "best").read_text().strip()
+best = read(best_root)
+if best["steps"] != 1_000_000 or "OAK_MEGA_STAGE_MASK" in os.environ:
+    raise SystemExit("A fleet comparison requires one million steps and no timing instruments")
+subprocess.run([REPO / "setup.sh", "--preset", best["preset"]], cwd=REPO, check=True)
+schedule = json.dumps({key: best[key] for key in SCHEDULE}, sort_keys=True).encode()
+baseline_id = hashlib.sha256(schedule + digest(ENV_SOURCES).encode()).hexdigest()[:40]
+baselines = BENCH / "baselines" / baseline_id
+for policy in ("ppo", "random"):
+    read(baselines / policy, best)
+candidate = BENCH / digest((
+    "Sources", "Package.swift", "setup.sh", "fleet.py", ".build/release/OaK", ".build/OakKernel.metallib",
+))[:40]
+if not candidate.exists():
+    print(f"Recording {candidate.name}: {best['batch']} lanes × {best['steps']:,} steps", flush=True)
+    subprocess.run(["caffeinate", "-i", REPO / ".build/release/OaK", "oak", str(best["steps"]), candidate], check=True, cwd=REPO)
+meta = read(candidate, best, SCHEDULE + ("preset",))
+(candidate / "baselines").mkdir(exist_ok=True)
+for policy in ("ppo", "random"):
+    link = candidate / "baselines" / policy
+    if not link.is_symlink():
+        link.symlink_to(os.path.relpath(baselines / policy, link.parent))
+    if link.resolve() != (baselines / policy).resolve():
+        raise SystemExit(f"Incorrect baseline link: {link}")
+different = []
+for entry in best["envSchedule"]:
+    file = Path("rewards") / f"{entry['envId']}.f32"
+    if not filecmp.cmp(candidate / file, best_root / file, shallow=False):
+        different.append(entry["envId"])
+print(f"Changed reward streams: {different}")
+print(f"Steps/s: {meta['stepsPerSecond']:,.0f}; best: {best['stepsPerSecond']:,.0f}")
+if different or not meta["stepsPerSecond"] >= best["stepsPerSecond"]:
+    raise SystemExit(f"REJECT: best stays {best_root.name}")
+(REPO / "best").write_text(candidate.name + "\n")
+print(f"PROMOTE: {candidate.name}")

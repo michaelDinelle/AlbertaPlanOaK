@@ -2,367 +2,154 @@
 
 constant uint OAK_SPEC_ENV_KIND [[function_constant(2)]];
 constant uint OAK_MEGA_G [[function_constant(3)]];
-constant bool OAK_PROBE_FIXEDIDX_FC [[function_constant(5)]];
-constant bool OAK_PROBE_FIXEDIDX = is_function_constant_defined(OAK_PROBE_FIXEDIDX_FC)
-    ? OAK_PROBE_FIXEDIDX_FC : false;
-inline uint activeIndex(device const uint *act, uint a) {
-    return OAK_PROBE_FIXEDIDX ? a : act[a];
+
+inline void syncMemory() {
+    simdgroup_barrier(mem_flags::mem_device);
 }
 
-inline void simdSyncDev() { simdgroup_barrier(mem_flags::mem_device); }
-
-inline void simdSyncTg() { simdgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup); }
-
-constant uint PLAN_SCRATCH_INV_SQRT_FEATURES = 2u;
+inline void syncSharedMemory() {
+    simdgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
+}
 
 constant uint FEATURE_PRODUCT = 0u;
 constant uint FEATURE_NORMALIZED_SUM = 1u;
 constant uint FEATURE_OBSERVATION_TIMESCALE = 3u;
 
-constant uint RECORD_VALUE = 0u;
-constant uint RECORD_AUX = 1u;
-constant uint RECORD_REWARD = 2u;
-constant uint RECORD_DURATION = 3u;
-constant uint RECORD_NEXT = 4u;
-constant uint RECORD_NEXT_AUX = 5u;
-constant uint RECORD_TWIN = 6u;
-constant uint RECORD_POLICY = 7u;
-constant uint OAK_RECORD_VEC_MAX = ((RECORD_POLICY + OAK_POLICY_MAX) + 3u) / 4u;
+inline float keepFinite(float old_w, float new_w) {
+    return isfinite(new_w) ? new_w : old_w;
+}
 
-inline float keepFinite(float old_w, float new_w) { return isfinite(new_w) ? new_w : old_w; }
-
-inline float track_rate(uint step, uint cap) {
+inline float trackingRateFor(uint step, uint cap) {
     return max(1.0f / (float(step) + 1.0f), 1.0f / float(max(cap, 1u)));
 }
 
-struct Shape {
-    uint observationCount, actionCount, perceptCount, featureCount, optionCount, nurseryCount, traceLevels;
-    uint policyCount, recordFloats, envActionCount;
-    float invFeatureTimeScale, invOptionCount, metaEta, sampleSigma, invTwoSigmaSquared, actorAlphaDenom;
+struct AgentParameters {
+    float valueWeight[OAK_FEATURE_CAPACITY];
+    Record option[OAK_FEATURE_CAPACITY * OAK_OPTION_COUNT];
 };
 
-inline Shape shapeFor(uint obsDim, uint envActionCount) {
-    Shape s;
-    s.observationCount = obsDim;
-    s.actionCount = OAK_ACTION_PARAMS;
-    s.perceptCount = perceptsForStream(obsDim, OAK_ACTION_PARAMS);
-    s.featureCount = featureCountForPercepts(s.perceptCount);
-    s.optionCount = OAK_OPTION_COUNT;
-    s.nurseryCount = nurseryForPercepts(s.perceptCount);
-    s.traceLevels = OAK_CANDIDATES_PER_SLOT;
-    s.policyCount = max(OAK_ACTION_PARAMS / 2u, 1u);
-    s.recordFloats = ((RECORD_POLICY + s.policyCount) + 3u) & ~3u;
-    s.envActionCount = envActionCount;
-    uint featureTimeScale = featureTimeScaleForPercepts(s.perceptCount);
-    s.invFeatureTimeScale = 1.0f / float(featureTimeScale);
-    s.invOptionCount = 1.0f / float(s.optionCount);
-    s.metaEta = 1.0f / float(featureTimeScale) / float(max(featureTimeScale + s.actionCount, 1u));
-    s.sampleSigma = 1.0f / float(max(s.actionCount, 1u));
-    s.invTwoSigmaSquared = 1.0f / (2.0f * s.sampleSigma * s.sampleSigma);
-    s.actorAlphaDenom = float(max(s.actionCount * s.optionCount, 1u));
-    return s;
-}
-
-inline Shape shape() {
-    return shapeFor(OAK_ENV_SPECS[OAK_SPEC_ENV_KIND].obsDimNatural, OAK_ENV_SPECS[OAK_SPEC_ENV_KIND].actionCount);
-}
-
-struct Layout {
-    uint paramStride, stateStride, uintStride;
-    uint option;
-    uint observation, observationMean, observationSecondMoment;
-    uint observationMeta;
-    uint state, policyMean, policyMeanRaw, actionSignal, optionActorCredit, optionPolicyMean, importance;
-    uint reward, td, optionTd, featureUtility, optionUtility, bonusWeight, featureMoments;
-    uint valueMeta, optionValueMeta, modelMeta;
-    uint actorAdvantage, optionRewardTd, optionDurationTd, observationTimescale, optionPriority, continuation, keyboard;
-    uint rewardCenter, optionValueScale, valueScale, previousFeatureNormSq;
-    uint optionValueDot, optionValueAuxScale, optionAverageReward, optionModelAverageReward, optionFitness;
-    uint actorMeta;
-    uint importanceStaging, actorCreditStaging, sampleScratch;
-    uint predictedReward, predictedDuration, predictedNextValue, twinDisagreement;
-    uint optionNextValueTd, optionNextValueDot, optionNextValueScale, optionNextValueAuxScale;
-    uint nurseryStats, optionLogit, optionPolicyCoef, optionUseByFeature, nurseryScore, replaceScore, stageScratch, planScratch;
-    uint optionFeature, optionAge, featureMeta, featureBirthCount;
-    uint selectedOption, lastStopAge, nurseryMeta;
-    uint activeFeature, replaceSlot, parked;
+struct AgentMemory {
+    float observation[OAK_OBSERVATION_CAPACITY];
+    float observationMean[OAK_OBSERVATION_CAPACITY];
+    float observationSecondMoment[OAK_OBSERVATION_CAPACITY];
+    float4 observationMeta[OAK_OBSERVATION_CAPACITY];
+    float features[OAK_FEATURE_STATES];
+    float policyMean[OAK_POLICY_MAX];
+    float policyMeanRaw[OAK_POLICY_MAX];
+    float actionSignal[OAK_ACTION_PARAMS];
+    float optionActorCredit[OAK_POLICY_BANK];
+    float optionPolicyMean[OAK_POLICY_BANK];
+    float importance[OAK_OPTION_COUNT];
+    float reward;
+    float td;
+    float optionTd[OAK_OPTION_COUNT];
+    float featureUtility[OAK_FEATURE_CAPACITY];
+    float optionUtility[OAK_OPTION_COUNT];
+    float bonusWeight[OAK_FEATURE_CAPACITY];
+    alignas(float4) float2 featureMoments[OAK_FEATURE_CAPACITY];
+    float4 valueMeta[OAK_FEATURE_CAPACITY];
+    float4 optionValueMeta[OAK_FEATURE_CAPACITY];
+    float4 modelMeta[OAK_FEATURE_CAPACITY];
+    float actorAdvantage[OAK_OPTION_COUNT];
+    float optionRewardTd[OAK_OPTION_COUNT];
+    float optionDurationTd[OAK_OPTION_COUNT];
+    float observationTimescale[OAK_CANDIDATES_PER_SLOT * OAK_OBSERVATION_CAPACITY];
+    float optionPriority[OAK_OPTION_COUNT];
+    float continuation[OAK_OPTION_COUNT];
+    float rewardCenter;
+    float optionValueScale[OAK_OPTION_COUNT];
+    float valueScale;
+    float previousFeatureNormSq;
+    float optionValueDot[OAK_OPTION_COUNT];
+    float optionValueAuxScale[OAK_OPTION_COUNT];
+    float optionAverageReward[OAK_OPTION_COUNT];
+    float optionModelAverageReward[OAK_OPTION_COUNT];
+    float optionFitness[OAK_OPTION_COUNT];
+    float4 actorMeta[OAK_OPTION_COUNT];
+    float importanceStaging[OAK_OPTION_COUNT];
+    float actorCreditStaging[OAK_POLICY_BANK];
+    float sampleScratch[OAK_SAMPLE_SCRATCH];
+    float predictedReward[OAK_OPTION_COUNT];
+    float predictedDuration[OAK_OPTION_COUNT];
+    float predictedNextValue[OAK_OPTION_COUNT];
+    float optionNextValueTd[OAK_OPTION_COUNT];
+    float optionNextValueDot[OAK_OPTION_COUNT];
+    float optionNextValueScale[OAK_OPTION_COUNT];
+    float optionNextValueAuxScale[OAK_OPTION_COUNT];
+    float nurseryStats[OAK_FEATURE_STATS];
+    float optionLogit[OAK_POLICY_BANK];
+    float optionPolicyCoef[OAK_POLICY_BANK];
+    float optionUseByFeature[OAK_FEATURE_CAPACITY];
+    float nurseryScore[OAK_FEATURE_CAPACITY];
+    float replaceScore[OAK_FEATURE_STATS];
+    float currentValue;
+    float previousModelEnergy;
+    float crossModelEnergy;
+    float currentModelEnergy;
+    float planningReward;
+    float inverseFeatureNorm;
+    float averageReward;
 };
 
-inline Layout layoutFor(Shape s) {
-    Layout L;
-    uint F = s.featureCount, K = s.optionCount, A = s.actionCount, N = s.nurseryCount, O = s.observationCount;
-    uint p = 0u;
-    p += F;
-    L.option = p; p += F * K * s.recordFloats;
-    L.paramStride = p;
-
-    uint o = 0u;
-    L.observation = o; o += O;
-    L.observationMean = o; o += O;
-    L.observationSecondMoment = o; o += O;
-    o = (o + 3u) & ~3u;
-    L.observationMeta = o; o += 4u * O;
-    L.state = o; o += 2u * F;
-    L.policyMean = o; o += A;
-    L.policyMeanRaw = o; o += A;
-    L.actionSignal = o; o += A;
-    L.optionActorCredit = o; o += K * A;
-    L.optionPolicyMean = o; o += K * A;
-    L.importance = o; o += K;
-    L.reward = o; o += 1u;
-    L.td = o; o += 1u;
-    L.optionTd = o; o += K;
-    L.featureUtility = o; o += F;
-    L.optionUtility = o; o += K;
-    L.bonusWeight = o; o += F;
-    o = (o + 3u) & ~3u;
-    L.featureMoments = o; o += 2u * F;
-    L.valueMeta = o; o += 4u * F;
-    L.optionValueMeta = o; o += 4u * F;
-    L.modelMeta = o; o += 4u * F;
-    L.actorAdvantage = o; o += K;
-    L.optionRewardTd = o; o += K;
-    L.optionDurationTd = o; o += K;
-    L.observationTimescale = o; o += s.traceLevels * O;
-    L.optionPriority = o; o += K;
-    L.continuation = o; o += K;
-    L.keyboard = o; o += K;
-    L.rewardCenter = o; o += 1u;
-    L.optionValueScale = o; o += K;
-    L.valueScale = o; o += 1u;
-    L.previousFeatureNormSq = o; o += 1u;
-    L.optionValueDot = o; o += K;
-    L.optionValueAuxScale = o; o += K;
-    L.optionAverageReward = o; o += K;
-    L.optionModelAverageReward = o; o += K;
-    L.optionFitness = o; o += K;
-    o = (o + 3u) & ~3u;
-    L.actorMeta = o; o += 4u * K;
-    L.importanceStaging = o; o += K;
-    L.actorCreditStaging = o; o += K * A;
-    L.sampleScratch = o; o += OAK_SAMPLE_SCRATCH;
-    L.predictedReward = o; o += K;
-    L.predictedDuration = o; o += K;
-    L.predictedNextValue = o; o += K;
-    L.twinDisagreement = o; o += K;
-    L.optionNextValueTd = o; o += K;
-    L.optionNextValueDot = o; o += K;
-    L.optionNextValueScale = o; o += K;
-    L.optionNextValueAuxScale = o; o += K;
-    o = (o + 3u) & ~3u;
-    L.nurseryStats = o; o += 4u * N;
-    L.optionLogit = o; o += K * A;
-    L.optionPolicyCoef = o; o += K * s.policyCount;
-    L.optionUseByFeature = o; o += F;
-    L.nurseryScore = o; o += N;
-    o = (o + 3u) & ~3u;
-    L.replaceScore = o; o += 4u * F;
-    L.stageScratch = o; o += 16u;
-    L.planScratch = o; o += 4u;
-    L.stateStride = (o + 3u) & ~3u;
-
-    uint u = 0u;
-    L.optionFeature = u; u += K;
-    L.optionAge = u; u += K;
-    L.featureBirthCount = u; u += F;
-    L.selectedOption = u; u += 1u;
-    L.lastStopAge = u; u += K;
-    L.activeFeature = u; u += 2u * activeFeaturesForPercepts(s.perceptCount);
-    L.replaceSlot = u; u += 4u;
-    L.parked = u; u += K;
-    u = (u + 3u) & ~3u;
-    L.featureMeta = u; u += 4u * F;
-    L.nurseryMeta = u; u += 4u * N;
-    L.uintStride = u;
-    return L;
-}
+struct AgentIndices {
+    uint optionFeature[OAK_OPTION_COUNT];
+    uint optionAge[OAK_OPTION_COUNT];
+    uint featureBirthCount[OAK_FEATURE_CAPACITY];
+    uint lastStopAge[OAK_OPTION_COUNT];
+    uint activeFeature[OAK_ACTIVE_STATES];
+    uint replaceSlot[4u];
+    uint parked[OAK_OPTION_COUNT];
+    uint4 featureMeta[OAK_FEATURE_CAPACITY];
+    uint4 nurseryMeta[OAK_FEATURE_CAPACITY];
+};
 
 struct Agent {
-    uint observationCount, featureCount, optionCount, actionCount, traceLevels, perceptCount, nurseryCount;
-    uint envActionCount, policyCount, recordFloats;
-    uint stepCount, stateSlot;
-    float invFeatureTimeScale, invOptionCount, metaEta;
-    float sampleSigma, invTwoSigmaSquared, actorAlphaDenom;
-    device float *valueWeight, *option;
-    device float *observation, *observationMean, *observationSecondMoment;
-    device float4 *observationMeta;
-    device float *state;
-    device float *policyMean, *policyMeanRaw, *actionSignal, *optionActorCredit, *optionPolicyMean;
-    device float *importance;
-    device float *reward, *td, *optionTd;
-    device float *featureUtility, *optionUtility, *bonusWeight;
-    device float2 *featureMoments;
-    device float4 *valueMeta, *optionValueMeta, *modelMeta;
-    device float *actorAdvantage, *optionRewardTd, *optionDurationTd;
-    device float *observationTimescale, *optionPriority, *continuation, *keyboard;
-    device float *rewardCenter, *optionValueScale, *valueScale, *previousFeatureNormSq;
-    device float *optionValueDot, *optionValueAuxScale, *optionAverageReward, *optionModelAverageReward, *optionFitness;
-    device float4 *actorMeta;
-    device float *importanceStaging, *actorCreditStaging, *sampleScratch;
-    device float *predictedReward, *predictedDuration, *predictedNextValue, *twinDisagreement;
-    device float *optionNextValueTd, *optionNextValueDot, *optionNextValueScale, *optionNextValueAuxScale;
-    device float *nurseryStats, *optionLogit, *optionPolicyCoef, *optionUseByFeature, *nurseryScore, *replaceScore;
-    device float *stageScratch, *planScratch;
-    device uint *optionFeature, *optionAge, *featureBirthCount;
-    device uint *selectedOption, *lastStopAge;
-    device uint4 *featureMeta, *nurseryMeta;
-    device uint *activeFeature, *replaceSlot, *parked;
-    device KernelScalars *scalars;
+    uint observationCount, envActionCount, stepCount, stateSlot;
+    device AgentParameters *parameters;
+    device AgentMemory *memory;
+    device AgentIndices *indices;
 };
 
-inline uint activeCount(uint perceptCount) { return activeFeaturesForPercepts(perceptCount); }
-
-inline Agent make_agent(device float *params, device float *stateArena, device uint *uintArena,
-                        device KernelScalars *scalars, Shape s, uint agentID, uint agentGlobal) {
-    Layout L = layoutFor(s);
-    params += agentID * L.paramStride;
-    stateArena += agentID * L.stateStride;
-    uintArena += agentID * L.uintStride;
-    Agent agent;
-    agent.observationCount = s.observationCount;
-    agent.featureCount = s.featureCount;
-    agent.optionCount = s.optionCount;
-    agent.actionCount = s.actionCount;
-    agent.traceLevels = s.traceLevels;
-    agent.perceptCount = s.perceptCount;
-    agent.nurseryCount = s.nurseryCount;
-    agent.envActionCount = s.envActionCount;
-    agent.policyCount = s.policyCount;
-    agent.recordFloats = s.recordFloats;
-    agent.stepCount = scalars[agentGlobal].stepCount;
-    agent.stateSlot = scalars[agentGlobal].stateSlot;
-    agent.invFeatureTimeScale = s.invFeatureTimeScale;
-    agent.invOptionCount = s.invOptionCount;
-    agent.metaEta = s.metaEta;
-    agent.sampleSigma = s.sampleSigma;
-    agent.invTwoSigmaSquared = s.invTwoSigmaSquared;
-    agent.actorAlphaDenom = s.actorAlphaDenom;
-    agent.valueWeight = params;
-    agent.option = params + L.option;
-    agent.observation = stateArena + L.observation;
-    agent.observationMean = stateArena + L.observationMean;
-    agent.observationSecondMoment = stateArena + L.observationSecondMoment;
-    agent.observationMeta = (device float4 *)(stateArena + L.observationMeta);
-    agent.state = stateArena + L.state;
-    agent.policyMean = stateArena + L.policyMean;
-    agent.policyMeanRaw = stateArena + L.policyMeanRaw;
-    agent.actionSignal = stateArena + L.actionSignal;
-    agent.optionActorCredit = stateArena + L.optionActorCredit;
-    agent.optionPolicyMean = stateArena + L.optionPolicyMean;
-    agent.importance = stateArena + L.importance;
-    agent.reward = stateArena + L.reward;
-    agent.td = stateArena + L.td;
-    agent.optionTd = stateArena + L.optionTd;
-    agent.featureUtility = stateArena + L.featureUtility;
-    agent.optionUtility = stateArena + L.optionUtility;
-    agent.bonusWeight = stateArena + L.bonusWeight;
-    agent.featureMoments = (device float2 *)(stateArena + L.featureMoments);
-    agent.valueMeta = (device float4 *)(stateArena + L.valueMeta);
-    agent.optionValueMeta = (device float4 *)(stateArena + L.optionValueMeta);
-    agent.modelMeta = (device float4 *)(stateArena + L.modelMeta);
-    agent.actorAdvantage = stateArena + L.actorAdvantage;
-    agent.optionRewardTd = stateArena + L.optionRewardTd;
-    agent.optionDurationTd = stateArena + L.optionDurationTd;
-    agent.observationTimescale = stateArena + L.observationTimescale;
-    agent.optionPriority = stateArena + L.optionPriority;
-    agent.continuation = stateArena + L.continuation;
-    agent.keyboard = stateArena + L.keyboard;
-    agent.rewardCenter = stateArena + L.rewardCenter;
-    agent.optionValueScale = stateArena + L.optionValueScale;
-    agent.valueScale = stateArena + L.valueScale;
-    agent.previousFeatureNormSq = stateArena + L.previousFeatureNormSq;
-    agent.optionValueDot = stateArena + L.optionValueDot;
-    agent.optionValueAuxScale = stateArena + L.optionValueAuxScale;
-    agent.optionAverageReward = stateArena + L.optionAverageReward;
-    agent.optionModelAverageReward = stateArena + L.optionModelAverageReward;
-    agent.optionFitness = stateArena + L.optionFitness;
-    agent.actorMeta = (device float4 *)(stateArena + L.actorMeta);
-    agent.importanceStaging = stateArena + L.importanceStaging;
-    agent.actorCreditStaging = stateArena + L.actorCreditStaging;
-    agent.sampleScratch = stateArena + L.sampleScratch;
-    agent.predictedReward = stateArena + L.predictedReward;
-    agent.predictedDuration = stateArena + L.predictedDuration;
-    agent.predictedNextValue = stateArena + L.predictedNextValue;
-    agent.twinDisagreement = stateArena + L.twinDisagreement;
-    agent.optionNextValueTd = stateArena + L.optionNextValueTd;
-    agent.optionNextValueDot = stateArena + L.optionNextValueDot;
-    agent.optionNextValueScale = stateArena + L.optionNextValueScale;
-    agent.optionNextValueAuxScale = stateArena + L.optionNextValueAuxScale;
-    agent.nurseryStats = stateArena + L.nurseryStats;
-    agent.optionLogit = stateArena + L.optionLogit;
-    agent.optionPolicyCoef = stateArena + L.optionPolicyCoef;
-    agent.optionUseByFeature = stateArena + L.optionUseByFeature;
-    agent.nurseryScore = stateArena + L.nurseryScore;
-    agent.replaceScore = stateArena + L.replaceScore;
-    agent.stageScratch = stateArena + L.stageScratch;
-    agent.planScratch = stateArena + L.planScratch;
-    agent.optionFeature = uintArena + L.optionFeature;
-    agent.optionAge = uintArena + L.optionAge;
-    agent.featureBirthCount = uintArena + L.featureBirthCount;
-    agent.selectedOption = uintArena + L.selectedOption;
-    agent.lastStopAge = uintArena + L.lastStopAge;
-    agent.activeFeature = uintArena + L.activeFeature;
-    agent.replaceSlot = uintArena + L.replaceSlot;
-    agent.parked = uintArena + L.parked;
-    agent.featureMeta = (device uint4 *)(uintArena + L.featureMeta);
-    agent.nurseryMeta = (device uint4 *)(uintArena + L.nurseryMeta);
-    agent.scalars = scalars + agentGlobal;
-    return agent;
+inline Agent bindAgent(device float *parameters, device float *memory, device uint *indices, uint lane,
+                       uint step) {
+    return {OAK_ENV_SPECS[OAK_SPEC_ENV_KIND].obsDimNatural,
+            OAK_ENV_SPECS[OAK_SPEC_ENV_KIND].actionCount,
+            step,
+            step & 1u,
+            (device AgentParameters *)parameters + lane,
+            (device AgentMemory *)memory + lane,
+            (device AgentIndices *)indices + lane};
 }
 
-inline device float *record(Agent agent, uint feature, uint option) {
-    return agent.option + (feature * agent.optionCount + option) * agent.recordFloats;
+inline device Record *optionRecord(Agent agent, uint feature, uint option) {
+    return agent.parameters->option + feature * OAK_OPTION_COUNT + option;
 }
 
-inline device float *state_at(Agent agent, uint slot) { return agent.state + slot * agent.featureCount; }
+inline device float *featureValues(Agent agent, uint slot) {
+    return agent.memory->features + slot * OAK_FEATURE_CAPACITY;
+}
 
-inline uint perceptSourceCount(Agent agent) { return agent.observationCount + agent.envActionCount + 1u; }
+inline uint perceptSourceCount(Agent agent) {
+    return agent.observationCount + agent.envActionCount + 1u;
+}
 
 struct OakShapeProbe {
-    uint featureCount, optionCount, nursery, traceLevels, perceptCount, actionCount;
-    uint paramStride, stateStride, uintStride;
-    uint pOption, recordFloats, recordValue, recordPolicy;
-    uint stUtilOpt, stValueMeta, stOptionValueMeta, stModelMeta, stActorMeta;
-    uint uOptFeature, uFeatureMeta, uNurseryMeta;
-    uint simdWidth, threadgroupLanes, activeFeatures, featureTimeScale, optionsPerThread, actorAlphaDenom;
-    uint laneThreadgroupFloats, laneSimdgroups;
+    uint featureCount, perceptCount, actionCount;
+    uint parameterStride, memoryStride, indexStride;
+    uint simdWidth, threadgroupLanes, laneThreadgroupFloats, laneSimdgroups;
 };
-static_assert(sizeof(OakShapeProbe) == 116, "OakShapeProbe layout drifted from the Swift mirror");
 
-kernel void oak_shape_probe(device OakShapeProbe *out [[buffer(0)]],
-                            uint tid [[thread_position_in_grid]]) {
-    if (tid != 0u) return;
-    Shape s = shape();
-    Layout L = layoutFor(s);
-    out->featureCount = s.featureCount;
-    out->optionCount = s.optionCount;
-    out->nursery = s.nurseryCount;
-    out->traceLevels = s.traceLevels;
-    out->perceptCount = s.perceptCount;
-    out->actionCount = s.actionCount;
-    out->paramStride = L.paramStride;
-    out->stateStride = L.stateStride;
-    out->uintStride = L.uintStride;
-    out->pOption = L.option;
-    out->recordFloats = s.recordFloats;
-    out->recordValue = RECORD_VALUE;
-    out->recordPolicy = RECORD_POLICY;
-    out->stUtilOpt = L.optionUtility;
-    out->stValueMeta = L.valueMeta;
-    out->stOptionValueMeta = L.optionValueMeta;
-    out->stModelMeta = L.modelMeta;
-    out->stActorMeta = L.actorMeta;
-    out->uOptFeature = L.optionFeature;
-    out->uFeatureMeta = L.featureMeta;
-    out->uNurseryMeta = L.nurseryMeta;
-    out->simdWidth = OAK_SIMD_WIDTH;
-    out->threadgroupLanes = OAK_THREADGROUP_LANES;
-    out->activeFeatures = activeCount(s.perceptCount);
-    out->featureTimeScale = featureTimeScaleForPercepts(s.perceptCount);
-    out->optionsPerThread = OAK_OPTIONS_PER_THREAD;
-    out->actorAlphaDenom = uint(s.actorAlphaDenom);
-    out->laneThreadgroupFloats = 6u * s.optionCount + 1u;
-    out->laneSimdgroups = OAK_ENV_SPECS[OAK_SPEC_ENV_KIND].laneThreads > 1u ? OAK_WIDE_LANE_SIMDGROUPS : 1u;
+kernel void oak_shape_probe(device OakShapeProbe *out [[buffer(0)]]) {
+    *out = {OAK_FEATURE_CAPACITY,
+            OAK_PERCEPT_COUNT,
+            OAK_ACTION_PARAMS,
+            sizeof(AgentParameters) / sizeof(float),
+            sizeof(AgentMemory) / sizeof(float),
+            sizeof(AgentIndices) / sizeof(uint),
+            OAK_SIMD_WIDTH,
+            OAK_THREADGROUP_LANES,
+            OAK_LANE_SHARED_FLOATS,
+            OAK_ENV_SPECS[OAK_SPEC_ENV_KIND].laneThreads > 1u ? OAK_WIDE_LANE_SIMDGROUPS : 1u};
 }
 
 constant uint OAK_ENV_TABLE_HEADER = 9u;
@@ -375,8 +162,8 @@ inline uint mjWorkWords(uint envK, device float *base) {
 }
 
 kernel void oak_env_table_probe(device uint *out [[buffer(0)]],
-                                uint tid [[thread_position_in_grid]]) {
-    if (tid != 0u) return;
+                                uint threadIndex [[thread_position_in_grid]]) {
+    if (threadIndex != 0u) return;
     out[0] = OAK_ENV_COUNT;
     out[1] = OAK_ENV_OBS_MAX;
     out[2] = OAK_ENV_ACT_MAX;
@@ -403,19 +190,22 @@ kernel void oak_env_table_probe(device uint *out [[buffer(0)]],
 }
 
 kernel void oak_env_constants_init(device float *out [[buffer(0)]],
-                                    uint tid [[thread_position_in_grid]]) {
-    if (tid == 0u) jbw_buildResponse(out);
+                                   uint threadIndex [[thread_position_in_grid]]) {
+    if (threadIndex == 0u) jbw_buildResponse(out);
 }
 
-inline device uint *activeFeatures(Agent agent, uint slot) { return agent.activeFeature + slot * activeCount(agent.perceptCount); }
+inline device uint *activeFeatures(Agent agent, uint slot) {
+    return agent.indices->activeFeature + slot * OAK_ACTIVE_CAPACITY;
+}
 
 inline uint featureTile(float activation) {
     return uint(clamp(floor(activation + 3.5f), 0.0f, 6.0f));
 }
 
 inline uint tileSourceIndex(Agent agent, uint source) {
-    return (source < agent.observationCount + agent.envActionCount) ? source
-         : agent.observationCount + agent.actionCount;
+    return (source < agent.observationCount + agent.envActionCount)
+               ? source
+               : agent.observationCount + OAK_ACTION_PARAMS;
 }
 
 inline uint zoomedFeatureTile(float activation, uint zoomLevel) {
@@ -434,23 +224,24 @@ inline uint jointFeatureTile(float activationA, float activationB, uint sourceRe
 inline bool wasActive(device const uint *previousActive, uint percepts, uint i) {
     return i < percepts || previousActive[percepts + (i - percepts) / OAK_CANDIDATES_PER_SLOT] == i;
 }
-inline float heldDuration(float raw) { return isfinite(raw) ? max(1.0f, raw) : 1.0f; }
-
 inline float normalizedObservation(Agent agent, uint observationIndex) {
-    float mean = agent.observationMean[observationIndex];
-    float secondMoment = agent.observationSecondMoment[observationIndex];
+    float mean = agent.memory->observationMean[observationIndex];
+    float secondMoment = agent.memory->observationSecondMoment[observationIndex];
     float var = max(secondMoment - mean * mean, 0.0f);
-    return (agent.observation[observationIndex] - mean) * rsqrt(var + 1.0f / float(2u * agent.perceptCount));
+    return (agent.memory->observation[observationIndex] - mean) *
+           rsqrt(var + 1.0f / float(2u * OAK_PERCEPT_COUNT));
 }
 
-inline void metaOptimizeUpdate(device float4 *meta, uint i, float signal, float x, uint age, float metaEta, float decay) {
+inline void metaOptimizeUpdate(device float4 *meta, uint i, float signal, float x, uint age, float metaEta,
+                               float decay) {
     if (!isfinite(signal) || !isfinite(x)) return;
     float4 old = meta[i];
     float oldAlpha = old.x, oldBeta = old.y, oldH = old.z, oldGradEnergy = old.w;
     float grad = signal * x;
     float metaGradient = grad * oldH;
     float gradEnergyRate = 1.0f / (float(age) + 1.0f);
-    float gradEnergy = keepFinite(oldGradEnergy, oldGradEnergy + gradEnergyRate * (metaGradient * metaGradient - oldGradEnergy));
+    float gradEnergy = keepFinite(
+        oldGradEnergy, oldGradEnergy + gradEnergyRate * (metaGradient * metaGradient - oldGradEnergy));
     float ridge = 1.0f / (float(age) + 1.0f);
     float normalizedMetaGradient = metaGradient * rsqrt(max(gradEnergy, 0.0f) + ridge);
     float newBeta = oldBeta + metaEta * normalizedMetaGradient;
@@ -461,16 +252,16 @@ inline void metaOptimizeUpdate(device float4 *meta, uint i, float signal, float 
     meta[i] = float4(alpha, beta, keepFinite(oldH, hDecay * oldH + oldAlpha * grad), gradEnergy);
 }
 
-inline void storeLearnScales(Agent agent, uint tid) {
+inline void storeLearnScales(Agent agent, uint threadIndex) {
     device const uint *previousActive = activeFeatures(agent, agent.stateSlot);
-    device const float *previousFeatures = state_at(agent, agent.stateSlot);
+    device const float *previousFeatures = featureValues(agent, agent.stateSlot);
     float valueStepDenominator = 1.0f;
     float previousFeatureNormSq = 0.0f;
-    for (uint base = 0u; base < activeCount(agent.perceptCount); base += OAK_SIMD_WIDTH) {
-        uint a = base + tid;
-        uint ip = previousActive[a];
-        float previousFeature = previousFeatures[ip];
-        float previousAlpha = agent.valueMeta[ip].x;
+    for (uint base = 0u; base < OAK_ACTIVE_CAPACITY; base += OAK_SIMD_WIDTH) {
+        uint a = base + threadIndex;
+        uint previousIndex = previousActive[a];
+        float previousFeature = previousFeatures[previousIndex];
+        float previousAlpha = agent.memory->valueMeta[previousIndex].x;
         for (uint t = 0u; t < OAK_SIMD_WIDTH; ++t) {
             float x = simd_shuffle(previousFeature, (ushort)t);
             float previousAlphaBroadcast = simd_shuffle(previousAlpha, (ushort)t);
@@ -478,403 +269,416 @@ inline void storeLearnScales(Agent agent, uint tid) {
             previousFeatureNormSq = fma(x, x, previousFeatureNormSq);
         }
     }
-    if (tid == 0u) {
-        agent.valueScale[0] = (isfinite(valueStepDenominator) && valueStepDenominator > 0.0f) ? (1.0f / valueStepDenominator) : 0.0f;
-        agent.previousFeatureNormSq[0] = previousFeatureNormSq;
+    if (threadIndex == 0u) {
+        agent.memory->valueScale = (isfinite(valueStepDenominator) && valueStepDenominator > 0.0f)
+                                       ? (1.0f / valueStepDenominator)
+                                       : 0.0f;
+        agent.memory->previousFeatureNormSq = previousFeatureNormSq;
     }
 }
 
-inline void predictAndControl(Agent agent, uint tid,
-                              threadgroup float *tgCont,
-                              threadgroup float *tgStash,
-                              threadgroup float *tgDirty) {
-    if (tid == 0u) tgDirty[0] = 0.0f;
-    device float *stageScalars = agent.stageScratch;
-    device const float *previousFeatures = state_at(agent, agent.stateSlot);
-    device const float *currentFeatures = state_at(agent, 1u - agent.stateSlot);
+inline void predictAndControl(Agent agent, uint threadIndex, threadgroup float *predictions,
+                              threadgroup float *predictionsChanged) {
+    if (threadIndex == 0u) predictionsChanged[0] = 0.0f;
+    device const float *previousFeatures = featureValues(agent, agent.stateSlot);
+    device const float *currentFeatures = featureValues(agent, 1u - agent.stateSlot);
     device const uint *previousActive = activeFeatures(agent, agent.stateSlot);
     device const uint *currentActive = activeFeatures(agent, 1u - agent.stateSlot);
     float previousValue = 0.0f, currentValue = 0.0f;
     {
         float previousValuePartial = 0.0f, currentValuePartial = 0.0f;
-        for (uint a = tid; a < activeCount(agent.perceptCount); a += OAK_SIMD_WIDTH) {
-            uint ip = activeIndex(previousActive, a), ic = activeIndex(currentActive, a);
-            previousValuePartial = fma(agent.valueWeight[ip], previousFeatures[ip], previousValuePartial);
-            currentValuePartial = fma(agent.valueWeight[ic], currentFeatures[ic], currentValuePartial);
+        for (uint a = threadIndex; a < OAK_ACTIVE_CAPACITY; a += OAK_SIMD_WIDTH) {
+            uint previousIndex = previousActive[a], currentIndex = currentActive[a];
+            previousValuePartial = fma(agent.parameters->valueWeight[previousIndex],
+                                       previousFeatures[previousIndex], previousValuePartial);
+            currentValuePartial = fma(agent.parameters->valueWeight[currentIndex],
+                                      currentFeatures[currentIndex], currentValuePartial);
         }
         previousValue = simd_sum(previousValuePartial);
         currentValue = simd_sum(currentValuePartial);
-        if (tid == 0u) stageScalars[1] = currentValue;
+        if (threadIndex == 0u) agent.memory->currentValue = currentValue;
     }
-    simdSyncTg();
-    float gauge = agent.rewardCenter[0];
+    syncSharedMemory();
+    float gauge = agent.memory->rewardCenter;
     float previousDifferentialValue = previousValue - gauge;
     float currentDifferentialValue = currentValue - gauge;
 
-    float averageRewardOld = agent.scalars->averageReward;
-    float centeredReward = agent.reward[0] - averageRewardOld;
-    if (tid == 0u) {
+    float averageRewardOld = agent.memory->averageReward;
+    float centeredReward = agent.memory->reward - averageRewardOld;
+    if (threadIndex == 0u) {
         float delta = centeredReward + currentDifferentialValue - previousDifferentialValue;
-        if (!isfinite(delta)) delta = 0.0f;
-        agent.td[0] = delta;
-        float averageRewardNew = averageRewardOld + agent.invFeatureTimeScale * delta;
-        agent.scalars->averageReward = isfinite(averageRewardNew) ? averageRewardNew : averageRewardOld;
+        delta = finiteOrZero(delta);
+        agent.memory->td = delta;
+        float averageRewardNew = averageRewardOld + OAK_TRACKING_RATE * delta;
+        agent.memory->averageReward = isfinite(averageRewardNew) ? averageRewardNew : averageRewardOld;
     }
 
     float optionValuePrevEnergy, optionValueCrossEnergy, optionValueNextEnergy;
     {
-        float optionValuePrevEnergyPartial = 0.0f, optionValueCrossEnergyPartial = 0.0f, optionValueNextEnergyPartial = 0.0f;
+        float optionValuePrevEnergyPartial = 0.0f, optionValueCrossEnergyPartial = 0.0f,
+              optionValueNextEnergyPartial = 0.0f;
         float modelPrevEnergyPartial = 0.0f, modelCrossEnergyPartial = 0.0f, modelNextEnergyPartial = 0.0f;
-        for (uint a = tid; a < activeCount(agent.perceptCount); a += OAK_SIMD_WIDTH) {
-            uint ip = activeIndex(previousActive, a), ic = activeIndex(currentActive, a);
-            float xp = previousFeatures[ip], xc = currentFeatures[ic];
-            float ap = agent.optionValueMeta[ip].x;
-            optionValuePrevEnergyPartial = fma(ap * xp, xp, optionValuePrevEnergyPartial);
-            optionValueCrossEnergyPartial = fma(ap * xp, currentFeatures[ip], optionValueCrossEnergyPartial);
-            float acps = agent.optionValueMeta[ic].x;
-            optionValueNextEnergyPartial = fma(acps * xc, xc, optionValueNextEnergyPartial);
-            float am = agent.modelMeta[ip].x;
-            modelPrevEnergyPartial = fma(am * xp, xp, modelPrevEnergyPartial);
-            modelCrossEnergyPartial = fma(am * xp, currentFeatures[ip], modelCrossEnergyPartial);
-            float amc = agent.modelMeta[ic].x;
-            modelNextEnergyPartial = fma(amc * xc, xc, modelNextEnergyPartial);
+        for (uint a = threadIndex; a < OAK_ACTIVE_CAPACITY; a += OAK_SIMD_WIDTH) {
+            uint previousIndex = previousActive[a], currentIndex = currentActive[a];
+            float previousActivation = previousFeatures[previousIndex],
+                  currentActivation = currentFeatures[currentIndex];
+            float ap = agent.memory->optionValueMeta[previousIndex].x;
+            optionValuePrevEnergyPartial =
+                fma(ap * previousActivation, previousActivation, optionValuePrevEnergyPartial);
+            optionValueCrossEnergyPartial =
+                fma(ap * previousActivation, currentFeatures[previousIndex], optionValueCrossEnergyPartial);
+            float acps = agent.memory->optionValueMeta[currentIndex].x;
+            optionValueNextEnergyPartial =
+                fma(acps * currentActivation, currentActivation, optionValueNextEnergyPartial);
+            float am = agent.memory->modelMeta[previousIndex].x;
+            modelPrevEnergyPartial = fma(am * previousActivation, previousActivation, modelPrevEnergyPartial);
+            modelCrossEnergyPartial =
+                fma(am * previousActivation, currentFeatures[previousIndex], modelCrossEnergyPartial);
+            float amc = agent.memory->modelMeta[currentIndex].x;
+            modelNextEnergyPartial = fma(amc * currentActivation, currentActivation, modelNextEnergyPartial);
         }
         optionValuePrevEnergy = simd_sum(optionValuePrevEnergyPartial);
         optionValueCrossEnergy = simd_sum(optionValueCrossEnergyPartial);
         optionValueNextEnergy = simd_sum(optionValueNextEnergyPartial);
-        stageScalars[8] = simd_sum(modelPrevEnergyPartial);
-        stageScalars[9] = simd_sum(modelCrossEnergyPartial);
-        stageScalars[10] = simd_sum(modelNextEnergyPartial);
+        agent.memory->previousModelEnergy = simd_sum(modelPrevEnergyPartial);
+        agent.memory->crossModelEnergy = simd_sum(modelCrossEnergyPartial);
+        agent.memory->currentModelEnergy = simd_sum(modelNextEnergyPartial);
     }
-    simdSyncTg();
-    float observedReward = agent.reward[0];
-    if (!isfinite(observedReward)) observedReward = 0.0f;
+    syncSharedMemory();
+    float observedReward = agent.memory->reward;
+    observedReward = finiteOrZero(observedReward);
 
-    for (uint k = tid; k < agent.optionCount; k += OAK_SIMD_WIDTH) {
-        if (agent.parked[k] == 0u) continue;
-        agent.continuation[k] = 0.0f;
-        agent.optionTd[k] = 0.0f;
-        agent.actorAdvantage[k] = 0.0f;
-        agent.keyboard[k] = 0.0f;
-        tgCont[k] = 0.0f;
+    for (uint k = threadIndex; k < OAK_OPTION_COUNT; k += OAK_SIMD_WIDTH) {
+        if (agent.indices->parked[k] == 0u) continue;
+        agent.memory->continuation[k] = 0.0f;
+        agent.memory->optionTd[k] = 0.0f;
+        agent.memory->actorAdvantage[k] = 0.0f;
     }
-    for (uint k = tid; k < agent.optionCount; k += OAK_SIMD_WIDTH) {
-        bool slotLive = agent.parked[k] == 0u;
+    for (uint k = threadIndex; k < OAK_OPTION_COUNT; k += OAK_SIMD_WIDTH) {
+        bool slotLive = agent.indices->parked[k] == 0u;
         uint slot = k;
         float optionValuePrev = 0.0f, optionValueNext = 0.0f, optionValueAuxDot = 0.0f;
-        float rewardHat = 0.0f, durationHat = 0.0f, nextValueHat = 0.0f, twinNextValueHat = 0.0f;
-        float previousNextValue = 0.0f, previousNextValueAuxDot = 0.0f, previousRewardHat = 0.0f, previousDurationHat = 0.0f;
+        float rewardHat = 0.0f, durationHat = 0.0f, nextValueHat = 0.0f;
+        float previousNextValue = 0.0f, previousNextValueAuxDot = 0.0f, previousRewardHat = 0.0f,
+              previousDurationHat = 0.0f;
         float twinPrevDot = 0.0f;
         float policyLogit[OAK_POLICY_MAX];
         for (uint j = 0u; j < OAK_POLICY_MAX; ++j) policyLogit[j] = 0.0f;
-        for (uint base = 0u; base < activeCount(agent.perceptCount); base += OAK_SIMD_WIDTH) {
-            uint ipH = activeIndex(previousActive, base + tid), icH = activeIndex(currentActive, base + tid);
-            float xpH = previousFeatures[ipH], xcH = currentFeatures[icH];
+        for (uint base = 0u; base < OAK_ACTIVE_CAPACITY; base += OAK_SIMD_WIDTH) {
+            uint localPreviousIndex = previousActive[base + threadIndex],
+                 localCurrentIndex = currentActive[base + threadIndex];
+            float localPreviousActivation = previousFeatures[localPreviousIndex],
+                  localCurrentActivation = currentFeatures[localCurrentIndex];
             for (uint l = 0u; l < OAK_SIMD_WIDTH; ++l) {
-                uint ip = simd_shuffle(ipH, (ushort)l), ic = simd_shuffle(icH, (ushort)l);
-                float xp = simd_shuffle(xpH, (ushort)l), xc = simd_shuffle(xcH, (ushort)l);
-                if (slotLive && xp != 0.0f) {
-                    device const float *rp = record(agent, ip, slot);
-                    optionValuePrev = fma(rp[RECORD_VALUE], xp, optionValuePrev);
-                    optionValueAuxDot = fma(rp[RECORD_AUX], xp, optionValueAuxDot);
-                    previousNextValue = fma(rp[RECORD_NEXT], xp, previousNextValue);
-                    previousNextValueAuxDot = fma(rp[RECORD_NEXT_AUX], xp, previousNextValueAuxDot);
-                    previousRewardHat = fma(rp[RECORD_REWARD], xp, previousRewardHat);
-                    previousDurationHat = fma(rp[RECORD_DURATION], xp, previousDurationHat);
-                    twinPrevDot = fma(rp[RECORD_TWIN], xp, twinPrevDot);
+                uint previousIndex = simd_shuffle(localPreviousIndex, (ushort)l),
+                     currentIndex = simd_shuffle(localCurrentIndex, (ushort)l);
+                float previousActivation = simd_shuffle(localPreviousActivation, (ushort)l),
+                      currentActivation = simd_shuffle(localCurrentActivation, (ushort)l);
+                if (slotLive && previousActivation != 0.0f) {
+                    device const Record *rp = optionRecord(agent, previousIndex, slot);
+                    optionValuePrev = fma(rp->value, previousActivation, optionValuePrev);
+                    optionValueAuxDot = fma(rp->aux, previousActivation, optionValueAuxDot);
+                    previousNextValue = fma(rp->next, previousActivation, previousNextValue);
+                    previousNextValueAuxDot = fma(rp->nextAux, previousActivation, previousNextValueAuxDot);
+                    previousRewardHat = fma(rp->reward, previousActivation, previousRewardHat);
+                    previousDurationHat = fma(rp->duration, previousActivation, previousDurationHat);
+                    twinPrevDot = fma(rp->twin, previousActivation, twinPrevDot);
                 }
-                if (slotLive && xc != 0.0f) {
-                    device const float *rc = record(agent, ic, slot);
-                    optionValueNext = fma(rc[RECORD_VALUE], xc, optionValueNext);
-                    rewardHat = fma(rc[RECORD_REWARD], xc, rewardHat);
-                    durationHat = fma(rc[RECORD_DURATION], xc, durationHat);
-                    nextValueHat = fma(rc[RECORD_NEXT], xc, nextValueHat);
-                    twinNextValueHat = fma(rc[RECORD_TWIN], xc, twinNextValueHat);
-                    for (uint j = 0u; j < agent.policyCount; ++j) policyLogit[j] = fma(rc[RECORD_POLICY + j], xc, policyLogit[j]);
+                if (slotLive && currentActivation != 0.0f) {
+                    device const Record *rc = optionRecord(agent, currentIndex, slot);
+                    optionValueNext = fma(rc->value, currentActivation, optionValueNext);
+                    rewardHat = fma(rc->reward, currentActivation, rewardHat);
+                    durationHat = fma(rc->duration, currentActivation, durationHat);
+                    nextValueHat = fma(rc->next, currentActivation, nextValueHat);
+                    for (uint j = 0u; j < OAK_POLICY_MAX; ++j)
+                        policyLogit[j] = fma(rc->policy[j], currentActivation, policyLogit[j]);
                 }
             }
         }
         if (!slotLive) continue;
-        uint optionFeatureIndex = agent.optionFeature[k] % agent.featureCount;
-        tgStash[k * 5u + 0u] = previousNextValue;
-        tgStash[k * 5u + 1u] = previousNextValueAuxDot;
-        tgStash[k * 5u + 2u] = previousRewardHat;
-        tgStash[k * 5u + 3u] = previousDurationHat;
-        tgStash[k * 5u + 4u] = twinPrevDot;
-        for (uint j = 0u; j < agent.policyCount; ++j) agent.optionLogit[k * agent.actionCount + j] = policyLogit[j];
+        uint optionFeatureIndex = agent.indices->optionFeature[k] % OAK_FEATURE_CAPACITY;
+        predictions[k * 5u + 0u] = previousNextValue;
+        predictions[k * 5u + 1u] = previousNextValueAuxDot;
+        predictions[k * 5u + 2u] = previousRewardHat;
+        predictions[k * 5u + 3u] = previousDurationHat;
+        predictions[k * 5u + 4u] = twinPrevDot;
+        for (uint j = 0u; j < OAK_POLICY_MAX; ++j)
+            agent.memory->optionLogit[k * OAK_POLICY_MAX + j] = policyLogit[j];
 
-        float stoppingBonus = agent.bonusWeight[optionFeatureIndex] - agent.valueWeight[optionFeatureIndex];
+        float stoppingBonus =
+            agent.memory->bonusWeight[optionFeatureIndex] - agent.parameters->valueWeight[optionFeatureIndex];
         if (!isfinite(stoppingBonus) || stoppingBonus < 0.0f) stoppingBonus = 0.0f;
-        float stoppingValue = currentDifferentialValue + (1.0f + stoppingBonus) * currentFeatures[optionFeatureIndex];
-        bool subtaskFinite = isfinite(optionValuePrev) && isfinite(optionValueNext) && isfinite(stoppingValue);
+        float stoppingValue =
+            currentDifferentialValue + (1.0f + stoppingBonus) * currentFeatures[optionFeatureIndex];
+        bool subtaskFinite =
+            isfinite(optionValuePrev) && isfinite(optionValueNext) && isfinite(stoppingValue);
 
-        float stop = (isfinite(optionValueNext) && isfinite(stoppingValue) && stoppingValue >= optionValueNext) ? 1.0f : 0.0f;
+        float stop =
+            (isfinite(optionValueNext) && isfinite(stoppingValue) && stoppingValue >= optionValueNext) ? 1.0f
+                                                                                                       : 0.0f;
 
         if (k == 0u) stop = 0.0f;
         float continuation = 1.0f - stop;
-        agent.continuation[k] = continuation;
-        if (stop > 0.0f) agent.lastStopAge[k] = 0u;
+        agent.memory->continuation[k] = continuation;
+        if (stop > 0.0f) agent.indices->lastStopAge[k] = 0u;
 
-        float optionAverageRewardOld = agent.optionAverageReward[k];
+        float optionAverageRewardOld = agent.memory->optionAverageReward[k];
         float optionTdError = subtaskFinite
-            ? (centeredReward - optionAverageRewardOld + continuation * optionValueNext + stop * stoppingValue - optionValuePrev) : 0.0f;
-        if (!isfinite(optionTdError)) optionTdError = 0.0f;
+                                  ? (centeredReward - optionAverageRewardOld +
+                                     continuation * optionValueNext + stop * stoppingValue - optionValuePrev)
+                                  : 0.0f;
+        optionTdError = finiteOrZero(optionTdError);
 
-        if (k == 0u) optionTdError = agent.td[0] - optionAverageRewardOld;
-        agent.optionTd[k] = optionTdError;
-        agent.actorAdvantage[k] = isfinite(optionTdError) ? optionTdError : 0.0f;
+        if (k == 0u) optionTdError = agent.memory->td - optionAverageRewardOld;
+        agent.memory->optionTd[k] = optionTdError;
+        agent.memory->actorAdvantage[k] = finiteOrZero(optionTdError);
         {
-            float optionAverageRewardNew = optionAverageRewardOld + agent.invFeatureTimeScale * optionTdError;
-            agent.optionAverageReward[k] = keepFinite(optionAverageRewardOld, optionAverageRewardNew);
+            float optionAverageRewardNew = optionAverageRewardOld + OAK_TRACKING_RATE * optionTdError;
+            agent.memory->optionAverageReward[k] = keepFinite(optionAverageRewardOld, optionAverageRewardNew);
         }
-        float importanceRatio = agent.importance[k];
+        float importanceRatio = agent.memory->importance[k];
         {
-            float previousOptionFitness = agent.optionFitness[k];
-            agent.optionFitness[k] = keepFinite(previousOptionFitness, previousOptionFitness + agent.invFeatureTimeScale * importanceRatio * (observedReward - previousOptionFitness));
+            float previousOptionFitness = agent.memory->optionFitness[k];
+            agent.memory->optionFitness[k] = keepFinite(
+                previousOptionFitness, previousOptionFitness + OAK_TRACKING_RATE * importanceRatio *
+                                                                   (observedReward - previousOptionFitness));
         }
 
-        float optionValueBootstrapEnergy = optionValuePrevEnergy - 2.0f * continuation * optionValueCrossEnergy + continuation * continuation * optionValueNextEnergy;
+        float optionValueBootstrapEnergy = optionValuePrevEnergy -
+                                           2.0f * continuation * optionValueCrossEnergy +
+                                           continuation * continuation * optionValueNextEnergy;
         float denom = fma(importanceRatio, optionValueBootstrapEnergy, 1.0f);
 
-        agent.optionValueScale[k] = (isfinite(denom) && denom > 0.0f) ? (1.0f / denom) : 0.0f;
+        agent.memory->optionValueScale[k] = (isfinite(denom) && denom > 0.0f) ? (1.0f / denom) : 0.0f;
         {
-            agent.optionValueDot[k] = isfinite(optionValueAuxDot) ? optionValueAuxDot : 0.0f;
+            agent.memory->optionValueDot[k] = finiteOrZero(optionValueAuxDot);
 
             float optionValueAuxDenom = fma(importanceRatio, optionValuePrevEnergy, 1.0f);
-            agent.optionValueAuxScale[k] = (isfinite(optionValueAuxDenom) && optionValueAuxDenom > 0.0f)
-                ? (1.0f / optionValueAuxDenom) : 0.0f;
+            agent.memory->optionValueAuxScale[k] =
+                (isfinite(optionValueAuxDenom) && optionValueAuxDenom > 0.0f) ? (1.0f / optionValueAuxDenom)
+                                                                              : 0.0f;
         }
-        tgCont[k] = continuation;
-        agent.predictedReward[k] = rewardHat;
-        agent.predictedDuration[k] = durationHat;
-        agent.predictedNextValue[k] = nextValueHat;
-        float twinAbsDiff = fabs(nextValueHat - twinNextValueHat);
-        agent.twinDisagreement[k] = isfinite(twinAbsDiff) ? twinAbsDiff : 0.0f;
+        agent.memory->predictedReward[k] = rewardHat;
+        agent.memory->predictedDuration[k] = durationHat;
+        agent.memory->predictedNextValue[k] = nextValueHat;
     }
     simdgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
-    if (tid == 0u) {
-        float gaugeRate = track_rate(agent.stepCount, agent.featureCount);
-        float gaugeNew = agent.rewardCenter[0] + gaugeRate * (currentValue - agent.rewardCenter[0]);
-        agent.rewardCenter[0] = keepFinite(agent.rewardCenter[0], gaugeNew);
+    if (threadIndex == 0u) {
+        float gaugeRate = trackingRateFor(agent.stepCount, OAK_FEATURE_CAPACITY);
+        float gaugeNew = agent.memory->rewardCenter + gaugeRate * (currentValue - agent.memory->rewardCenter);
+        agent.memory->rewardCenter = keepFinite(agent.memory->rewardCenter, gaugeNew);
     }
     simdgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
 
-    storeLearnScales(agent, tid);
-    uint prevSel = agent.selectedOption[0] % agent.optionCount;
-    bool continuing = (prevSel != 0u) && tgCont[prevSel] > 0.0f;
-    uint selected = continuing ? prevSel : 0u;
-    bool keyboardMass = false;
-    for (uint t = tid; t < agent.optionCount; t += OAK_SIMD_WIDTH) keyboardMass = keyboardMass || agent.keyboard[t] > 0.0f;
-
-    bool refreshKeyboard = (!continuing && prevSel != 0u) || !simd_any(keyboardMass);
-    if (refreshKeyboard) {
-        float bestScore = -FLT_MAX;
-        uint probe = 0xffffffffu;
-        for (uint t = tid; t < agent.optionCount; t += OAK_SIMD_WIDTH) {
-            float twinDis = agent.twinDisagreement[t];
-            float predictedDur = heldDuration(agent.predictedDuration[t]);
-            float probeScore = twinDis * predictedDur;
-            if (isfinite(probeScore) && probeScore > bestScore) { bestScore = probeScore; probe = t; }
-        }
-        float bestScoreAll = simd_max(bestScore);
-        probe = (bestScoreAll == -FLT_MAX) ? 0u : simd_min(bestScore == bestScoreAll ? probe : 0xffffffffu);
-        simdgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
-        for (uint k = tid; k < agent.optionCount; k += OAK_SIMD_WIDTH) agent.keyboard[k] = (k == probe) ? 1.0f : 0.0f;
-    }
-
-    if (tid == 0u) agent.selectedOption[0] = selected;
+    storeLearnScales(agent, threadIndex);
 }
 
-inline float constructedValue(Agent agent, device const float *features, uint parentA, uint parentB, uint kind) {
+inline float constructedValue(Agent agent, device const float *features, uint parentA, uint parentB,
+                              uint kind) {
     kind %= 4u;
     if (kind == FEATURE_OBSERVATION_TIMESCALE)
-        return agent.observationTimescale[parentA % (agent.traceLevels * agent.observationCount)];
-    float a = features[parentA % agent.featureCount], b = features[parentB % agent.featureCount];
-    return kind == FEATURE_PRODUCT ? a * b
-        : kind == FEATURE_NORMALIZED_SUM ? (a + b) * 0.7071067811865475f : a * (b - a);
+        return agent.memory->observationTimescale[parentA % (OAK_TRACE_LEVELS * agent.observationCount)];
+    float a = features[parentA % OAK_FEATURE_CAPACITY], b = features[parentB % OAK_FEATURE_CAPACITY];
+    return kind == FEATURE_PRODUCT          ? a * b
+           : kind == FEATURE_NORMALIZED_SUM ? (a + b) * 0.7071067811865475f
+                                            : a * (b - a);
 }
 
-inline void constructFeatures(Agent agent, uint tid) {
+inline void constructFeatures(Agent agent, uint threadIndex) {
     float standardizedObservation = 0.0f;
-    if (tid < agent.observationCount) {
-        uint observationIndex = tid;
-        float x = agent.observation[observationIndex];
+    if (threadIndex < agent.observationCount) {
+        uint observationIndex = threadIndex;
+        float x = agent.memory->observation[observationIndex];
         if (isfinite(x)) {
-            float observationMean = agent.observationMean[observationIndex];
-            metaOptimizeUpdate(agent.observationMeta, observationIndex, x - observationMean, 1.0f, min(agent.stepCount, agent.featureCount), agent.metaEta,
-                               agent.invFeatureTimeScale);
-            float obsRate = max(1.0f / (float(agent.stepCount) + 1.0f), agent.observationMeta[observationIndex].x);
-            agent.observationMean[observationIndex] += obsRate * (x - observationMean);
-            agent.observationSecondMoment[observationIndex] += obsRate * (x * x - agent.observationSecondMoment[observationIndex]);
+            float observationMean = agent.memory->observationMean[observationIndex];
+            metaOptimizeUpdate(agent.memory->observationMeta, observationIndex, x - observationMean, 1.0f,
+                               min(agent.stepCount, OAK_FEATURE_CAPACITY), OAK_META_RATE, OAK_TRACKING_RATE);
+            float obsRate = max(1.0f / (float(agent.stepCount) + 1.0f),
+                                agent.memory->observationMeta[observationIndex].x);
+            agent.memory->observationMean[observationIndex] += obsRate * (x - observationMean);
+            agent.memory->observationSecondMoment[observationIndex] +=
+                obsRate * (x * x - agent.memory->observationSecondMoment[observationIndex]);
             standardizedObservation = normalizedObservation(agent, observationIndex);
-            for (uint m = 1u; m <= agent.traceLevels; ++m) {
+            for (uint m = 1u; m <= OAK_TRACE_LEVELS; ++m) {
                 uint slot = (m - 1u) * agent.observationCount + observationIndex;
                 float rate = 1.0f / float(1u << m);
-                agent.observationTimescale[slot] += rate * (standardizedObservation - agent.observationTimescale[slot]);
+                agent.memory->observationTimescale[slot] +=
+                    rate * (standardizedObservation - agent.memory->observationTimescale[slot]);
             }
         } else {
             standardizedObservation = normalizedObservation(agent, observationIndex);
         }
     }
-    for (uint k = tid; k < agent.optionCount; k += OAK_SIMD_WIDTH) agent.importance[k] = agent.importanceStaging[k];
-    for (uint j = tid; j < agent.optionCount * agent.actionCount; j += OAK_SIMD_WIDTH)
-        agent.optionActorCredit[j] = agent.actorCreditStaging[j];
+    for (uint k = threadIndex; k < OAK_OPTION_COUNT; k += OAK_SIMD_WIDTH)
+        agent.memory->importance[k] = agent.memory->importanceStaging[k];
+    for (uint j = threadIndex; j < OAK_OPTION_COUNT * OAK_POLICY_MAX; j += OAK_SIMD_WIDTH)
+        agent.memory->optionActorCredit[j] = agent.memory->actorCreditStaging[j];
 
-    device const float *prev = state_at(agent, agent.stateSlot);
-    device float *curr = state_at(agent, 1u - agent.stateSlot);
+    device const float *previousFeatures = featureValues(agent, agent.stateSlot);
+    device float *currentFeatures = featureValues(agent, 1u - agent.stateSlot);
     device uint *currentActive = activeFeatures(agent, 1u - agent.stateSlot);
 
-    simdSyncDev();
+    syncMemory();
 
-    for (uint ablk = 0u; ablk < agent.perceptCount; ablk += OAK_SIMD_WIDTH) {
-        uint i = ablk + tid;
+    for (uint ablk = 0u; ablk < OAK_PERCEPT_COUNT; ablk += OAK_SIMD_WIDTH) {
+        uint i = ablk + threadIndex;
         float x;
         if (i < agent.observationCount) {
             x = standardizedObservation;
-        } else if (i < agent.observationCount + agent.actionCount) {
-            x = agent.actionSignal[i - agent.observationCount];
-        } else if (i == agent.observationCount + agent.actionCount) {
-            x = agent.reward[0];
-        } else if (i == agent.observationCount + agent.actionCount + 1u) {
+        } else if (i < agent.observationCount + OAK_ACTION_PARAMS) {
+            x = agent.memory->actionSignal[i - agent.observationCount];
+        } else if (i == agent.observationCount + OAK_ACTION_PARAMS) {
+            x = agent.memory->reward;
+        } else if (i == agent.observationCount + OAK_ACTION_PARAMS + 1u) {
             x = 1.0f;
         } else {
-            uint j = i - (agent.observationCount + agent.actionCount + 2u);
+            uint j = i - (agent.observationCount + OAK_ACTION_PARAMS + 2u);
             uint lvl = j / max(agent.observationCount, 1u);
-            x = (lvl < agent.traceLevels)
-                ? agent.observationTimescale[lvl * agent.observationCount + (j - lvl * agent.observationCount)]
-                : 0.0f;
+            x = (lvl < OAK_TRACE_LEVELS)
+                    ? agent.memory->observationTimescale[lvl * agent.observationCount +
+                                                         (j - lvl * agent.observationCount)]
+                    : 0.0f;
         }
-        if (!isfinite(x)) x = 0.0f;
-        curr[i] = x;
+        x = finiteOrZero(x);
+        currentFeatures[i] = x;
         currentActive[i] = i;
-        if (agent.featureMeta[i].w < 0xffffffffu) agent.featureMeta[i].w += 1u;
+        if (agent.indices->featureMeta[i].w < 0xffffffffu) agent.indices->featureMeta[i].w += 1u;
     }
-    simdSyncDev();
+    syncMemory();
 
-    for (uint ablk = 0u; ablk < agent.perceptCount; ablk += OAK_SIMD_WIDTH) {
-        uint ai = ablk + tid;
+    for (uint ablk = 0u; ablk < OAK_PERCEPT_COUNT; ablk += OAK_SIMD_WIDTH) {
+        uint ai = ablk + threadIndex;
         uint tile;
         uint tile2;
         {
             uint sourceCount = perceptSourceCount(agent);
             uint sourceIndex = ai % sourceCount, occupancy = ai / sourceCount;
             if (occupancy == 0u) {
-                tile = featureTile(curr[tileSourceIndex(agent, sourceIndex)]);
+                tile = featureTile(currentFeatures[tileSourceIndex(agent, sourceIndex)]);
             } else if ((ai & 1u) == 0u) {
-                tile = zoomedFeatureTile(curr[tileSourceIndex(agent, sourceIndex)], occupancy);
+                tile = zoomedFeatureTile(currentFeatures[tileSourceIndex(agent, sourceIndex)], occupancy);
             } else {
                 uint channelA = tileSourceIndex(agent, sourceIndex);
                 uint channelB = (sourceIndex + occupancy) % agent.observationCount;
-                tile = jointFeatureTile(curr[channelA], curr[channelB], occupancy);
+                tile = jointFeatureTile(currentFeatures[channelA], currentFeatures[channelB], occupancy);
             }
-            tile2 = zoomedFeatureTile(curr[tileSourceIndex(agent, sourceIndex)], occupancy + 1u);
+            tile2 = zoomedFeatureTile(currentFeatures[tileSourceIndex(agent, sourceIndex)], occupancy + 1u);
         }
         for (uint g = 0u; g < OAK_CONSTRUCTED_PER_PERCEPT; ++g) {
             uint groupTile = (g == 0u) ? tile : tile2;
-            uint bankLo = agent.perceptCount + (ai + g * agent.perceptCount) * OAK_CANDIDATES_PER_SLOT, bankHi = bankLo + OAK_CANDIDATES_PER_SLOT;
+            uint bankLo = OAK_PERCEPT_COUNT + (ai + g * OAK_PERCEPT_COUNT) * OAK_CANDIDATES_PER_SLOT,
+                 bankHi = bankLo + OAK_CANDIDATES_PER_SLOT;
             uint winner = bankLo + groupTile;
             float winningValue = 0.0f;
             for (uint i = bankLo; i < bankHi; ++i) {
-                uint4 meta = agent.featureMeta[i];
-                float constructed = constructedValue(agent, prev, meta.x, meta.y, meta.z);
-                float rate = max(1.0f / (float(meta.w) + 1.0f), agent.invFeatureTimeScale);
-                float2 moments = agent.featureMoments[i];
+                uint4 meta = agent.indices->featureMeta[i];
+                float constructed = constructedValue(agent, previousFeatures, meta.x, meta.y, meta.z);
+                float rate = max(1.0f / (float(meta.w) + 1.0f), OAK_TRACKING_RATE);
+                float2 moments = agent.memory->featureMoments[i];
                 moments.x += rate * (constructed - moments.x);
                 moments.y += rate * (constructed * constructed - moments.y);
-                agent.featureMoments[i] = moments;
+                agent.memory->featureMoments[i] = moments;
                 if (i == winner) winningValue = constructed;
-                curr[i] = 0.0f;
+                currentFeatures[i] = 0.0f;
             }
-            float2 winnerMoments = agent.featureMoments[winner];
+            float2 winnerMoments = agent.memory->featureMoments[winner];
             float var = max(winnerMoments.y - winnerMoments.x * winnerMoments.x, 0.0f);
-            float ridge = max(1.0f / (float(agent.featureMeta[winner].w) + 1.0f), 1.0f / float(2u * agent.perceptCount));
+            float ridge = max(1.0f / (float(agent.indices->featureMeta[winner].w) + 1.0f),
+                              1.0f / float(2u * OAK_PERCEPT_COUNT));
             winningValue = (winningValue - winnerMoments.x) * rsqrt(var + ridge);
-            curr[winner] = isfinite(winningValue) ? winningValue : 0.0f;
-            currentActive[agent.perceptCount + ai + g * agent.perceptCount] = winner;
-            if (agent.featureMeta[winner].w < 0xffffffffu) agent.featureMeta[winner].w += 1u;
+            currentFeatures[winner] = finiteOrZero(winningValue);
+            currentActive[OAK_PERCEPT_COUNT + ai + g * OAK_PERCEPT_COUNT] = winner;
+            if (agent.indices->featureMeta[winner].w < 0xffffffffu)
+                agent.indices->featureMeta[winner].w += 1u;
         }
     }
-    simdSyncDev();
+    syncMemory();
 }
 
-static inline void planOption(Agent agent, uint k,
-                              float previousNextValueDot,
-                              float optionNextValueDot,
-                              float previousRewardHat,
-                              float previousDurationHat) {
-    float continuation = agent.continuation[k];
-    float rewardHat = agent.predictedReward[k], durationHat = agent.predictedDuration[k], currentNextValueHat = agent.predictedNextValue[k];
-    float currentValue = agent.stageScratch[1];
+static inline void planOption(Agent agent, uint k, float previousNextValueDot, float optionNextValueDot,
+                              float previousRewardHat, float previousDurationHat) {
+    float continuation = agent.memory->continuation[k];
+    float rewardHat = agent.memory->predictedReward[k], durationHat = agent.memory->predictedDuration[k],
+          currentNextValueHat = agent.memory->predictedNextValue[k];
+    float currentValue = agent.memory->currentValue;
 
-    float modelPrevEnergy = agent.stageScratch[8];
-    float modelBootstrapNorm = agent.stageScratch[8] - 2.0f * continuation * agent.stageScratch[9]
-                   + continuation * continuation * agent.stageScratch[10];
+    float modelPrevEnergy = agent.memory->previousModelEnergy;
+    float modelBootstrapNorm = agent.memory->previousModelEnergy -
+                               2.0f * continuation * agent.memory->crossModelEnergy +
+                               continuation * continuation * agent.memory->currentModelEnergy;
     modelBootstrapNorm = max(modelBootstrapNorm, 0.0f);
-    if (!isfinite(modelBootstrapNorm)) modelBootstrapNorm = 0.0f;
+    modelBootstrapNorm = finiteOrZero(modelBootstrapNorm);
     if (!isfinite(modelPrevEnergy) || modelPrevEnergy < 0.0f) modelPrevEnergy = 0.0f;
 
-    float modelAverageRewardOld = agent.optionModelAverageReward[k];
-    if (!isfinite(modelAverageRewardOld)) modelAverageRewardOld = 0.0f;
-    float rewardModelTd = (k == 0u) ? 0.0f : ((agent.planScratch[0] - modelAverageRewardOld) + continuation * rewardHat - previousRewardHat);
-    float importanceRatio = agent.importance[k];
-    if (isfinite(agent.planScratch[0]))
-        agent.optionModelAverageReward[k] = modelAverageRewardOld + track_rate(agent.stepCount, agent.featureCount) * importanceRatio * (agent.planScratch[0] - modelAverageRewardOld);
+    float modelAverageRewardOld = agent.memory->optionModelAverageReward[k];
+    modelAverageRewardOld = finiteOrZero(modelAverageRewardOld);
+    float rewardModelTd = (k == 0u) ? 0.0f
+                                    : ((agent.memory->planningReward - modelAverageRewardOld) +
+                                       continuation * rewardHat - previousRewardHat);
+    float importanceRatio = agent.memory->importance[k];
+    if (isfinite(agent.memory->planningReward))
+        agent.memory->optionModelAverageReward[k] =
+            modelAverageRewardOld + trackingRateFor(agent.stepCount, OAK_FEATURE_CAPACITY) * importanceRatio *
+                                        (agent.memory->planningReward - modelAverageRewardOld);
     float durationTd = (k == 0u) ? 0.0f : (1.0f + continuation * durationHat - previousDurationHat);
 
-    float optionNextValueTd = continuation * currentNextValueHat + (1.0f - continuation) * currentValue - previousNextValueDot;
-    bool modelFinite = isfinite(rewardModelTd) && isfinite(durationTd) && isfinite(durationHat) && isfinite(optionNextValueTd);
-    if (!isfinite(rewardModelTd)) rewardModelTd = 0.0f;
-    if (!isfinite(durationTd)) durationTd = 0.0f;
-    if (!isfinite(optionNextValueTd)) optionNextValueTd = 0.0f;
-    agent.optionRewardTd[k] = rewardModelTd;
-    agent.optionDurationTd[k] = durationTd;
-    agent.optionNextValueTd[k] = optionNextValueTd;
-    agent.optionNextValueDot[k] = isfinite(optionNextValueDot) ? optionNextValueDot : 0.0f;
+    float optionNextValueTd =
+        continuation * currentNextValueHat + (1.0f - continuation) * currentValue - previousNextValueDot;
+    bool modelFinite = isfinite(rewardModelTd) && isfinite(durationTd) && isfinite(durationHat) &&
+                       isfinite(optionNextValueTd);
+    rewardModelTd = finiteOrZero(rewardModelTd);
+    durationTd = finiteOrZero(durationTd);
+    optionNextValueTd = finiteOrZero(optionNextValueTd);
+    agent.memory->optionRewardTd[k] = rewardModelTd;
+    agent.memory->optionDurationTd[k] = durationTd;
+    agent.memory->optionNextValueTd[k] = optionNextValueTd;
+    agent.memory->optionNextValueDot[k] = finiteOrZero(optionNextValueDot);
     float nextValueStepDenom = fma(importanceRatio, modelBootstrapNorm, 1.0f);
-    agent.optionNextValueScale[k] = (isfinite(nextValueStepDenom) && nextValueStepDenom > 0.0f) ? (1.0f / nextValueStepDenom) : 0.0f;
+    agent.memory->optionNextValueScale[k] =
+        (isfinite(nextValueStepDenom) && nextValueStepDenom > 0.0f) ? (1.0f / nextValueStepDenom) : 0.0f;
     float nextValueAuxDenom = fma(importanceRatio, modelPrevEnergy, 1.0f);
-    agent.optionNextValueAuxScale[k] = (isfinite(nextValueAuxDenom) && nextValueAuxDenom > 0.0f) ? (1.0f / nextValueAuxDenom) : 0.0f;
+    agent.memory->optionNextValueAuxScale[k] =
+        (isfinite(nextValueAuxDenom) && nextValueAuxDenom > 0.0f) ? (1.0f / nextValueAuxDenom) : 0.0f;
     float modelSquaredError = optionNextValueTd * optionNextValueTd + rewardModelTd * rewardModelTd;
     if (modelFinite && isfinite(modelSquaredError)) {
-        agent.optionPriority[k] = sqrt(max(modelSquaredError, 0.0f));
+        agent.memory->optionPriority[k] = sqrt(max(modelSquaredError, 0.0f));
     } else {
-        float debt = fabs(agent.optionPriority[k]);
+        float debt = fabs(agent.memory->optionPriority[k]);
         if (debt <= 0.0f) debt = 1.0f;
-        agent.optionPriority[k] = -debt;
+        agent.memory->optionPriority[k] = -debt;
     }
 }
 
-static inline void planAllOptions(Agent agent, uint tid,
-                                  threadgroup const float *stash,
-                                  bool stashDirty, uint pSlot) {
-    device const uint *previousActive = activeFeatures(agent, pSlot);
-    device const float *prev = state_at(agent, pSlot);
-    for (uint k = tid; k < agent.optionCount; k += OAK_SIMD_WIDTH) {
-        if (agent.parked[k] == 0u) continue;
-        agent.optionRewardTd[k] = 0.0f;
-        agent.optionDurationTd[k] = 0.0f;
-        agent.optionNextValueTd[k] = 0.0f;
-        agent.optionNextValueDot[k] = 0.0f;
-        agent.optionNextValueScale[k] = 0.0f;
-        agent.optionNextValueAuxScale[k] = 0.0f;
-        agent.optionPriority[k] = 0.0f;
+static inline void planAllOptions(Agent agent, uint threadIndex, threadgroup const float *stash,
+                                  bool stashDirty, uint previousSlot) {
+    device const uint *previousActive = activeFeatures(agent, previousSlot);
+    device const float *previousFeatures = featureValues(agent, previousSlot);
+    for (uint k = threadIndex; k < OAK_OPTION_COUNT; k += OAK_SIMD_WIDTH) {
+        if (agent.indices->parked[k] == 0u) continue;
+        agent.memory->optionRewardTd[k] = 0.0f;
+        agent.memory->optionDurationTd[k] = 0.0f;
+        agent.memory->optionNextValueTd[k] = 0.0f;
+        agent.memory->optionNextValueDot[k] = 0.0f;
+        agent.memory->optionNextValueScale[k] = 0.0f;
+        agent.memory->optionNextValueAuxScale[k] = 0.0f;
+        agent.memory->optionPriority[k] = 0.0f;
     }
-    simdSyncDev();
-    for (uint k = tid; k < agent.optionCount; k += OAK_SIMD_WIDTH) {
-        if (agent.parked[k] != 0u) continue;
+    syncMemory();
+    for (uint k = threadIndex; k < OAK_OPTION_COUNT; k += OAK_SIMD_WIDTH) {
+        if (agent.indices->parked[k] != 0u) continue;
         uint slot = k;
         float previousNextValueDot, optionNextValueDot, previousRewardHat, previousDurationHat;
         if (stashDirty) {
             float p0 = 0.0f, p1 = 0.0f, p2 = 0.0f, p3 = 0.0f;
-            for (uint a = 0u; a < activeCount(agent.perceptCount); a += 1u) {
-                uint ip = activeIndex(previousActive, a);
-                float xp = prev[ip];
-                if (xp == 0.0f) continue;
-                device const float *rp = record(agent, ip, slot);
-                p0 = fma(rp[RECORD_NEXT], xp, p0);
-                p1 = fma(rp[RECORD_NEXT_AUX], xp, p1);
-                p2 = fma(rp[RECORD_REWARD], xp, p2);
-                p3 = fma(rp[RECORD_DURATION], xp, p3);
+            for (uint a = 0u; a < OAK_ACTIVE_CAPACITY; a += 1u) {
+                uint previousIndex = previousActive[a];
+                float previousActivation = previousFeatures[previousIndex];
+                if (previousActivation == 0.0f) continue;
+                device const Record *rp = optionRecord(agent, previousIndex, slot);
+                p0 = fma(rp->next, previousActivation, p0);
+                p1 = fma(rp->nextAux, previousActivation, p1);
+                p2 = fma(rp->reward, previousActivation, p2);
+                p3 = fma(rp->duration, previousActivation, p3);
             }
             previousNextValueDot = p0;
             optionNextValueDot = p1;
@@ -886,39 +690,42 @@ static inline void planAllOptions(Agent agent, uint tid,
             previousRewardHat = stash[k * 5u + 2u];
             previousDurationHat = stash[k * 5u + 3u];
         }
-        planOption(agent, k, previousNextValueDot, optionNextValueDot, previousRewardHat, previousDurationHat);
+        planOption(agent, k, previousNextValueDot, optionNextValueDot, previousRewardHat,
+                   previousDurationHat);
 
-        float importanceRatio = agent.importance[k];
-        float advantage = agent.actorAdvantage[k];
-        if (!isfinite(advantage)) advantage = 0.0f;
+        float importanceRatio = agent.memory->importance[k];
+        float advantage = agent.memory->actorAdvantage[k];
+        advantage = finiteOrZero(advantage);
 
-        metaOptimizeUpdate(agent.actorMeta, k, advantage, 1.0f, agent.optionAge[k], agent.metaEta, agent.invFeatureTimeScale);
-        float actorAlpha = agent.actorMeta[k].x / agent.actorAlphaDenom;
-        float previousFeatureNormSq = agent.previousFeatureNormSq[0];
-        for (uint d = 0u; d < agent.policyCount; ++d) {
-            float targetGrad = agent.optionActorCredit[k * agent.actionCount + d];
+        metaOptimizeUpdate(agent.memory->actorMeta, k, advantage, 1.0f, agent.indices->optionAge[k],
+                           OAK_META_RATE, OAK_TRACKING_RATE);
+        float actorAlpha = agent.memory->actorMeta[k].x / OAK_ACTOR_ALPHA_DENOM;
+        float previousFeatureNormSq = agent.memory->previousFeatureNormSq;
+        for (uint d = 0u; d < OAK_POLICY_MAX; ++d) {
+            float targetGrad = agent.memory->optionActorCredit[k * OAK_POLICY_MAX + d];
             float gradScale = importanceRatio * targetGrad;
 
-            float denom = 1.0f + actorAlpha * advantage * advantage * gradScale * gradScale * previousFeatureNormSq;
+            float denom =
+                1.0f + actorAlpha * advantage * advantage * gradScale * gradScale * previousFeatureNormSq;
             float scale = (isfinite(denom) && denom > 0.0f) ? (1.0f / denom) : 0.0f;
             float policyCoef = actorAlpha * advantage * gradScale * scale;
-            agent.optionPolicyCoef[k * agent.policyCount + d] = isfinite(policyCoef) ? policyCoef : 0.0f;
+            agent.memory->optionPolicyCoef[k * OAK_POLICY_MAX + d] = finiteOrZero(policyCoef);
         }
     }
 }
 
-static inline void learnFromTransition(Agent agent, device const float *prev,
-                                       device const float *curr, uint tid, uint pSlot,
-                                       threadgroup const float *stash, bool stashDirty) {
-    device const uint *previousActive = activeFeatures(agent, pSlot);
-    device const uint *currentActive = activeFeatures(agent, 1u - pSlot);
-    const uint activeFeatureCount = activeCount(agent.perceptCount);
-    uint policyN = agent.policyCount;
+static inline void learnFromTransition(Agent agent, device const float *previousFeatures,
+                                       device const float *currentFeatures, uint threadIndex,
+                                       uint previousSlot, threadgroup const float *stash, bool stashDirty) {
+    device const uint *previousActive = activeFeatures(agent, previousSlot);
+    device const uint *currentActive = activeFeatures(agent, 1u - previousSlot);
+    const uint activeFeatureCount = OAK_ACTIVE_CAPACITY;
+    uint policyN = OAK_POLICY_MAX;
 
-    for (uint slotBase = 0u; slotBase < agent.optionCount; slotBase += OAK_SIMD_WIDTH) {
-        uint slot = slotBase + tid;
+    for (uint slotBase = 0u; slotBase < OAK_OPTION_COUNT; slotBase += OAK_SIMD_WIDTH) {
+        uint slot = slotBase + threadIndex;
         uint k = slot;
-        bool optionLive = agent.parked[k] == 0u;
+        bool optionLive = agent.indices->parked[k] == 0u;
         float importanceRatio = 0.0f, continuation = 0.0f;
         float optionValueAuxDot = 0.0f, optionValueStepScale = 0.0f, td = 0.0f;
         float nextValueAuxDot = 0.0f, nextValueStepScale = 0.0f, nextValueTdError = 0.0f;
@@ -932,201 +739,215 @@ static inline void learnFromTransition(Agent agent, device const float *prev,
             float dot = 0.0f;
             if (stashDirty) {
                 for (uint base = 0u; base < activeFeatureCount; base += OAK_SIMD_WIDTH) {
-                    uint iH = activeIndex(previousActive, base + tid);
-                    float xH = prev[iH];
+                    uint iH = previousActive[base + threadIndex];
+                    float xH = previousFeatures[iH];
                     for (uint l = 0u; l < OAK_SIMD_WIDTH; ++l) {
                         uint i0 = simd_shuffle(iH, (ushort)l);
                         float x0 = simd_shuffle(xH, (ushort)l);
                         if (!optionLive || x0 == 0.0f) continue;
-                        dot = fma(record(agent, i0, slot)[RECORD_TWIN], x0, dot);
+                        dot = fma(optionRecord(agent, i0, slot)->twin, x0, dot);
                     }
                 }
             } else if (optionLive) {
                 dot = stash[k * 5u + 4u];
             }
-            if (!isfinite(dot)) dot = 0.0f;
+            dot = finiteOrZero(dot);
             twinPrevDot = dot;
         }
         if (optionLive) {
-            importanceRatio = agent.importance[k];
-            continuation = agent.continuation[k];
-            optionValueAuxDot = agent.optionValueDot[k]; optionValueStepScale = agent.optionValueScale[k]; td = agent.optionTd[k];
-            nextValueAuxDot = agent.optionNextValueDot[k]; nextValueStepScale = agent.optionNextValueScale[k]; nextValueTdError = agent.optionNextValueTd[k];
-            rewardModelTdError = agent.optionRewardTd[k]; durationTdError = agent.optionDurationTd[k];
-            optionValueAuxResidual = td - optionValueAuxDot; optionValueAuxStepScale = agent.optionValueAuxScale[k];
-            nextValueAuxResidual = nextValueTdError - nextValueAuxDot; nextValueAuxStepScale = agent.optionNextValueAuxScale[k];
+            importanceRatio = agent.memory->importance[k];
+            continuation = agent.memory->continuation[k];
+            optionValueAuxDot = agent.memory->optionValueDot[k];
+            optionValueStepScale = agent.memory->optionValueScale[k];
+            td = agent.memory->optionTd[k];
+            nextValueAuxDot = agent.memory->optionNextValueDot[k];
+            nextValueStepScale = agent.memory->optionNextValueScale[k];
+            nextValueTdError = agent.memory->optionNextValueTd[k];
+            rewardModelTdError = agent.memory->optionRewardTd[k];
+            durationTdError = agent.memory->optionDurationTd[k];
+            optionValueAuxResidual = td - optionValueAuxDot;
+            optionValueAuxStepScale = agent.memory->optionValueAuxScale[k];
+            nextValueAuxResidual = nextValueTdError - nextValueAuxDot;
+            nextValueAuxStepScale = agent.memory->optionNextValueAuxScale[k];
             twinResidual = rewardModelTdError - twinPrevDot;
-            for (uint j = 0u; j < policyN; ++j) actorCoefficient[j] = agent.optionPolicyCoef[k * policyN + j];
+            for (uint j = 0u; j < policyN; ++j)
+                actorCoefficient[j] = agent.memory->optionPolicyCoef[k * policyN + j];
         }
         bool baseOption = k == 0u;
         for (uint cb = 0u; cb < activeFeatureCount; cb += OAK_SIMD_WIDTH) {
-            uint aH = cb + tid;
-            uint iH = activeIndex(previousActive, aH);
-            float xpH = prev[iH], xcH = curr[iH];
-            float aPH = agent.optionValueMeta[iH].x, aMH = agent.modelMeta[iH].x;
+            uint aH = cb + threadIndex;
+            uint iH = previousActive[aH];
+            float localPreviousActivation = previousFeatures[iH],
+                  localCurrentActivation = currentFeatures[iH];
+            float aPH = agent.memory->optionValueMeta[iH].x, aMH = agent.memory->modelMeta[iH].x;
             uint lEnd = min(OAK_SIMD_WIDTH, activeFeatureCount - cb);
             for (uint l = 0u; l < lEnd; ++l) {
                 uint i = simd_shuffle(iH, (ushort)l);
-                float xp = simd_shuffle(xpH, (ushort)l);
-                float xc = simd_shuffle(xcH, (ushort)l);
-                if (xp == 0.0f && xc == 0.0f) continue;
+                float previousActivation = simd_shuffle(localPreviousActivation, (ushort)l);
+                float currentActivation = simd_shuffle(localCurrentActivation, (ushort)l);
+                if (previousActivation == 0.0f && currentActivation == 0.0f) continue;
                 float aP = simd_shuffle(aPH, (ushort)l);
                 float aM = simd_shuffle(aMH, (ushort)l);
                 if (!optionLive) continue;
-                device float4 *recv = (device float4 *)record(agent, i, slot);
-                uint qn = agent.recordFloats >> 2u;
-                float4 q[OAK_RECORD_VEC_MAX];
-                for (uint v = 0u; v < qn; ++v) q[v] = recv[v];
-                thread float *rec = (thread float *)q;
+                device Record *recv = optionRecord(agent, i, slot);
+                Record rec = *recv;
                 for (uint j = 0u; j < policyN; ++j) {
-                    float w = rec[RECORD_POLICY + j];
-                    rec[RECORD_POLICY + j] = keepFinite(w, w + actorCoefficient[j] * xp);
+                    float w = rec.policy[j];
+                    rec.policy[j] = keepFinite(w, w + actorCoefficient[j] * previousActivation);
                 }
                 if (!baseOption) {
-                    float optionValueGradient = (continuation > 0.0f) ? (optionValueAuxDot * (xp - continuation * xc)) : (td * xp);
-                    float value = rec[RECORD_VALUE], aux = rec[RECORD_AUX];
-                    rec[RECORD_VALUE] = keepFinite(value, value + aP * importanceRatio * optionValueGradient * optionValueStepScale);
-                    rec[RECORD_AUX] = keepFinite(aux, aux + aP * importanceRatio * optionValueAuxResidual * xp * optionValueAuxStepScale);
+                    float optionValueGradient =
+                        (continuation > 0.0f)
+                            ? (optionValueAuxDot * (previousActivation - continuation * currentActivation))
+                            : (td * previousActivation);
+                    float value = rec.value, aux = rec.aux;
+                    rec.value = keepFinite(value, value + aP * importanceRatio * optionValueGradient *
+                                                             optionValueStepScale);
+                    rec.aux = keepFinite(aux, aux + aP * importanceRatio * optionValueAuxResidual *
+                                                  previousActivation * optionValueAuxStepScale);
                 }
-                float nextValueGradient = (continuation > 0.0f) ? (nextValueAuxDot * (xp - continuation * xc)) : (nextValueTdError * xp);
-                float next = rec[RECORD_NEXT], nextAux = rec[RECORD_NEXT_AUX], duration = rec[RECORD_DURATION], rewardWeight = rec[RECORD_REWARD], twin = rec[RECORD_TWIN];
-                rec[RECORD_NEXT] = keepFinite(next, next + aM * importanceRatio * nextValueGradient * nextValueStepScale);
-                rec[RECORD_NEXT_AUX] = keepFinite(nextAux, nextAux + aM * importanceRatio * nextValueAuxResidual * xp * nextValueAuxStepScale);
-                rec[RECORD_DURATION] = keepFinite(duration, duration + aM * importanceRatio * durationTdError * xp * nextValueStepScale * 0.05f);
-                float rewardModelGradient = (continuation > 0.0f) ? (twinPrevDot * (xp - continuation * xc)) : (rewardModelTdError * xp);
-                rec[RECORD_REWARD] = keepFinite(rewardWeight, rewardWeight + aM * importanceRatio * rewardModelGradient * nextValueStepScale);
-                rec[RECORD_TWIN] = keepFinite(twin, twin + aM * importanceRatio * twinResidual * xp * nextValueAuxStepScale);
-                for (uint v = 0u; v < qn; ++v) recv[v] = q[v];
+                float nextValueGradient =
+                    (continuation > 0.0f)
+                        ? (nextValueAuxDot * (previousActivation - continuation * currentActivation))
+                        : (nextValueTdError * previousActivation);
+                float next = rec.next, nextAux = rec.nextAux, duration = rec.duration,
+                      rewardWeight = rec.reward, twin = rec.twin;
+                rec.next =
+                    keepFinite(next, next + aM * importanceRatio * nextValueGradient * nextValueStepScale);
+                rec.nextAux = keepFinite(nextAux, nextAux + aM * importanceRatio * nextValueAuxResidual *
+                                                                previousActivation * nextValueAuxStepScale);
+                rec.duration = keepFinite(duration, duration + aM * importanceRatio * durationTdError *
+                                                                   previousActivation * nextValueStepScale *
+                                                                   0.05f);
+                float rewardModelGradient =
+                    (continuation > 0.0f)
+                        ? (twinPrevDot * (previousActivation - continuation * currentActivation))
+                        : (rewardModelTdError * previousActivation);
+                rec.reward = keepFinite(rewardWeight, rewardWeight + aM * importanceRatio *
+                                                              rewardModelGradient * nextValueStepScale);
+                rec.twin = keepFinite(twin, twin + aM * importanceRatio * twinResidual * previousActivation *
+                                                nextValueAuxStepScale);
+                *recv = rec;
             }
         }
 
         bool learnsNewFeatures = optionLive && continuation > 0.0f && importanceRatio > 0.0f;
-        for (uint wb = 0u; wb < agent.perceptCount; wb += OAK_SIMD_WIDTH) {
-            uint newFeatureH = activeIndex(currentActive, agent.perceptCount + wb + tid);
-            uint wasPreviouslyActiveH = wasActive(previousActive, agent.perceptCount, newFeatureH) ? 1u : 0u;
-            float newFeatureValueH = curr[newFeatureH];
-            float newOptionAlphaH = agent.optionValueMeta[newFeatureH].x, newModelAlphaH = agent.modelMeta[newFeatureH].x;
+        for (uint wb = 0u; wb < OAK_PERCEPT_COUNT; wb += OAK_SIMD_WIDTH) {
+            uint newFeatureH = currentActive[OAK_PERCEPT_COUNT + wb + threadIndex];
+            uint wasPreviouslyActiveH = wasActive(previousActive, OAK_PERCEPT_COUNT, newFeatureH) ? 1u : 0u;
+            float newFeatureValueH = currentFeatures[newFeatureH];
+            float newOptionAlphaH = agent.memory->optionValueMeta[newFeatureH].x,
+                  newModelAlphaH = agent.memory->modelMeta[newFeatureH].x;
             for (uint l = 0u; l < OAK_SIMD_WIDTH; ++l) {
                 uint wasPreviouslyActive = simd_shuffle(wasPreviouslyActiveH, (ushort)l);
                 if (wasPreviouslyActive != 0u) continue;
                 uint i = simd_shuffle(newFeatureH, (ushort)l);
-                float xc = simd_shuffle(newFeatureValueH, (ushort)l);
+                float currentActivation = simd_shuffle(newFeatureValueH, (ushort)l);
                 float aP = simd_shuffle(newOptionAlphaH, (ushort)l);
                 float aM = simd_shuffle(newModelAlphaH, (ushort)l);
                 if (learnsNewFeatures) {
-                    device float *rec = record(agent, i, slot);
+                    device Record *rec = optionRecord(agent, i, slot);
                     if (!baseOption) {
-                        float value = rec[RECORD_VALUE];
-                        rec[RECORD_VALUE] = keepFinite(value, value + aP * importanceRatio * (-optionValueAuxDot * continuation * xc) * optionValueStepScale);
+                        float value = rec->value;
+                        rec->value = keepFinite(
+                            value, value + aP * importanceRatio *
+                                               (-optionValueAuxDot * continuation * currentActivation) *
+                                               optionValueStepScale);
                     }
-                    float next = rec[RECORD_NEXT], rewardWeight = rec[RECORD_REWARD];
-                    rec[RECORD_NEXT] = keepFinite(next, next + aM * importanceRatio * (-nextValueAuxDot * continuation * xc) * nextValueStepScale);
-                    rec[RECORD_REWARD] = keepFinite(rewardWeight, rewardWeight + aM * importanceRatio * (-twinPrevDot * continuation * xc) * nextValueStepScale);
+                    float next = rec->next, rewardWeight = rec->reward;
+                    rec->next =
+                        keepFinite(next, next + aM * importanceRatio *
+                                                    (-nextValueAuxDot * continuation * currentActivation) *
+                                                    nextValueStepScale);
+                    rec->reward = keepFinite(
+                        rewardWeight, rewardWeight + aM * importanceRatio *
+                                                         (-twinPrevDot * continuation * currentActivation) *
+                                                         nextValueStepScale);
                 }
             }
         }
     }
 
-    float valueTdError = agent.td[0];
-    float valueStepScale = agent.valueScale[0];
-    for (uint a = 0u; a < activeFeatureCount; ++a) {
-        uint i = activeIndex(previousActive, a);
-        if (i % OAK_SIMD_WIDTH != tid) continue;
-        float w = agent.valueWeight[i];
-        float delta = valueTdError * prev[i] * valueStepScale;
-        agent.valueWeight[i] = keepFinite(w, w + agent.valueMeta[i].x * delta);
+    float valueTdError = agent.memory->td;
+    float valueStepScale = agent.memory->valueScale;
+    for (uint a = threadIndex; a < activeFeatureCount; a += OAK_SIMD_WIDTH) {
+        uint i = previousActive[a];
+        float w = agent.parameters->valueWeight[i];
+        float delta = valueTdError * previousFeatures[i] * valueStepScale;
+        agent.parameters->valueWeight[i] = keepFinite(w, w + agent.memory->valueMeta[i].x * delta);
     }
 }
 
-inline void emitOptionActions(Agent agent, uint tid, bool recomputeLogits) {
-    uint policyN = agent.policyCount;
+inline void emitOptionActions(Agent agent, uint threadIndex, bool recomputeLogits) {
+    uint policyN = OAK_POLICY_MAX;
     device const uint *active = activeFeatures(agent, agent.stateSlot);
-    device const float *currS = state_at(agent, agent.stateSlot);
-    for (uint k = tid; k < agent.optionCount; k += OAK_SIMD_WIDTH) {
-        if (agent.parked[k] == 0u) continue;
-        for (uint j = 0u; j < agent.actionCount; ++j) {
-            agent.optionPolicyMean[k * agent.actionCount + j] = 0.0f;
-            agent.optionLogit[k * agent.actionCount + j] = 0.0f;
+    device const float *currentFeatures = featureValues(agent, agent.stateSlot);
+    for (uint k = threadIndex; k < OAK_OPTION_COUNT; k += OAK_SIMD_WIDTH) {
+        if (agent.indices->parked[k] == 0u) continue;
+        for (uint j = 0u; j < OAK_POLICY_MAX; ++j) {
+            agent.memory->optionPolicyMean[k * OAK_POLICY_MAX + j] = 0.0f;
+            agent.memory->optionLogit[k * OAK_POLICY_MAX + j] = 0.0f;
         }
     }
-    simdSyncDev();
-    for (uint k = tid; k < agent.optionCount; k += OAK_SIMD_WIDTH) {
-        bool slotLive = agent.parked[k] == 0u;
+    syncMemory();
+    for (uint k = threadIndex; k < OAK_OPTION_COUNT; k += OAK_SIMD_WIDTH) {
+        bool slotLive = agent.indices->parked[k] == 0u;
         uint slot = k;
         float policyLogit[OAK_POLICY_MAX];
         for (uint j = 0u; j < policyN; ++j) policyLogit[j] = 0.0f;
         if (recomputeLogits) {
-            for (uint base = 0u; base < activeCount(agent.perceptCount); base += OAK_SIMD_WIDTH) {
-                uint iH = activeIndex(active, base + tid);
-                float xH = currS[iH];
+            for (uint base = 0u; base < OAK_ACTIVE_CAPACITY; base += OAK_SIMD_WIDTH) {
+                uint iH = active[base + threadIndex];
+                float xH = currentFeatures[iH];
                 for (uint l = 0u; l < OAK_SIMD_WIDTH; ++l) {
                     uint i = simd_shuffle(iH, (ushort)l);
                     float x = simd_shuffle(xH, (ushort)l);
                     if (!slotLive || x == 0.0f) continue;
-                    device const float *row = record(agent, i, slot) + RECORD_POLICY;
-                    for (uint j = 0u; j < policyN; ++j) policyLogit[j] = fma(row[j], x, policyLogit[j]);
+                    device const Record *row = optionRecord(agent, i, slot);
+                    for (uint j = 0u; j < policyN; ++j)
+                        policyLogit[j] = fma(row->policy[j], x, policyLogit[j]);
                 }
             }
         } else if (slotLive) {
-            for (uint j = 0u; j < policyN; ++j) policyLogit[j] = agent.optionLogit[k * agent.actionCount + j];
+            for (uint j = 0u; j < policyN; ++j)
+                policyLogit[j] = agent.memory->optionLogit[k * OAK_POLICY_MAX + j];
         }
         if (!slotLive) continue;
-        for (uint j = 0u; j < agent.actionCount; ++j) {
-            uint optionActionIndex = k * agent.actionCount + j;
+        for (uint j = 0u; j < OAK_POLICY_MAX; ++j) {
+            uint optionActionIndex = k * OAK_POLICY_MAX + j;
 
-            float actionMean = (j < policyN) ? tanh(policyLogit[j]) : 0.0f;
-            agent.optionLogit[optionActionIndex] = (j < policyN) ? policyLogit[j] : 0.0f;
-            if (!isfinite(actionMean)) actionMean = agent.optionPolicyMean[optionActionIndex];
-            agent.optionPolicyMean[optionActionIndex] = actionMean;
+            float actionMean = tanh(policyLogit[j]);
+            agent.memory->optionLogit[optionActionIndex] = policyLogit[j];
+            if (!isfinite(actionMean)) actionMean = agent.memory->optionPolicyMean[optionActionIndex];
+            agent.memory->optionPolicyMean[optionActionIndex] = actionMean;
         }
     }
 }
 
-inline void blendKeyboard(Agent agent, uint tid) {
-    if (tid >= agent.actionCount) return;
-    uint d = tid;
-    uint selected = agent.selectedOption[0] % agent.optionCount;
-    float blendedMean = 0.0f, keyboardNorm = 0.0f, selectedMean = 0.0f;
-    float blendedLogit = 0.0f, selectedLogit = 0.0f;
-    for (uint ok = 0u; ok < agent.optionCount; ++ok) {
-        float optionMeanValue = agent.optionPolicyMean[ok * agent.actionCount + d];
-        if (!isfinite(optionMeanValue)) optionMeanValue = 0.0f;
-        if (ok == selected) selectedMean = optionMeanValue;
-        float optionLogitValue = agent.optionLogit[ok * agent.actionCount + d];
-        if (!isfinite(optionLogitValue)) optionLogitValue = 0.0f;
-        if (ok == selected) selectedLogit = optionLogitValue;
-        float w = agent.keyboard[ok];
-        blendedMean = fma(w, optionMeanValue, blendedMean);
-        blendedLogit = fma(w, optionLogitValue, blendedLogit);
-        keyboardNorm += fabs(w);
-    }
-
-    {
-        float baseOptionMean = agent.optionPolicyMean[d];
-        if (isfinite(baseOptionMean)) { blendedMean += baseOptionMean; keyboardNorm += 1.0f; }
-        float baseOptionLogit = agent.optionLogit[d];
-        if (isfinite(baseOptionLogit)) blendedLogit += baseOptionLogit;
-    }
-    agent.policyMean[d] = (keyboardNorm > 0.0f) ? blendedMean / keyboardNorm : selectedMean;
-    agent.policyMeanRaw[d] = (keyboardNorm > 0.0f) ? blendedLogit / keyboardNorm : selectedLogit;
+inline void writePrimaryPolicy(Agent agent, uint action) {
+    if (action >= OAK_POLICY_MAX) return;
+    float mean = agent.memory->optionPolicyMean[action];
+    float logit = finiteOrZero(agent.memory->optionLogit[action]);
+    agent.memory->policyMean[action] = (fma(1.0f, mean, 0.0f) + mean) / 2.0f;
+    agent.memory->policyMeanRaw[action] = (fma(1.0f, logit, 0.0f) + logit) / 2.0f;
 }
 
-inline void zeroOptionColumn(Agent agent, uint tid, uint k) {
+inline void zeroOptionColumn(Agent agent, uint threadIndex, uint k) {
     uint slot = k;
-    for (uint i = tid; i < agent.featureCount; i += OAK_SIMD_WIDTH) {
-        device float *rec = record(agent, i, slot);
-        rec[RECORD_VALUE] = 0.0f;
-        rec[RECORD_AUX] = 0.0f;
-        rec[RECORD_REWARD] = 0.0f;
-        rec[RECORD_DURATION] = 0.0f;
-        rec[RECORD_NEXT] = 0.0f;
-        rec[RECORD_NEXT_AUX] = 0.0f;
+    for (uint i = threadIndex; i < OAK_FEATURE_CAPACITY; i += OAK_SIMD_WIDTH) {
+        device Record *rec = optionRecord(agent, i, slot);
+        rec->value = 0.0f;
+        rec->aux = 0.0f;
+        rec->reward = 0.0f;
+        rec->duration = 0.0f;
+        rec->next = 0.0f;
+        rec->nextAux = 0.0f;
     }
 }
 
-static inline void replaceWorstFeature(Agent agent, uint tid, threadgroup float *tgDirty) {
-    device const float *curr = state_at(agent, 1u - agent.stateSlot);
-    if (tid == 0u) agent.planScratch[0] = agent.reward[0];
+static inline void replaceWorstFeature(Agent agent, uint threadIndex, threadgroup float *predictionsChanged) {
+    device const float *currentFeatures = featureValues(agent, 1u - agent.stateSlot);
+    if (threadIndex == 0u) agent.memory->planningReward = agent.memory->reward;
     simdgroup_barrier(mem_flags::mem_device);
 
     uint bestNursery;
@@ -1134,9 +955,12 @@ static inline void replaceWorstFeature(Agent agent, uint tid, threadgroup float 
     {
         float bestBound = -FLT_MAX;
         uint bestIndex = 0xffffffffu;
-        for (uint n = tid; n < agent.nurseryCount; n += OAK_SIMD_WIDTH) {
-            float lowerConfidenceBound = agent.nurseryScore[n];
-            if (lowerConfidenceBound > bestBound) { bestBound = lowerConfidenceBound; bestIndex = n; }
+        for (uint n = threadIndex; n < OAK_FEATURE_CAPACITY; n += OAK_SIMD_WIDTH) {
+            float lowerConfidenceBound = agent.memory->nurseryScore[n];
+            if (lowerConfidenceBound > bestBound) {
+                bestBound = lowerConfidenceBound;
+                bestIndex = n;
+            }
         }
         bestNurseryBound = simd_max(bestBound);
         bestNursery = simd_min((bestBound == bestNurseryBound) ? bestIndex : 0xffffffffu);
@@ -1146,25 +970,30 @@ static inline void replaceWorstFeature(Agent agent, uint tid, threadgroup float 
     float worstUtility = 0.0f, worstRedundancy = 0.0f, worstDownstream = 0.0f;
     uint eligiblePartial = 0u;
     float eligibleUtilPartial = 0.0f, eligibleRedundancyPartial = 0.0f, eligibleDownstreamPartial = 0.0f;
-    for (uint i = agent.perceptCount + tid; i < agent.featureCount; i += OAK_SIMD_WIDTH) {
-        float4 e = *(device const float4 *)&agent.replaceScore[i * 4u];
+    for (uint i = OAK_PERCEPT_COUNT + threadIndex; i < OAK_FEATURE_CAPACITY; i += OAK_SIMD_WIDTH) {
+        float4 e = *(device const float4 *)&agent.memory->replaceScore[i * 4u];
         if (e.w <= 0.0f) continue;
         eligiblePartial += 1u;
         eligibleUtilPartial += e.x;
         eligibleRedundancyPartial += e.y;
         eligibleDownstreamPartial += e.z;
         float util = e.x, redundancy = e.y, downstream = e.z;
-        uint age = agent.featureMeta[i].w;
-        bool worse = (haveWorst == 0u)
-            || downstream < worstDownstream
-            || (downstream == worstDownstream && util < worstUtility)
-            || (downstream == worstDownstream && util == worstUtility && redundancy > worstRedundancy)
-            || (downstream == worstDownstream && util == worstUtility && redundancy == worstRedundancy && age > worstAge)
-            || (downstream == worstDownstream && util == worstUtility && redundancy == worstRedundancy
-                && age == worstAge && i < worstFeature);
+        uint age = agent.indices->featureMeta[i].w;
+        bool worse =
+            (haveWorst == 0u) || downstream < worstDownstream ||
+            (downstream == worstDownstream && util < worstUtility) ||
+            (downstream == worstDownstream && util == worstUtility && redundancy > worstRedundancy) ||
+            (downstream == worstDownstream && util == worstUtility && redundancy == worstRedundancy &&
+             age > worstAge) ||
+            (downstream == worstDownstream && util == worstUtility && redundancy == worstRedundancy &&
+             age == worstAge && i < worstFeature);
         if (worse) {
-            haveWorst = 1u; worstFeature = i; worstAge = age;
-            worstUtility = util; worstRedundancy = redundancy; worstDownstream = downstream;
+            haveWorst = 1u;
+            worstFeature = i;
+            worstAge = age;
+            worstUtility = util;
+            worstRedundancy = redundancy;
+            worstDownstream = downstream;
         }
     }
 
@@ -1182,12 +1011,12 @@ static inline void replaceWorstFeature(Agent agent, uint tid, threadgroup float 
     worstUtility = haveWorst ? utility : 0.0f;
     worstRedundancy = haveWorst ? redundancy : 0.0f;
 
-    for (uint k = tid; k < agent.optionCount; k += OAK_SIMD_WIDTH) {
-        if (agent.optionAge[k] < 0xffffffffu) agent.optionAge[k] += 1u;
-        if (agent.lastStopAge[k] < 0xffffffffu) agent.lastStopAge[k] += 1u;
+    for (uint k = threadIndex; k < OAK_OPTION_COUNT; k += OAK_SIMD_WIDTH) {
+        if (agent.indices->optionAge[k] < 0xffffffffu) agent.indices->optionAge[k] += 1u;
+        if (agent.indices->lastStopAge[k] < 0xffffffffu) agent.indices->lastStopAge[k] += 1u;
     }
     simdgroup_barrier(mem_flags::mem_device);
-    uint candidateStart = agent.perceptCount;
+    uint candidateStart = OAK_PERCEPT_COUNT;
     uint eligible = simd_sum(eligiblePartial);
     float eligibleUtilSum = simd_sum(eligibleUtilPartial);
     float eligibleRedundancySum = simd_sum(eligibleRedundancyPartial);
@@ -1195,35 +1024,38 @@ static inline void replaceWorstFeature(Agent agent, uint tid, threadgroup float 
     uint worst = (haveWorst != 0u) ? worstFeature : candidateStart;
 
     {
-        uint staleLimit = staleOptionSteps(agent.featureCount, agent.optionCount);
+        uint staleLimit = (OAK_FEATURE_CAPACITY * OAK_OPTION_COUNT);
         uint parkedStale = 0xffffffffu, unparkedStale = 0xffffffffu;
-        for (uint k2 = 1u + tid; k2 < agent.optionCount; k2 += OAK_SIMD_WIDTH) {
-            if (agent.lastStopAge[k2] < staleLimit) continue;
-            if (agent.parked[k2] != 0u) parkedStale = min(parkedStale, k2);
-            else unparkedStale = min(unparkedStale, k2);
+        for (uint k2 = 1u + threadIndex; k2 < OAK_OPTION_COUNT; k2 += OAK_SIMD_WIDTH) {
+            if (agent.indices->lastStopAge[k2] < staleLimit) continue;
+            if (agent.indices->parked[k2] != 0u)
+                parkedStale = min(parkedStale, k2);
+            else
+                unparkedStale = min(unparkedStale, k2);
         }
         parkedStale = simd_min(parkedStale);
         unparkedStale = simd_min(unparkedStale);
-        uint staleOption = (parkedStale != 0xffffffffu) ? parkedStale
-            : ((unparkedStale != 0xffffffffu) ? unparkedStale : 0u);
+        uint staleOption = (parkedStale != 0xffffffffu)
+                               ? parkedStale
+                               : ((unparkedStale != 0xffffffffu) ? unparkedStale : 0u);
         if (staleOption != 0u) {
             uint k = staleOption;
-            zeroOptionColumn(agent, tid, k);
-            if (tid == 0u) {
-                tgDirty[0] = 1.0f;
-                agent.optionAge[k] = 0u;
-                agent.lastStopAge[k] = 0u;
-                agent.optionUtility[k] = float(agent.featureCount);
-                agent.actorAdvantage[k] = 0.0f;
-                agent.optionAverageReward[k] = 0.0f;
-                agent.optionModelAverageReward[k] = 0.0f;
-                agent.parked[k] = 0u;
-                uint feat = agent.optionFeature[k] % agent.featureCount;
-                record(agent, feat, k)[RECORD_VALUE] = agent.planScratch[PLAN_SCRATCH_INV_SQRT_FEATURES];
+            zeroOptionColumn(agent, threadIndex, k);
+            if (threadIndex == 0u) {
+                predictionsChanged[0] = 1.0f;
+                agent.indices->optionAge[k] = 0u;
+                agent.indices->lastStopAge[k] = 0u;
+                agent.memory->optionUtility[k] = float(OAK_FEATURE_CAPACITY);
+                agent.memory->actorAdvantage[k] = 0.0f;
+                agent.memory->optionAverageReward[k] = 0.0f;
+                agent.memory->optionModelAverageReward[k] = 0.0f;
+                agent.indices->parked[k] = 0u;
+                uint feat = agent.indices->optionFeature[k] % OAK_FEATURE_CAPACITY;
+                optionRecord(agent, feat, k)->value = agent.memory->inverseFeatureNorm;
             }
         }
     }
-    simdSyncDev();
+    syncMemory();
 
     float invEligible = 1.0f / float(max(eligible, 1u));
     float meanEligibleUtil = eligibleUtilSum * invEligible;
@@ -1234,182 +1066,215 @@ static inline void replaceWorstFeature(Agent agent, uint tid, threadgroup float 
     bool lowDownstreamUse = worstDownstream <= meanEligibleDownstream;
     bool structurallyReplaceable = (eligible > 1u) && lowDownstreamUse && (lowUtility || highRedundancy);
 
-    bool doReplace = structurallyReplaceable && worst < agent.featureCount
-        && bestNursery != 0xffffffffu
-        && bestNurseryBound > worstUtility + worstDownstream;
+    bool doReplace = structurallyReplaceable && worst < OAK_FEATURE_CAPACITY && bestNursery != 0xffffffffu &&
+                     bestNurseryBound > worstUtility + worstDownstream;
     if (doReplace) {
-        uint featureLimit = agent.featureCount;
+        uint featureLimit = OAK_FEATURE_CAPACITY;
         float bestA = -FLT_MAX;
         uint bestAIndex = 0u;
-        for (uint i = tid; i < featureLimit; i += OAK_SIMD_WIDTH) {
+        for (uint i = threadIndex; i < featureLimit; i += OAK_SIMD_WIDTH) {
             if (i == worst) continue;
-            float parentUtility = agent.featureUtility[i];
+            float parentUtility = agent.memory->featureUtility[i];
             if (!isfinite(parentUtility)) parentUtility = -FLT_MAX;
-            if (parentUtility > bestA) { bestA = parentUtility; bestAIndex = i; }
+            if (parentUtility > bestA) {
+                bestA = parentUtility;
+                bestAIndex = i;
+            }
         }
         float bestAAll = simd_max(bestA);
-        uint seedParentA = (bestAAll == -FLT_MAX) ? 0u
-            : simd_min(bestA == bestAAll ? bestAIndex : 0xffffffffu);
+        uint seedParentA =
+            (bestAAll == -FLT_MAX) ? 0u : simd_min(bestA == bestAAll ? bestAIndex : 0xffffffffu);
         float bestB = -FLT_MAX;
         uint bestBIndex = 0u;
-        for (uint i = tid; i < featureLimit; i += OAK_SIMD_WIDTH) {
+        for (uint i = threadIndex; i < featureLimit; i += OAK_SIMD_WIDTH) {
             if (i == worst || i == seedParentA) continue;
-            float decor = 1.0f / (1.0f + fabs(curr[i] * curr[seedParentA]));
-            float parentUtility = agent.featureUtility[i] * decor;
+            float decor = 1.0f / (1.0f + fabs(currentFeatures[i] * currentFeatures[seedParentA]));
+            float parentUtility = agent.memory->featureUtility[i] * decor;
             if (!isfinite(parentUtility)) parentUtility = -FLT_MAX;
-            if (parentUtility > bestB) { bestB = parentUtility; bestBIndex = i; }
+            if (parentUtility > bestB) {
+                bestB = parentUtility;
+                bestBIndex = i;
+            }
         }
         float bestBAll = simd_max(bestB);
-        uint seedParentB = (bestBAll == -FLT_MAX) ? ((agent.featureCount > 1u) ? 1u : 0u)
-            : simd_min(bestB == bestBAll ? bestBIndex : 0xffffffffu);
+        uint seedParentB = (bestBAll == -FLT_MAX) ? ((OAK_FEATURE_CAPACITY > 1u) ? 1u : 0u)
+                                                  : simd_min(bestB == bestBAll ? bestBIndex : 0xffffffffu);
         uint trackingOption = 0xffffffffu, leastDemandOption = 0xffffffffu;
         float leastDemand = FLT_MAX;
-        for (uint ok = 1u + tid; ok < agent.optionCount; ok += OAK_SIMD_WIDTH) {
-            float use = agent.optionUtility[ok] + agent.optionPriority[ok];
+        for (uint ok = 1u + threadIndex; ok < OAK_OPTION_COUNT; ok += OAK_SIMD_WIDTH) {
+            float use = agent.memory->optionUtility[ok] + agent.memory->optionPriority[ok];
             if (!isfinite(use)) use = FLT_MAX;
-            if (agent.optionFeature[ok] == worst) trackingOption = min(trackingOption, ok);
-            if (use < leastDemand) { leastDemand = use; leastDemandOption = ok; }
+            if (agent.indices->optionFeature[ok] == worst) trackingOption = min(trackingOption, ok);
+            if (use < leastDemand) {
+                leastDemand = use;
+                leastDemandOption = ok;
+            }
         }
         trackingOption = simd_min(trackingOption);
         float leastDemandAll = simd_min(leastDemand);
-        uint replacedOption = (trackingOption != 0xffffffffu) ? trackingOption
-            : ((leastDemandAll == FLT_MAX) ? 1u : simd_min(leastDemand == leastDemandAll ? leastDemandOption : 0xffffffffu));
-        if (tid == 0u) {
-            uint4 nursery = agent.nurseryMeta[bestNursery];
-            uint birth = agent.featureBirthCount[worst] + 1u;
-            agent.featureBirthCount[worst] = birth;
-            agent.featureMeta[worst] = uint4(nursery.x % agent.featureCount, nursery.y % agent.featureCount, nursery.z % 4u, nursery.w);
-            agent.featureMoments[worst] = float2(agent.nurseryStats[(bestNursery) * 4u], agent.nurseryStats[(bestNursery) * 4u + 1u]);
-            agent.featureUtility[worst] = agent.nurseryStats[(bestNursery) * 4u + 2u];
-            agent.valueWeight[worst] = 0.0f; agent.bonusWeight[worst] = 0.0f;
+        uint replacedOption =
+            (trackingOption != 0xffffffffu)
+                ? trackingOption
+                : ((leastDemandAll == FLT_MAX)
+                       ? 1u
+                       : simd_min(leastDemand == leastDemandAll ? leastDemandOption : 0xffffffffu));
+        if (threadIndex == 0u) {
+            uint4 nursery = agent.indices->nurseryMeta[bestNursery];
+            uint birth = agent.indices->featureBirthCount[worst] + 1u;
+            agent.indices->featureBirthCount[worst] = birth;
+            agent.indices->featureMeta[worst] =
+                uint4(nursery.x % OAK_FEATURE_CAPACITY, nursery.y % OAK_FEATURE_CAPACITY, nursery.z % 4u,
+                      nursery.w);
+            agent.memory->featureMoments[worst] = float2(agent.memory->nurseryStats[(bestNursery) * 4u],
+                                                         agent.memory->nurseryStats[(bestNursery) * 4u + 1u]);
+            agent.memory->featureUtility[worst] = agent.memory->nurseryStats[(bestNursery) * 4u + 2u];
+            agent.parameters->valueWeight[worst] = 0.0f;
+            agent.memory->bonusWeight[worst] = 0.0f;
 
-            agent.nurseryMeta[bestNursery] = uint4(seedParentA, seedParentB, (nursery.z + 1u) % 4u, 0u);
-            agent.nurseryStats[(bestNursery) * 4u] = 0.0f;
-            agent.nurseryStats[(bestNursery) * 4u + 1u] = 0.0f;
-            agent.nurseryStats[(bestNursery) * 4u + 2u] = 0.0f;
-            agent.nurseryStats[(bestNursery) * 4u + 3u] = 0.0f;
+            agent.indices->nurseryMeta[bestNursery] =
+                uint4(seedParentA, seedParentB, (nursery.z + 1u) % 4u, 0u);
+            agent.memory->nurseryStats[(bestNursery) * 4u] = 0.0f;
+            agent.memory->nurseryStats[(bestNursery) * 4u + 1u] = 0.0f;
+            agent.memory->nurseryStats[(bestNursery) * 4u + 2u] = 0.0f;
+            agent.memory->nurseryStats[(bestNursery) * 4u + 3u] = 0.0f;
 
-            float initialStepSize = 1.0f / float(activeCount(agent.perceptCount));
+            float initialStepSize = 1.0f / float(OAK_ACTIVE_CAPACITY);
             float4 freshMeta = float4(initialStepSize, log(initialStepSize), 0.0f, 0.0f);
-            agent.valueMeta[worst] = freshMeta;
-            agent.optionValueMeta[worst] = freshMeta;
-            agent.modelMeta[worst] = freshMeta;
+            agent.memory->valueMeta[worst] = freshMeta;
+            agent.memory->optionValueMeta[worst] = freshMeta;
+            agent.memory->modelMeta[worst] = freshMeta;
 
             uint k = replacedOption;
-            agent.optionAge[k] = 0u; agent.optionFeature[k] = worst; agent.optionUtility[k] = float(agent.featureCount);
-            agent.actorAdvantage[k] = 0.0f;
-            agent.optionAverageReward[k] = 0.0f;
-            agent.optionModelAverageReward[k] = 0.0f;
-            agent.optionFitness[k] = 0.0f;
-            agent.lastStopAge[k] = 0u;
+            agent.indices->optionAge[k] = 0u;
+            agent.indices->optionFeature[k] = worst;
+            agent.memory->optionUtility[k] = float(OAK_FEATURE_CAPACITY);
+            agent.memory->actorAdvantage[k] = 0.0f;
+            agent.memory->optionAverageReward[k] = 0.0f;
+            agent.memory->optionModelAverageReward[k] = 0.0f;
+            agent.memory->optionFitness[k] = 0.0f;
+            agent.indices->lastStopAge[k] = 0u;
 
-            agent.replaceSlot[0] = 1u; agent.replaceSlot[1] = worst;
-            agent.replaceSlot[2] = k; agent.replaceSlot[3] = birth;
+            agent.indices->replaceSlot[0] = 1u;
+            agent.indices->replaceSlot[1] = worst;
+            agent.indices->replaceSlot[2] = k;
+            agent.indices->replaceSlot[3] = birth;
         }
-    } else if (tid == 0u) {
-        agent.replaceSlot[0] = 0u;
+    } else if (threadIndex == 0u) {
+        agent.indices->replaceSlot[0] = 0u;
     }
-    if (tid == 0u) {
-        if (agent.replaceSlot[0] == 0u && (agent.stepCount % max(agent.optionCount, 1u)) == 0u) {
+    if (threadIndex == 0u) {
+        if (agent.indices->replaceSlot[0] == 0u && (agent.stepCount % max(OAK_OPTION_COUNT, 1u)) == 0u) {
             float meanOptionFitness = 0.0f;
-            for (uint k2 = 0u; k2 < agent.optionCount; ++k2) meanOptionFitness += agent.optionFitness[k2];
-            meanOptionFitness *= agent.invOptionCount;
-            uint replacedOption = 0u; float worstFitness = FLT_MAX;
-            for (uint k2 = 1u; k2 < agent.optionCount; ++k2) {
-                if (agent.optionAge[k2] < agent.featureCount) continue;
-                float f = agent.optionFitness[k2];
-                if (f < worstFitness) { worstFitness = f; replacedOption = k2; }
+            for (uint k2 = 0u; k2 < OAK_OPTION_COUNT; ++k2)
+                meanOptionFitness += agent.memory->optionFitness[k2];
+            meanOptionFitness *= OAK_INV_OPTION_COUNT;
+            uint replacedOption = 0u;
+            float worstFitness = FLT_MAX;
+            for (uint k2 = 1u; k2 < OAK_OPTION_COUNT; ++k2) {
+                if (agent.indices->optionAge[k2] < OAK_FEATURE_CAPACITY) continue;
+                float f = agent.memory->optionFitness[k2];
+                if (f < worstFitness) {
+                    worstFitness = f;
+                    replacedOption = k2;
+                }
             }
             if (replacedOption != 0u && worstFitness < 0.0f && worstFitness < meanOptionFitness) {
-                agent.optionAge[replacedOption] = 0u; agent.lastStopAge[replacedOption] = 0u;
-                agent.optionFitness[replacedOption] = 0.0f; agent.optionAverageReward[replacedOption] = 0.0f; agent.optionModelAverageReward[replacedOption] = 0.0f;
-                agent.actorAdvantage[replacedOption] = 0.0f;
-                agent.replaceSlot[0] = 2u; agent.replaceSlot[2] = replacedOption;
-                agent.replaceSlot[3] = agent.stepCount;
+                agent.indices->optionAge[replacedOption] = 0u;
+                agent.indices->lastStopAge[replacedOption] = 0u;
+                agent.memory->optionFitness[replacedOption] = 0.0f;
+                agent.memory->optionAverageReward[replacedOption] = 0.0f;
+                agent.memory->optionModelAverageReward[replacedOption] = 0.0f;
+                agent.memory->actorAdvantage[replacedOption] = 0.0f;
+                agent.indices->replaceSlot[0] = 2u;
+                agent.indices->replaceSlot[2] = replacedOption;
+                agent.indices->replaceSlot[3] = agent.stepCount;
             }
         }
-        agent.scalars->stateSlot = 1u - agent.stateSlot;
-        agent.scalars->stepCount = agent.stepCount + 1u;
     }
 
     simdgroup_barrier(mem_flags::mem_device);
-    uint replacement = agent.replaceSlot[0];
+    uint replacement = agent.indices->replaceSlot[0];
     if (replacement != 0u) {
-        uint worst = agent.replaceSlot[1], k = agent.replaceSlot[2], birth = agent.replaceSlot[3];
-        float policyPerturbScale = 1.0f / float(max(agent.actionCount, 1u));
-        uint policyN = agent.policyCount;
+        uint worst = agent.indices->replaceSlot[1], k = agent.indices->replaceSlot[2],
+             birth = agent.indices->replaceSlot[3];
+        float policyPerturbScale = 1.0f / float(max(OAK_ACTION_PARAMS, 1u));
+        uint policyN = OAK_POLICY_MAX;
 
-        if (tid == 0u) {
-            tgDirty[0] = 1.0f;
-            agent.parked[k] = 0u;
+        if (threadIndex == 0u) {
+            predictionsChanged[0] = 1.0f;
+            agent.indices->parked[k] = 0u;
         }
         uint slot = k;
         uint baseSlot = 0u;
-        for (uint i = tid; i < agent.featureCount; i += OAK_SIMD_WIDTH) {
-            device float *rec = record(agent, i, slot);
-            rec[RECORD_VALUE] = 0.0f;
-            rec[RECORD_AUX] = 0.0f;
-            rec[RECORD_REWARD] = 0.0f;
-            rec[RECORD_DURATION] = 0.0f;
-            rec[RECORD_NEXT] = 0.0f;
-            rec[RECORD_NEXT_AUX] = 0.0f;
-            device const float *base = record(agent, i, baseSlot);
+        for (uint i = threadIndex; i < OAK_FEATURE_CAPACITY; i += OAK_SIMD_WIDTH) {
+            device Record *rec = optionRecord(agent, i, slot);
+            rec->value = 0.0f;
+            rec->aux = 0.0f;
+            rec->reward = 0.0f;
+            rec->duration = 0.0f;
+            rec->next = 0.0f;
+            rec->nextAux = 0.0f;
+            device const Record *base = optionRecord(agent, i, baseSlot);
             for (uint d = 0u; d < policyN; ++d) {
-                uint h = (i * 2654435761u) ^ (d * 40503u)
-                       ^ (k * 2246822519u) ^ (birth * 3266489917u)
-                       ^ agent.stepCount;
-                h ^= h >> 13; h *= 2654435761u; h ^= h >> 16;
+                uint h = (i * 2654435761u) ^ (d * 40503u) ^ (k * 2246822519u) ^ (birth * 3266489917u) ^
+                         agent.stepCount;
+                h ^= h >> 13;
+                h *= 2654435761u;
+                h ^= h >> 16;
                 float hashedNoise = float(h & 0xffffu) / 32768.0f - 1.0f;
 
-                float w0 = base[RECORD_POLICY + d];
-                rec[RECORD_POLICY + d] = w0 + hashedNoise * policyPerturbScale * rsqrt(float(activeCount(agent.perceptCount)));
+                float w0 = base->policy[d];
+                rec->policy[d] =
+                    w0 + hashedNoise * policyPerturbScale * rsqrt(float(OAK_ACTIVE_CAPACITY));
             }
         }
         simdgroup_barrier(mem_flags::mem_device);
 
-        if (replacement == 1u) for (uint ok = tid; ok < agent.optionCount; ok += OAK_SIMD_WIDTH) {
-            device float *rec = record(agent, worst, ok);
-            for (uint f = 0u; f < agent.recordFloats; ++f) rec[f] = 0.0f;
-        }
+        if (replacement == 1u)
+            for (uint ok = threadIndex; ok < OAK_OPTION_COUNT; ok += OAK_SIMD_WIDTH) {
+                *optionRecord(agent, worst, ok) = Record{};
+            }
         simdgroup_barrier(mem_flags::mem_device);
-        if (tid == 0u) {
-            uint optionFeatureIndex = (replacement == 1u) ? worst : (agent.optionFeature[k] % agent.featureCount);
-            record(agent, optionFeatureIndex, slot)[RECORD_VALUE] = agent.planScratch[PLAN_SCRATCH_INV_SQRT_FEATURES];
+        if (threadIndex == 0u) {
+            uint optionFeatureIndex =
+                (replacement == 1u) ? worst : (agent.indices->optionFeature[k] % OAK_FEATURE_CAPACITY);
+            optionRecord(agent, optionFeatureIndex, slot)->value = agent.memory->inverseFeatureNorm;
         }
     }
 }
 
-static inline void updateUtilities(Agent agent, uint tid) {
+static inline void updateUtilities(Agent agent, uint threadIndex) {
     uint tPrev = agent.stepCount - 1u;
-    device const float *prev = state_at(agent, 1u - agent.stateSlot);
-    device const float *curr = state_at(agent, agent.stateSlot);
+    device const float *previousFeatures = featureValues(agent, 1u - agent.stateSlot);
+    device const float *currentFeatures = featureValues(agent, agent.stateSlot);
     device const uint *previousActive = activeFeatures(agent, 1u - agent.stateSlot);
-    float trackingRate = track_rate(tPrev, agent.featureCount);
+    float trackingRate = trackingRateFor(tPrev, OAK_FEATURE_CAPACITY);
 
-    const uint activeSlotsPerThread = activeCount(agent.perceptCount) / OAK_SIMD_WIDTH;
+    const uint activeSlotsPerThread = OAK_ACTIVE_CAPACITY / OAK_SIMD_WIDTH;
     uint iS[OAK_ACTIVE_SLOTS_MAX];
     float optionTdMagnitude[OAK_ACTIVE_SLOTS_MAX], keyboardSearchSignal[OAK_ACTIVE_SLOTS_MAX];
     for (uint s = 0u; s < activeSlotsPerThread; s += 1u) {
-        iS[s] = previousActive[tid + s * OAK_SIMD_WIDTH];
-        optionTdMagnitude[s] = 0.0f; keyboardSearchSignal[s] = 0.0f;
+        iS[s] = previousActive[threadIndex + s * OAK_SIMD_WIDTH];
+        optionTdMagnitude[s] = 0.0f;
+        keyboardSearchSignal[s] = 0.0f;
     }
-    float valueTdError = agent.td[0];
-    for (uint m = 0u; m < agent.optionCount; m += OAK_SIMD_WIDTH) {
-        uint kH = m + tid;
-        bool kLive = kH < agent.optionCount;
-        uint   ofH = kLive ? agent.optionFeature[kH] : 0u;
-        float tdH = kLive ? agent.optionTd[kH] : 0.0f;
-        float kbH = kLive ? agent.keyboard[kH] : 0.0f;
-        float aaH = kLive ? agent.actorAdvantage[kH] : 0.0f;
-        float imH = kLive ? agent.importance[kH] : 0.0f;
-        uint kEnd = min(OAK_SIMD_WIDTH, agent.optionCount - m);
+    float valueTdError = agent.memory->td;
+    for (uint m = 0u; m < OAK_OPTION_COUNT; m += OAK_SIMD_WIDTH) {
+        uint kH = m + threadIndex;
+        bool kLive = kH < OAK_OPTION_COUNT;
+        uint ofH = kLive ? agent.indices->optionFeature[kH] : 0u;
+        float tdH = kLive ? agent.memory->optionTd[kH] : 0.0f;
+        float kbH = kH == 0u ? 1.0f : 0.0f;
+        float aaH = kLive ? agent.memory->actorAdvantage[kH] : 0.0f;
+        float imH = kLive ? agent.memory->importance[kH] : 0.0f;
+        uint kEnd = min(OAK_SIMD_WIDTH, OAK_OPTION_COUNT - m);
         for (uint l = 0u; l < kEnd; ++l) {
-            uint   ofV = simd_shuffle(ofH, (ushort)l);
+            uint ofV = simd_shuffle(ofH, (ushort)l);
             float tdV = simd_shuffle(tdH, (ushort)l);
             float kbV = simd_shuffle(kbH, (ushort)l);
             float aaV = simd_shuffle(aaH, (ushort)l);
             float imV = simd_shuffle(imH, (ushort)l);
-            uint ofFeature = ofV % agent.featureCount;
+            uint ofFeature = ofV % OAK_FEATURE_CAPACITY;
             for (uint s = 0u; s < activeSlotsPerThread; s += 1u) {
                 if (ofFeature != iS[s]) continue;
                 float optionTdUse = fabs(tdV);
@@ -1420,207 +1285,217 @@ static inline void updateUtilities(Agent agent, uint tid) {
             }
         }
     }
-    uint sel = agent.selectedOption[0] % agent.optionCount;
-    uint selectedSlot = sel;
     for (uint s = 0u; s < activeSlotsPerThread; s += 1u) {
-        uint activeSlot = tid + s * OAK_SIMD_WIDTH;
+        uint activeSlot = threadIndex + s * OAK_SIMD_WIDTH;
         uint i = iS[s];
         float optionValueSignal = optionTdMagnitude[s], keyboardSignal = keyboardSearchSignal[s];
         float planningSignal = fabs(valueTdError);
 
         float selectedPolicyLoad = 0.0f;
-        device const float *selectedPolicy = record(agent, i, selectedSlot) + RECORD_POLICY;
-        for (uint d = 0u; d < agent.policyCount; ++d) selectedPolicyLoad += fabs(selectedPolicy[d]);
-        float load = fabs(prev[i]) * (fabs(agent.valueWeight[i]) + selectedPolicyLoad);
-        if (!isfinite(load)) load = 0.0f;
-        float featureUtilitySignal = fabs(planningSignal * prev[i])
-                + fabs((optionValueSignal + keyboardSignal) * prev[i])
-                + load;
-        agent.featureUtility[i] += trackingRate * (featureUtilitySignal - agent.featureUtility[i]);
+        device const Record *selected = optionRecord(agent, i, 0u);
+        for (uint d = 0u; d < OAK_POLICY_MAX; ++d) selectedPolicyLoad += fabs(selected->policy[d]);
+        float load =
+            fabs(previousFeatures[i]) * (fabs(agent.parameters->valueWeight[i]) + selectedPolicyLoad);
+        load = finiteOrZero(load);
+        float featureUtilitySignal = fabs(planningSignal * previousFeatures[i]) +
+                                     fabs((optionValueSignal + keyboardSignal) * previousFeatures[i]) + load;
+        agent.memory->featureUtility[i] +=
+            trackingRate * (featureUtilitySignal - agent.memory->featureUtility[i]);
 
         {
-            float bonusHighWater = agent.bonusWeight[i];
-            float valueWeight = agent.valueWeight[i];
-            if (valueWeight > bonusHighWater) agent.bonusWeight[i] = valueWeight;
+            float bonusHighWater = agent.memory->bonusWeight[i];
+            float valueWeight = agent.parameters->valueWeight[i];
+            if (valueWeight > bonusHighWater) agent.memory->bonusWeight[i] = valueWeight;
         }
-        uint age = agent.featureMeta[i].w;
-        metaOptimizeUpdate(agent.valueMeta, i, valueTdError, prev[i], age, agent.metaEta, agent.invFeatureTimeScale);
+        uint age = agent.indices->featureMeta[i].w;
+        metaOptimizeUpdate(agent.memory->valueMeta, i, valueTdError, previousFeatures[i], age, OAK_META_RATE,
+                           OAK_TRACKING_RATE);
         uint metaOptimizeSlot = tPrev % OAK_SIMD_WIDTH;
         if (activeSlot == metaOptimizeSlot) {
-            uint metaOptimizeOption = tPrev % max(agent.optionCount, 1u);
-            float optionTdSigned = agent.optionTd[metaOptimizeOption];
-            float modelSigned = agent.optionRewardTd[metaOptimizeOption];
-            metaOptimizeUpdate(agent.optionValueMeta, i, optionTdSigned, prev[i], age, agent.metaEta, agent.invFeatureTimeScale);
-            metaOptimizeUpdate(agent.modelMeta, i, modelSigned, prev[i], age, agent.metaEta, agent.invFeatureTimeScale);
+            uint metaOptimizeOption = tPrev % max(OAK_OPTION_COUNT, 1u);
+            float optionTdSigned = agent.memory->optionTd[metaOptimizeOption];
+            float modelSigned = agent.memory->optionRewardTd[metaOptimizeOption];
+            metaOptimizeUpdate(agent.memory->optionValueMeta, i, optionTdSigned, previousFeatures[i], age,
+                               OAK_META_RATE, OAK_TRACKING_RATE);
+            metaOptimizeUpdate(agent.memory->modelMeta, i, modelSigned, previousFeatures[i], age,
+                               OAK_META_RATE, OAK_TRACKING_RATE);
         }
     }
-    for (uint k = tid; k < agent.optionCount; k += OAK_SIMD_WIDTH) {
-        float err = agent.optionPriority[k];
-        float keyboardMass = fabs(agent.keyboard[k]);
-        float optionUtilitySignal = agent.optionTd[k] * agent.optionTd[k]
-                + keyboardMass * fabs(agent.actorAdvantage[k])
-                - err;
-        agent.optionUtility[k] += trackingRate * (optionUtilitySignal - agent.optionUtility[k]);
+    for (uint k = threadIndex; k < OAK_OPTION_COUNT; k += OAK_SIMD_WIDTH) {
+        float err = agent.memory->optionPriority[k];
+        float keyboardMass = (k == 0u ? 1.0f : 0.0f);
+        float optionUtilitySignal = agent.memory->optionTd[k] * agent.memory->optionTd[k] +
+                                    keyboardMass * fabs(agent.memory->actorAdvantage[k]) - err;
+        agent.memory->optionUtility[k] +=
+            trackingRate * (optionUtilitySignal - agent.memory->optionUtility[k]);
     }
 
     {
         float utilSum = 0.0f;
         uint maturedLive = 0u;
-        for (uint k = 0u; k < agent.optionCount; ++k) {
-            if (agent.parked[k] != 0u || agent.optionAge[k] < agent.featureCount) continue;
-            float u = agent.optionUtility[k];
-            utilSum += isfinite(u) ? u : 0.0f;
+        for (uint k = 0u; k < OAK_OPTION_COUNT; ++k) {
+            if (agent.indices->parked[k] != 0u || agent.indices->optionAge[k] < OAK_FEATURE_CAPACITY)
+                continue;
+            float u = agent.memory->optionUtility[k];
+            utilSum += finiteOrZero(u);
             maturedLive += 1u;
         }
         float meanLiveUtil = (maturedLive > 0u) ? utilSum / float(maturedLive) : 0.0f;
-        uint selectedForPark = agent.selectedOption[0] % agent.optionCount;
         uint revivedOption = 0xffffffffu;
-        for (uint k = 1u + tid; k < agent.optionCount; k += OAK_SIMD_WIDTH) {
-            if (agent.parked[k] == 0u) continue;
-            float u = agent.optionUtility[k];
-            bool revived = (k == selectedForPark) || (agent.keyboard[k] > 0.0f)
-                || (isfinite(u) && u >= meanLiveUtil);
+        for (uint k = 1u + threadIndex; k < OAK_OPTION_COUNT; k += OAK_SIMD_WIDTH) {
+            if (agent.indices->parked[k] == 0u) continue;
+            float u = agent.memory->optionUtility[k];
+            bool revived = (isfinite(u) && u >= meanLiveUtil);
             if (revived) revivedOption = min(revivedOption, k);
         }
         revivedOption = simd_min(revivedOption);
         uint optionToPark = 0xffffffffu;
         float parkUtility = FLT_MAX;
-        for (uint k = 1u + tid; k < agent.optionCount; k += OAK_SIMD_WIDTH) {
-            bool live = agent.parked[k] == 0u || k == revivedOption;
-            if (!live || agent.optionAge[k] < agent.featureCount || k == selectedForPark) continue;
-            float kb = agent.keyboard[k];
-            if (kb > 0.0f) continue;
-            float u = agent.optionUtility[k];
-            if (!isfinite(u)) u = 0.0f;
-            if (u < meanLiveUtil && u < parkUtility) { optionToPark = k; parkUtility = u; }
+        for (uint k = 1u + threadIndex; k < OAK_OPTION_COUNT; k += OAK_SIMD_WIDTH) {
+            bool live = agent.indices->parked[k] == 0u || k == revivedOption;
+            if (!live || agent.indices->optionAge[k] < OAK_FEATURE_CAPACITY) continue;
+            float u = agent.memory->optionUtility[k];
+            u = finiteOrZero(u);
+            if (u < meanLiveUtil && u < parkUtility) {
+                optionToPark = k;
+                parkUtility = u;
+            }
         }
         float parkUtilityAll = simd_min(parkUtility);
-        optionToPark = (parkUtilityAll == FLT_MAX) ? 0xffffffffu
-            : simd_min(parkUtility == parkUtilityAll ? optionToPark : 0xffffffffu);
-        if (tid == 0u) {
-            if (revivedOption != 0xffffffffu) agent.parked[revivedOption] = 0u;
-            if (optionToPark != 0xffffffffu) agent.parked[optionToPark] = 1u;
+        optionToPark = (parkUtilityAll == FLT_MAX)
+                           ? 0xffffffffu
+                           : simd_min(parkUtility == parkUtilityAll ? optionToPark : 0xffffffffu);
+        if (threadIndex == 0u) {
+            if (revivedOption != 0xffffffffu) agent.indices->parked[revivedOption] = 0u;
+            if (optionToPark != 0xffffffffu) agent.indices->parked[optionToPark] = 1u;
         }
     }
-    simdSyncDev();
+    syncMemory();
 
     {
         float meanOptionFitness = 0.0f;
-        for (uint k = 0u; k < agent.optionCount; ++k) meanOptionFitness += agent.optionFitness[k];
-        meanOptionFitness *= agent.invOptionCount;
-        float previousFeatureNormSq = agent.previousFeatureNormSq[0];
+        for (uint k = 0u; k < OAK_OPTION_COUNT; ++k) meanOptionFitness += agent.memory->optionFitness[k];
+        meanOptionFitness *= OAK_INV_OPTION_COUNT;
+        float previousFeatureNormSq = agent.memory->previousFeatureNormSq;
         if (!isfinite(previousFeatureNormSq) || previousFeatureNormSq < 0.0f) previousFeatureNormSq = 0.0f;
-        float rate = agent.invFeatureTimeScale * agent.invOptionCount / (1.0f + previousFeatureNormSq);
+        float rate = OAK_TRACKING_RATE * OAK_INV_OPTION_COUNT / (1.0f + previousFeatureNormSq);
 
-        const uint policyN = agent.policyCount;
+        const uint policyN = OAK_POLICY_MAX;
         float fitnessSearchDirection = 0.0f;
         float baseOptionMean = 0.0f;
-        if (tid < policyN) {
-            baseOptionMean = agent.optionPolicyMean[tid];
-            if (!isfinite(baseOptionMean)) baseOptionMean = 0.0f;
+        if (threadIndex < policyN) {
+            baseOptionMean = agent.memory->optionPolicyMean[threadIndex];
+            baseOptionMean = finiteOrZero(baseOptionMean);
         }
         float fitnessDirection = 0.0f;
-        for (uint k = 1u; k < agent.optionCount; ++k) {
-            float f = agent.optionFitness[k];
-            if (agent.parked[k] != 0u) continue;
-            if (tid < policyN) {
+        for (uint k = 1u; k < OAK_OPTION_COUNT; ++k) {
+            float f = agent.memory->optionFitness[k];
+            if (agent.indices->parked[k] != 0u) continue;
+            if (threadIndex < policyN) {
                 float fitnessCentered = f - meanOptionFitness;
-                float mk = agent.optionPolicyMean[k * agent.actionCount + tid];
-                fitnessDirection = fma(fitnessCentered, (isfinite(mk) ? mk : 0.0f) - baseOptionMean, fitnessDirection);
+                float mk = agent.memory->optionPolicyMean[k * OAK_POLICY_MAX + threadIndex];
+                fitnessDirection =
+                    fma(fitnessCentered, finiteOrZero(mk) - baseOptionMean, fitnessDirection);
             }
         }
-        if (tid < policyN)
-            fitnessSearchDirection = isfinite(fitnessDirection) ? (fitnessDirection / (1.0f + fabs(fitnessDirection))) : 0.0f;
-        uint activeCnt = activeCount(agent.perceptCount);
+        if (threadIndex < policyN)
+            fitnessSearchDirection =
+                isfinite(fitnessDirection) ? (fitnessDirection / (1.0f + fabs(fitnessDirection))) : 0.0f;
+        uint activeCnt = OAK_ACTIVE_CAPACITY;
         float direction[OAK_POLICY_MAX];
-        for (uint d = 0u; d < OAK_POLICY_MAX; ++d) direction[d] = simd_shuffle(fitnessSearchDirection, (ushort)d);
-        for (uint a = tid; a < activeCnt; a += OAK_SIMD_WIDTH) {
+        for (uint d = 0u; d < OAK_POLICY_MAX; ++d)
+            direction[d] = simd_shuffle(fitnessSearchDirection, (ushort)d);
+        for (uint a = threadIndex; a < activeCnt; a += OAK_SIMD_WIDTH) {
             uint i = previousActive[a];
-            float x = prev[i];
-            device float *weights = record(agent, i, 0u) + RECORD_POLICY;
+            float x = previousFeatures[i];
+            device Record *weights = optionRecord(agent, i, 0u);
             for (uint d = 0u; d < policyN; ++d) {
-                float w0 = weights[d];
-                weights[d] = keepFinite(w0, w0 + rate * direction[d] * x);
+                float w0 = weights->policy[d];
+                weights->policy[d] = keepFinite(w0, w0 + rate * direction[d] * x);
             }
         }
     }
     {
-        for (uint n = tid + (((tPrev >> 1u) & 1u) != 0u ? OAK_SIMD_WIDTH : 0u); n < agent.nurseryCount; n += 2u * OAK_SIMD_WIDTH) {
-            uint4 nursery = agent.nurseryMeta[n];
-            float constructed = constructedValue(agent, prev, nursery.x, nursery.y, nursery.z);
+        for (uint n = threadIndex + (((tPrev >> 1u) & 1u) != 0u ? OAK_SIMD_WIDTH : 0u);
+             n < OAK_FEATURE_CAPACITY; n += 2u * OAK_SIMD_WIDTH) {
+            uint4 nursery = agent.indices->nurseryMeta[n];
+            float constructed = constructedValue(agent, previousFeatures, nursery.x, nursery.y, nursery.z);
             uint age = nursery.w;
-            float rate = max(1.0f / (float(age) + 1.0f), agent.invFeatureTimeScale);
+            float rate = max(1.0f / (float(age) + 1.0f), OAK_TRACKING_RATE);
 
-            device float4 *nurseryStatsVec = (device float4 *)&agent.nurseryStats[(n) * 4u];
+            device float4 *nurseryStatsVec = (device float4 *)&agent.memory->nurseryStats[(n) * 4u];
             float4 st = *nurseryStatsVec;
             st.x += rate * (constructed - st.x);
             st.y += rate * (constructed * constructed - st.y);
             float var = max(st.y - st.x * st.x, 0.0f);
 
-            float ridge = max(1.0f / (float(age) + 1.0f), 1.0f / float(2u * agent.perceptCount));
+            float ridge = max(1.0f / (float(age) + 1.0f), 1.0f / float(2u * OAK_PERCEPT_COUNT));
             float standardizedCandidate = (constructed - st.x) * rsqrt(var + ridge);
-            float candidateUtilitySignal = fabs(agent.td[0] * standardizedCandidate);
+            float candidateUtilitySignal = fabs(agent.memory->td * standardizedCandidate);
             if (isfinite(candidateUtilitySignal)) {
                 st.z += trackingRate * (candidateUtilitySignal - st.z);
                 st.w += trackingRate * (candidateUtilitySignal * candidateUtilitySignal - st.w);
             }
             *nurseryStatsVec = st;
-            if (age < 0xffffffffu) agent.nurseryMeta[n].w = age + 1u;
+            if (age < 0xffffffffu) agent.indices->nurseryMeta[n].w = age + 1u;
         }
     }
     {
-        for (uint i = tid; i < agent.featureCount; i += OAK_SIMD_WIDTH) agent.optionUseByFeature[i] = 0.0f;
-        simdSyncDev();
-        if (tid == 0u) {
-            for (uint k = 0u; k < agent.optionCount; ++k) {
-                float use = agent.optionUtility[k] + fabs(agent.keyboard[k]);
-                if (isfinite(use)) agent.optionUseByFeature[agent.optionFeature[k] % agent.featureCount] += use;
+        for (uint i = threadIndex; i < OAK_FEATURE_CAPACITY; i += OAK_SIMD_WIDTH)
+            agent.memory->optionUseByFeature[i] = 0.0f;
+        syncMemory();
+        if (threadIndex == 0u) {
+            for (uint k = 0u; k < OAK_OPTION_COUNT; ++k) {
+                float use = agent.memory->optionUtility[k] + (k == 0u ? 1.0f : 0.0f);
+                if (isfinite(use))
+                    agent.memory
+                        ->optionUseByFeature[agent.indices->optionFeature[k] % OAK_FEATURE_CAPACITY] += use;
             }
         }
 
-        for (uint n = tid; n < agent.nurseryCount; n += OAK_SIMD_WIDTH) {
-            float nurseryUtility = agent.nurseryStats[(n) * 4u + 2u];
+        for (uint n = threadIndex; n < OAK_FEATURE_CAPACITY; n += OAK_SIMD_WIDTH) {
+            float nurseryUtility = agent.memory->nurseryStats[(n) * 4u + 2u];
             float lowerConfidenceBound = -FLT_MAX;
-            uint nurseryAge = agent.nurseryMeta[n].w;
-            if (nurseryAge >= agent.featureCount && isfinite(nurseryUtility)) {
-                float nurseryUtilityVariance = max(agent.nurseryStats[(n) * 4u + 3u] - nurseryUtility * nurseryUtility, 0.0f);
-                float nurseryUtilityRate = max(1.0f / (float(nurseryAge) + 1.0f), agent.invFeatureTimeScale);
+            uint nurseryAge = agent.indices->nurseryMeta[n].w;
+            if (nurseryAge >= OAK_FEATURE_CAPACITY && isfinite(nurseryUtility)) {
+                float nurseryUtilityVariance =
+                    max(agent.memory->nurseryStats[(n) * 4u + 3u] - nurseryUtility * nurseryUtility, 0.0f);
+                float nurseryUtilityRate = max(1.0f / (float(nurseryAge) + 1.0f), OAK_TRACKING_RATE);
                 float v = nurseryUtility - sqrt(nurseryUtilityVariance * nurseryUtilityRate);
                 if (isfinite(v)) lowerConfidenceBound = v;
             }
-            agent.nurseryScore[n] = lowerConfidenceBound;
+            agent.memory->nurseryScore[n] = lowerConfidenceBound;
         }
     }
-    simdSyncDev();
+    syncMemory();
     {
-        for (uint i = agent.perceptCount + tid + (((tPrev >> 1u) & 1u) != 0u ? OAK_SIMD_WIDTH : 0u);
-             i < agent.featureCount; i += 2u * OAK_SIMD_WIDTH) {
-            device float4 *replaceScoreVec = (device float4 *)&agent.replaceScore[i * 4u];
-            uint4 meta = agent.featureMeta[i];
-            if (meta.w < agent.featureCount) { *replaceScoreVec = float4(0.0f, 0.0f, 0.0f, 0.0f); continue; }
-            uint parentA = meta.x % agent.featureCount;
-            float util = agent.featureUtility[i];
-            if (!isfinite(util)) util = 0.0f;
-            float redundancy = fabs(curr[i] * curr[parentA]);
-            if (!isfinite(redundancy)) redundancy = 0.0f;
-            float downstreamUse = agent.optionUseByFeature[i] + fabs(agent.valueWeight[i]);
-            if (!isfinite(downstreamUse)) downstreamUse = 0.0f;
+        for (uint i = OAK_PERCEPT_COUNT + threadIndex + (((tPrev >> 1u) & 1u) != 0u ? OAK_SIMD_WIDTH : 0u);
+             i < OAK_FEATURE_CAPACITY; i += 2u * OAK_SIMD_WIDTH) {
+            device float4 *replaceScoreVec = (device float4 *)&agent.memory->replaceScore[i * 4u];
+            uint4 meta = agent.indices->featureMeta[i];
+            if (meta.w < OAK_FEATURE_CAPACITY) {
+                *replaceScoreVec = float4(0.0f, 0.0f, 0.0f, 0.0f);
+                continue;
+            }
+            uint parentA = meta.x % OAK_FEATURE_CAPACITY;
+            float util = agent.memory->featureUtility[i];
+            util = finiteOrZero(util);
+            float redundancy = fabs(currentFeatures[i] * currentFeatures[parentA]);
+            redundancy = finiteOrZero(redundancy);
+            float downstreamUse =
+                agent.memory->optionUseByFeature[i] + fabs(agent.parameters->valueWeight[i]);
+            downstreamUse = finiteOrZero(downstreamUse);
             *replaceScoreVec = float4(util, redundancy, downstreamUse, 1.0f);
         }
     }
 }
 
-
-kernel void oak_fleet_init(device float *params [[buffer(0)]],
-                           device float *stateArena [[buffer(1)]],
-                           device uint *uintArena [[buffer(2)]],
-                           device KernelScalars *scalars [[buffer(3)]],
-                           device OakFleetLane *lanes [[buffer(6)]],
+kernel void oak_fleet_init(device float *params [[buffer(0)]], device float *stateArena [[buffer(1)]],
+                           device uint *uintArena [[buffer(2)]], device OakFleetLane *lanes [[buffer(6)]],
                            device const uint *laneSeeds [[buffer(7)]],
                            constant OakFleetEnvCfg &ecfg [[buffer(8)]],
-                           constant uint &laneOffset [[buffer(10)]],
-                           device uint *envArena [[buffer(14)]],
-                           device const uint *envOff [[buffer(15)]],
+                           constant uint &laneOffset [[buffer(10)]], constant float4 &initial [[buffer(12)]],
+                           device uint *envArena [[buffer(14)]], device const uint *envOff [[buffer(15)]],
                            constant uint *mjModels [[buffer(16)]],
                            device const float *envConstants [[buffer(19)]],
                            uint gid [[thread_position_in_grid]]) {
@@ -1628,101 +1503,137 @@ kernel void oak_fleet_init(device float *params [[buffer(0)]],
     gid += laneOffset;
     if (gid >= ecfg.laneCount) return;
     device OakFleetLane *lane = &lanes[gid];
-    device uint *envState = laneEnvState(envArena, envOff, gid);
+    device uint *envState = (envArena + envOff[gid]);
     resetLane(lane, envState, mjModels, OAK_SPEC_ENV_KIND, laneSeeds[gid]);
-    Agent agent = make_agent(params, stateArena, uintArena, scalars, shape(), gidLocal, gid);
+    Agent agent = bindAgent(params, stateArena, uintArena, gidLocal, lane->steps);
+    uint traceChannels = max(OAK_TRACE_LEVELS * agent.observationCount, 1u);
+    for (uint feature = 0; feature < OAK_FEATURE_CAPACITY; feature++) {
+        uint parent = feature % (feature % 4u == 3u ? traceChannels : OAK_PERCEPT_COUNT);
+        agent.indices->nurseryMeta[feature] =
+            uint4(parent, (feature * 7u + 3u) % OAK_PERCEPT_COUNT, feature % 4u, 0u);
+        if (feature >= OAK_PERCEPT_COUNT) {
+            uint source = feature - OAK_PERCEPT_COUNT;
+            agent.indices->featureMeta[feature] =
+                source < traceChannels ? uint4(source, 0u, 3u, 0u)
+                                       : uint4(source % OAK_PERCEPT_COUNT,
+                                               (source * 7u + 3u) % OAK_PERCEPT_COUNT, source % 3u, 0u);
+        }
+        float4 meta = float4(initial.y, initial.z, 0.0f, 0.0f);
+        agent.memory->valueMeta[feature] = meta;
+        agent.memory->optionValueMeta[feature] = meta;
+        agent.memory->modelMeta[feature] = meta;
+    }
+    for (uint option = 0; option < OAK_OPTION_COUNT; option++) {
+        agent.indices->optionFeature[option] = option;
+        optionRecord(agent, option, option)->value = initial.x;
+        agent.memory->optionUtility[option] = float(OAK_FEATURE_CAPACITY);
+        agent.memory->actorMeta[option].x = 1.0f;
+        uint hash = gid * 2654435761u + option * 40503u + 977u;
+        uint action = hash % OAK_POLICY_MAX;
+        float sign = ((hash >> 16u) & 1u) == 0u ? 1.0f : -1.0f;
+        optionRecord(agent, 0u, option)->policy[action] = sign * initial.w;
+    }
+
     for (uint o = 0u; o < agent.observationCount; ++o) {
-        agent.observationMeta[o] = float4(1.0f / float(2u * agent.perceptCount), log(1.0f / float(2u * agent.perceptCount)), 0.0f, 0.0f);
+        agent.memory->observationMeta[o] = float4(1.0f / float(2u * OAK_PERCEPT_COUNT),
+                                                  log(1.0f / float(2u * OAK_PERCEPT_COUNT)), 0.0f, 0.0f);
     }
-    observeLane(OAK_SPEC_ENV_KIND, laneSeeds[gid], mjModels, envConstants, ecfg, envState, agent.observation);
-    agent.reward[0] = 0.0f;
-    for (uint d = 0u; d < agent.actionCount; ++d) agent.actionSignal[d] = 0.0f;
-    for (uint i = 0u; i < agent.optionCount * agent.actionCount; ++i) agent.optionActorCredit[i] = 0.0f;
-    for (uint k = 0u; k < agent.optionCount; ++k) {
-        agent.importance[k] = 1.0f;
-        agent.importanceStaging[k] = 1.0f;
-        agent.parked[k] = 0u;
+    observeLane(OAK_SPEC_ENV_KIND, laneSeeds[gid], mjModels, envConstants, ecfg, envState,
+                agent.memory->observation);
+    agent.memory->reward = 0.0f;
+    for (uint d = 0u; d < OAK_ACTION_PARAMS; ++d) agent.memory->actionSignal[d] = 0.0f;
+    for (uint i = 0u; i < OAK_OPTION_COUNT * OAK_POLICY_MAX; ++i) agent.memory->optionActorCredit[i] = 0.0f;
+    for (uint k = 0u; k < OAK_OPTION_COUNT; ++k) {
+        agent.memory->importance[k] = 1.0f;
+        agent.memory->importanceStaging[k] = 1.0f;
+        agent.indices->parked[k] = 0u;
     }
-    agent.planScratch[PLAN_SCRATCH_INV_SQRT_FEATURES] = rsqrt(float(max(agent.featureCount, 1u)));
+    agent.memory->inverseFeatureNorm = rsqrt(float(max(OAK_FEATURE_CAPACITY, 1u)));
 }
 
-static inline void sampleDiscreteAction(Agent agent,
-                                        device OakFleetLane *lane,
-                                        device float *pending,
-                                        device const uint *laneSeeds,
-                                        uint gid, uint tid) {
+static inline void sampleDiscreteAction(Agent agent, device OakFleetLane *lane, device float *pending,
+                                        device const uint *laneSeeds, uint gid, uint threadIndex) {
     uint discreteActionCount = OAK_ENV_SPECS[OAK_SPEC_ENV_KIND].actionCount;
     uint stepIdx = lane->steps;
-    uint4 rw = philox4x32(uint2(laneSeeds[gid], RNG_STREAM_ACT),
-                          uint4(stepIdx, 0u, 0u, 0u));
-    uint4 rw1 = philox4x32(uint2(laneSeeds[gid], RNG_STREAM_ACT),
-                           uint4(stepIdx, 1u, 0u, 0u));
-    uint words[8] = { rw.x, rw.y, rw.z, rw.w, rw1.x, rw1.y, rw1.z, rw1.w };
+    uint4 rw = philox4x32(uint2(laneSeeds[gid], RNG_STREAM_ACT), uint4(stepIdx, 0u, 0u, 0u));
+    uint4 rw1 = philox4x32(uint2(laneSeeds[gid], RNG_STREAM_ACT), uint4(stepIdx, 1u, 0u, 0u));
+    uint words[8] = {rw.x, rw.y, rw.z, rw.w, rw1.x, rw1.y, rw1.z, rw1.w};
 
     float behaviorLogitMax = -FLT_MAX;
-    for (uint d = 0u; d < discreteActionCount; ++d) behaviorLogitMax = max(behaviorLogitMax, finiteOrZero(agent.policyMeanRaw[d]));
+    for (uint d = 0u; d < discreteActionCount; ++d)
+        behaviorLogitMax = max(behaviorLogitMax, finiteOrZero(agent.memory->policyMeanRaw[d]));
     float behaviorSoftmaxSum = 0.0f;
-    for (uint d = 0u; d < discreteActionCount; ++d) behaviorSoftmaxSum += exp(finiteOrZero(agent.policyMeanRaw[d]) - behaviorLogitMax);
+    for (uint d = 0u; d < discreteActionCount; ++d)
+        behaviorSoftmaxSum += exp(finiteOrZero(agent.memory->policyMeanRaw[d]) - behaviorLogitMax);
     uint sampledAction = 0u;
     float bestGumbelScore = -FLT_MAX;
     for (uint d = 0u; d < discreteActionCount; ++d) {
-        float mu = finiteOrZero(agent.policyMeanRaw[d]);
+        float mu = finiteOrZero(agent.memory->policyMeanRaw[d]);
 
         float uniform = min(u01open(words[d & 7u]), 0x1.fffffep-1f);
         float gumbelScore = mu - log(-log(uniform));
-        if (gumbelScore > bestGumbelScore) { bestGumbelScore = gumbelScore; sampledAction = d; }
+        if (gumbelScore > bestGumbelScore) {
+            bestGumbelScore = gumbelScore;
+            sampledAction = d;
+        }
     }
 
     simdgroup_barrier(mem_flags::mem_device);
-    if (tid < discreteActionCount) pending[tid] = (tid == 0u) ? float(sampledAction) : 0.0f;
-    if (tid < agent.actionCount) {
+    if (threadIndex < discreteActionCount)
+        pending[threadIndex] = (threadIndex == 0u) ? float(sampledAction) : 0.0f;
+    if (threadIndex < OAK_ACTION_PARAMS) {
         float actionSignal = 0.0f;
-        if (tid < discreteActionCount)
-            actionSignal = ((tid == sampledAction) ? 1.0f : 0.0f) - exp(finiteOrZero(agent.policyMeanRaw[tid]) - behaviorLogitMax) / behaviorSoftmaxSum;
-        agent.actionSignal[tid] = actionSignal;
+        if (threadIndex < discreteActionCount)
+            actionSignal = ((threadIndex == sampledAction) ? 1.0f : 0.0f) -
+                           exp(finiteOrZero(agent.memory->policyMeanRaw[threadIndex]) - behaviorLogitMax) /
+                               behaviorSoftmaxSum;
+        agent.memory->actionSignal[threadIndex] = actionSignal;
     }
-    if (tid == 0u) lane->steps = stepIdx + 1u;
-    for (uint k = tid; k < agent.optionCount; k += OAK_SIMD_WIDTH) {
-        uint off = k * agent.actionCount;
+    if (threadIndex == 0u) lane->steps = stepIdx + 1u;
+    for (uint k = threadIndex; k < OAK_OPTION_COUNT; k += OAK_SIMD_WIDTH) {
+        uint off = k * OAK_POLICY_MAX;
         float optionLogitMax = -FLT_MAX;
-        for (uint d = 0u; d < discreteActionCount; ++d) optionLogitMax = max(optionLogitMax, finiteOrZero(agent.optionLogit[off + d]));
+        for (uint d = 0u; d < discreteActionCount; ++d)
+            optionLogitMax = max(optionLogitMax, finiteOrZero(agent.memory->optionLogit[off + d]));
         float optionSoftmaxSum = 0.0f;
         for (uint d = 0u; d < discreteActionCount; ++d)
-            optionSoftmaxSum += exp(finiteOrZero(agent.optionLogit[off + d]) - optionLogitMax);
-        for (uint d = 0u; d < agent.actionCount; ++d) {
+            optionSoftmaxSum += exp(finiteOrZero(agent.memory->optionLogit[off + d]) - optionLogitMax);
+        for (uint d = 0u; d < OAK_POLICY_MAX; ++d) {
             float credit = 0.0f;
             if (d < discreteActionCount)
-                credit = ((d == sampledAction) ? 1.0f : 0.0f)
-                   - exp(finiteOrZero(agent.optionLogit[off + d]) - optionLogitMax) / optionSoftmaxSum;
-            agent.actorCreditStaging[off + d] = credit;
+                credit =
+                    ((d == sampledAction) ? 1.0f : 0.0f) -
+                    exp(finiteOrZero(agent.memory->optionLogit[off + d]) - optionLogitMax) / optionSoftmaxSum;
+            agent.memory->actorCreditStaging[off + d] = credit;
         }
 
-        float behaviorActionProb = exp(finiteOrZero(agent.policyMeanRaw[sampledAction]) - behaviorLogitMax) / behaviorSoftmaxSum;
-        float optionActionProb = exp(finiteOrZero(agent.optionLogit[off + sampledAction]) - optionLogitMax) / optionSoftmaxSum;
+        float behaviorActionProb =
+            exp(finiteOrZero(agent.memory->policyMeanRaw[sampledAction]) - behaviorLogitMax) /
+            behaviorSoftmaxSum;
+        float optionActionProb =
+            exp(finiteOrZero(agent.memory->optionLogit[off + sampledAction]) - optionLogitMax) /
+            optionSoftmaxSum;
         float ratio = optionActionProb / behaviorActionProb;
-        agent.importanceStaging[k] = isfinite(ratio) ? min(ratio, float(agent.optionCount)) : 0.0f;
+        agent.memory->importanceStaging[k] = isfinite(ratio) ? min(ratio, float(OAK_OPTION_COUNT)) : 0.0f;
     }
 }
 
-static inline void sampleAction(Agent agent,
-                                device OakFleetLane *lanes,
-                                device uint *envArena,
-                                device const uint *envOff,
-                                device const uint *laneSeeds,
-                                uint gid, uint tid) {
+static inline void sampleAction(Agent agent, device OakFleetLane *lanes, device uint *envArena,
+                                device const uint *envOff, device const uint *laneSeeds, uint gid,
+                                uint threadIndex) {
     device OakFleetLane *lane = &lanes[gid];
-    device float *pending = lanePendingAction(laneEnvState(envArena, envOff, gid));
+    device float *pending = ((device float *)(envArena + envOff[gid]));
     if (OAK_ENV_SPECS[OAK_SPEC_ENV_KIND].actionKind == 1u) {
-        sampleDiscreteAction(agent, lane, pending, laneSeeds, gid, tid);
+        sampleDiscreteAction(agent, lane, pending, laneSeeds, gid, threadIndex);
         return;
     }
-    device float *scratch = agent.sampleScratch;
+    device float *scratch = agent.memory->sampleScratch;
     uint envActionCount = OAK_ENV_SPECS[OAK_SPEC_ENV_KIND].actionCount;
-    float sampleSigma = agent.sampleSigma;
+    float sampleSigma = OAK_SAMPLE_SIGMA;
     uint stepIdx = lane->steps;
 
-    if (tid < envActionCount) {
-        uint d = tid;
+    if (threadIndex < envActionCount) {
+        uint d = threadIndex;
         uint2 key = uint2(laneSeeds[gid], RNG_STREAM_ACT);
         uint pair = d >> 1u;
         uint4 r = philox4x32(key, uint4(stepIdx, pair >> 1u, 0u, 0u));
@@ -1733,220 +1644,155 @@ static inline void sampleAction(Agent agent,
         float uniform2 = u01(w1);
         float boxMullerRadius = sqrt(-2.0f * log(uniform1));
         float boxMullerAngle = 2.0f * M_PI_F * uniform2;
-        float standardNormal = ((d & 1u) == 0u) ? (boxMullerRadius * cos(boxMullerAngle)) : (boxMullerRadius * sin(boxMullerAngle));
-        float mu = finiteOrZero(agent.policyMean[d]);
+        float standardNormal = ((d & 1u) == 0u) ? (boxMullerRadius * cos(boxMullerAngle))
+                                                : (boxMullerRadius * sin(boxMullerAngle));
+        float mu = finiteOrZero(agent.memory->policyMean[d]);
         float sample = finiteOrZero(mu + sampleSigma * standardNormal);
         float clippedAction = max(-1.0f, min(1.0f, sample));
         pending[d] = clippedAction;
-        agent.actionSignal[d] = clippedAction;
-        agent.actionSignal[envActionCount + d] = 0.0f;
+        agent.memory->actionSignal[d] = clippedAction;
+        agent.memory->actionSignal[envActionCount + d] = 0.0f;
         scratch[d] = sample;
     }
     simdgroup_barrier(mem_flags::mem_device);
-    if (tid == 0u) lane->steps = stepIdx + 1u;
-    for (uint k = tid; k < agent.optionCount; k += OAK_SIMD_WIDTH) {
-        uint off = k * agent.actionCount;
+    if (threadIndex == 0u) lane->steps = stepIdx + 1u;
+    for (uint k = threadIndex; k < OAK_OPTION_COUNT; k += OAK_SIMD_WIDTH) {
+        uint off = k * OAK_POLICY_MAX;
         float logImportance = 0.0f;
         for (uint d = 0u; d < envActionCount; ++d) {
             float sample = scratch[d];
-            float optionMeanValue = finiteOrZero(agent.optionPolicyMean[off + d]);
+            float optionMeanValue = finiteOrZero(agent.memory->optionPolicyMean[off + d]);
 
-            agent.actorCreditStaging[off + d] = (sample - optionMeanValue) * (1.0f - optionMeanValue * optionMeanValue);
-            agent.actorCreditStaging[off + envActionCount + d] = 0.0f;
-            float behaviorResidual = sample - finiteOrZero(agent.policyMean[d]);
+            agent.memory->actorCreditStaging[off + d] =
+                (sample - optionMeanValue) * (1.0f - optionMeanValue * optionMeanValue);
+            float behaviorResidual = sample - finiteOrZero(agent.memory->policyMean[d]);
             float optionResidual = sample - optionMeanValue;
             logImportance += behaviorResidual * behaviorResidual - optionResidual * optionResidual;
         }
 
-        float ratio = exp(logImportance * agent.invTwoSigmaSquared);
-        agent.importanceStaging[k] = isfinite(ratio) ? min(ratio, float(agent.optionCount)) : 0.0f;
+        float ratio = exp(logImportance * OAK_INV_TWO_SIGMA_SQUARED);
+        agent.memory->importanceStaging[k] = isfinite(ratio) ? min(ratio, float(OAK_OPTION_COUNT)) : 0.0f;
     }
 }
 
-static inline void stepEnvironment(device float *params,
-                                   device float *stateArena,
-                                   device uint *uintArena,
-                                   device KernelScalars *scalars,
-                                   device OakFleetLane *lanes,
-                                   device uint *envArena,
-                                   device const uint *envOff,
-                                   constant uint *mjModels,
-                                   device float *mjScratch,
-                                   device const uint *mjScratchOff,
-                                   device const float *envConstants,
-                                   device const uint *laneSeeds,
-                                   constant OakFleetEnvCfg &ecfg,
-                                   device const int *recordSlot,
-                                   device float *recordBuf,
-                                   uint gid, uint gidLocal, uint slane, bool wide) {
+static inline void stepEnvironment(device float *params, device float *stateArena, device uint *uintArena,
+                                   device OakFleetLane *lanes, device uint *envArena,
+                                   device const uint *envOff, constant uint *mjModels,
+                                   device float *mjScratch, device const uint *mjScratchOff,
+                                   device const float *envConstants, device const uint *laneSeeds,
+                                   constant OakFleetEnvCfg &ecfg, device float *recordBuf, uint gid,
+                                   uint gidLocal, uint threadIndexInWave, bool wide) {
     device OakFleetLane *lane = &lanes[gid];
     uint envK = OAK_SPEC_ENV_KIND;
     float ctrl[OAK_ENV_ACT_MAX];
     uint done = 0u;
-    device uint *envState = laneEnvState(envArena, envOff, gid);
+    device uint *envState = (envArena + envOff[gid]);
     device float *obsOut = laneEnvObs(envState, envK);
-    float reward = advanceEnvironment(lane, envState, mjModels, mjScratch + mjScratchOff[gid], envConstants,
-                                      envK, laneSeeds[gid], ecfg, ctrl, obsOut, done, slane, wide);
-    if (slane != 0u) return;
+    float reward =
+        advanceEnvironment(lane, envState, mjModels, mjScratch + mjScratchOff[gid], envConstants, envK,
+                           laneSeeds[gid], ecfg, ctrl, obsOut, done, threadIndexInWave, wide);
+    if (threadIndexInWave != 0u) return;
     uint stepNum = lane->steps;
     accumulateReward(lane, reward, stepNum, ecfg);
     {
-        Agent agent = make_agent(params, stateArena, uintArena, scalars, shape(), gidLocal, gid);
-        if (lane->deathStep == OAK_DEATH_NONE) {
-            for (uint i = 0u; i < agent.actionCount; ++i) {
-                if (!isfinite(agent.policyMean[i])) {
-                    lane->deathStep = stepNum;
-                    lane->deathDetector = OAK_DET_POLICY_MEAN;
-                    break;
-                }
-            }
-        }
+        Agent agent = bindAgent(params, stateArena, uintArena, gidLocal, lane->steps);
         for (uint i = 0u; i < agent.observationCount && i < OAK_ENV_OBS_MAX; ++i) {
-            agent.observation[i] = obsOut[i];
+            agent.memory->observation[i] = obsOut[i];
             if (!isfinite(obsOut[i]) && lane->deathStep == OAK_DEATH_NONE) {
                 lane->deathStep = stepNum;
                 lane->deathDetector = OAK_DET_ENV_OBS;
             }
         }
-        agent.reward[0] = reward;
+        agent.memory->reward = reward;
     }
-    recordPose(envK, mjModels, envState, ctrl, stepNum, done, reward, ecfg, recordSlot, recordBuf, gid);
+    recordPose(envK, mjModels, envState, ctrl, stepNum, done, reward, ecfg, recordBuf, gid);
 }
 
-kernel void oak_megastep(device float *params [[buffer(0)]],
-                         device float *stateArena [[buffer(1)]],
-                         device uint *uintArena [[buffer(2)]],
-                         device KernelScalars *scalars [[buffer(3)]],
-                         device OakFleetLane *lanes [[buffer(6)]],
-                         device const uint *laneSeeds [[buffer(7)]],
-                         constant OakFleetEnvCfg &ecfg [[buffer(8)]],
-                         device const int *recordSlot [[buffer(9)]],
-                         device float *recordBuf [[buffer(10)]],
-                         constant uint3 &dispatchSpan [[buffer(11)]],
-                         device uint *envArena [[buffer(14)]],
-                         device const uint *envOff [[buffer(15)]],
-                         constant uint *mjModels [[buffer(16)]],
-                         device float *mjScratch [[buffer(17)]],
-                         device const uint *mjScratchOff [[buffer(18)]],
-                         device const float *envConstants [[buffer(19)]],
-                         threadgroup float *tgCont [[threadgroup(0)]],
-                         uint tgIdx [[threadgroup_position_in_grid]],
-                         uint tid [[thread_position_in_threadgroup]],
-                         uint slane [[thread_index_in_simdgroup]],
-                         uint sgrp [[simdgroup_index_in_threadgroup]]) {
+kernel void
+oak_megastep(device float *params [[buffer(0)]], device float *stateArena [[buffer(1)]],
+             device uint *uintArena [[buffer(2)]], device OakFleetLane *lanes [[buffer(6)]],
+             device const uint *laneSeeds [[buffer(7)]], constant OakFleetEnvCfg &ecfg [[buffer(8)]],
+             device float *recordBuf [[buffer(10)]], constant uint3 &dispatchSpan [[buffer(11)]],
+             device uint *envArena [[buffer(14)]], device const uint *envOff [[buffer(15)]],
+             constant uint *mjModels [[buffer(16)]], device float *mjScratch [[buffer(17)]],
+             device const uint *mjScratchOff [[buffer(18)]], device const float *envConstants [[buffer(19)]],
+             threadgroup float *continuations [[threadgroup(0)]], uint tgIdx [[threadgroup_position_in_grid]],
+             uint threadIndex [[thread_position_in_threadgroup]],
+             uint threadIndexInWave [[thread_index_in_simdgroup]],
+             uint waveIndex [[simdgroup_index_in_threadgroup]]) {
     const bool wideKind = OAK_ENV_SPECS[OAK_SPEC_ENV_KIND].laneThreads > 1u;
-    const bool planOnly = sgrp >= OAK_MEGA_G;
+    const bool planOnly = waveIndex >= OAK_MEGA_G;
     uint laneBase = (tgIdx + dispatchSpan.z) * OAK_MEGA_G;
     uint laneShift = dispatchSpan.z * OAK_MEGA_G;
-    uint laneSg = planOnly ? sgrp - OAK_MEGA_G : sgrp;
+    uint laneSg = planOnly ? waveIndex - OAK_MEGA_G : waveIndex;
     uint wideLane = laneBase + laneSg;
-    Shape s = shape();
-    uint tgK = s.optionCount;
-    threadgroup float *lCont = tgCont + laneSg * tgK;
-    threadgroup float *lStash = tgCont + OAK_MEGA_G * tgK + laneSg * 5u * tgK;
-    threadgroup float *lDirty = tgCont + 6u * OAK_MEGA_G * tgK + laneSg;
+    uint optionCount = OAK_OPTION_COUNT;
+    threadgroup float *lStash = continuations + laneSg * 5u * optionCount;
+    threadgroup float *lDirty = continuations + 5u * OAK_MEGA_G * optionCount + laneSg;
     for (uint it = 0u; it < dispatchSpan.x; ++it) {
         if (!planOnly) {
-            Agent agent = make_agent(params, stateArena, uintArena, scalars, s, wideLane - laneShift, wideLane);
+            Agent agent = bindAgent(params, stateArena, uintArena, wideLane - laneShift, dispatchSpan.y + it);
             if ((OAK_MEGA_STAGES & 1u) != 0u) {
-                constructFeatures(agent, slane);
-                predictAndControl(agent, slane, lCont, lStash, lDirty);
+                constructFeatures(agent, threadIndexInWave);
+                predictAndControl(agent, threadIndexInWave, lStash, lDirty);
             }
-            simdSyncDev();
-            if ((OAK_MEGA_STAGES & 8u) != 0u)
-                replaceWorstFeature(agent, slane, lDirty);
+            syncMemory();
+            if ((OAK_MEGA_STAGES & 8u) != 0u) replaceWorstFeature(agent, threadIndexInWave, lDirty);
             simdgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
-            agent.stepCount = scalars[wideLane].stepCount;
-            agent.stateSlot = scalars[wideLane].stateSlot;
+            agent.stepCount += 1u;
+            agent.stateSlot ^= 1u;
             if ((OAK_MEGA_STAGES & 16u) != 0u) {
-                emitOptionActions(agent, slane, lDirty[0] != 0.0f);
+                emitOptionActions(agent, threadIndexInWave, lDirty[0] != 0.0f);
                 simdgroup_barrier(mem_flags::mem_device);
-                blendKeyboard(agent, slane);
+                writePrimaryPolicy(agent, threadIndexInWave);
             }
-            simdSyncDev();
+            syncMemory();
             if ((OAK_MEGA_STAGES & 32u) != 0u)
-                sampleAction(agent, lanes, envArena, envOff, laneSeeds, wideLane, slane);
+                sampleAction(agent, lanes, envArena, envOff, laneSeeds, wideLane, threadIndexInWave);
         }
         threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
 
         if ((OAK_MEGA_STAGES & 64u) != 0u) {
             if (wideKind) {
-                if (!planOnly) stepEnvironment(params, stateArena, uintArena, scalars,
-                                lanes, envArena, envOff, mjModels, mjScratch, mjScratchOff, envConstants,
-                                laneSeeds, ecfg, recordSlot, recordBuf, wideLane,
-                                wideLane - laneShift, slane, true);
-            } else if (tid < OAK_MEGA_G) {
-                uint packedLane = laneBase + tid;
-                stepEnvironment(params, stateArena, uintArena, scalars,
-                                lanes, envArena, envOff, mjModels, mjScratch, mjScratchOff, envConstants,
-                                laneSeeds, ecfg, recordSlot, recordBuf, packedLane,
+                if (!planOnly)
+                    stepEnvironment(params, stateArena, uintArena, lanes, envArena, envOff, mjModels,
+                                    mjScratch, mjScratchOff, envConstants, laneSeeds, ecfg, recordBuf,
+                                    wideLane, wideLane - laneShift, threadIndexInWave, true);
+            } else if (threadIndex < OAK_MEGA_G) {
+                uint packedLane = laneBase + threadIndex;
+                stepEnvironment(params, stateArena, uintArena, lanes, envArena, envOff, mjModels, mjScratch,
+                                mjScratchOff, envConstants, laneSeeds, ecfg, recordBuf, packedLane,
                                 packedLane - laneShift, 0u, false);
             }
         }
         uint planStep = dispatchSpan.y + it + 1u;
-        uint planSkipPos = ((planStep % OAK_PLAN_PERIOD) + OAK_PLAN_PERIOD
-               - (laneBase % OAK_PLAN_PERIOD)) % OAK_PLAN_PERIOD;
+        uint planSkipPos =
+            ((planStep % OAK_PLAN_PERIOD) + OAK_PLAN_PERIOD - (laneBase % OAK_PLAN_PERIOD)) % OAK_PLAN_PERIOD;
         bool skipInThisGroup = planSkipPos < OAK_MEGA_G;
         uint idx = laneSg;
         bool plans = planOnly && !(skipInThisGroup && laneSg == planSkipPos);
         if (!wideKind) {
-            plans = !skipInThisGroup || sgrp > 0u;
-            idx = skipInThisGroup ? (sgrp - 1u) : sgrp;
+            plans = !skipInThisGroup || waveIndex > 0u;
+            idx = skipInThisGroup ? (waveIndex - 1u) : waveIndex;
             if (skipInThisGroup && idx >= planSkipPos) idx += 1u;
         }
         if (plans) {
             uint wLane = laneBase + idx;
-            Agent planAgent = make_agent(params, stateArena, uintArena, scalars, s, wLane - laneShift, wLane);
-            uint pSlot = 1u - planAgent.stateSlot;
-            threadgroup const float *pStash = tgCont + OAK_MEGA_G * tgK + idx * 5u * tgK;
-            bool stashDirty = tgCont[6u * OAK_MEGA_G * tgK + idx] != 0.0f;
+            Agent planAgent = bindAgent(params, stateArena, uintArena, wLane - laneShift, planStep);
+            uint previousSlot = 1u - planAgent.stateSlot;
+            threadgroup const float *pStash = continuations + idx * 5u * optionCount;
+            bool stashDirty = continuations[5u * OAK_MEGA_G * optionCount + idx] != 0.0f;
             if ((OAK_MEGA_STAGES & 2u) != 0u)
-                planAllOptions(planAgent, slane, pStash, stashDirty, pSlot);
+                planAllOptions(planAgent, threadIndexInWave, pStash, stashDirty, previousSlot);
             if ((OAK_MEGA_STAGES & 4u) != 0u) {
-                device const float *prevS = state_at(planAgent, pSlot);
-                device const float *currS = state_at(planAgent, 1u - pSlot);
-                learnFromTransition(planAgent, prevS, currS, slane, pSlot, pStash, stashDirty);
+                device const float *prevS = featureValues(planAgent, previousSlot);
+                device const float *currentFeatures = featureValues(planAgent, 1u - previousSlot);
+                learnFromTransition(planAgent, prevS, currentFeatures, threadIndexInWave, previousSlot,
+                                    pStash, stashDirty);
             }
             simdgroup_barrier(mem_flags::mem_device);
-            if ((OAK_MEGA_STAGES & 8u) != 0u)
-                updateUtilities(planAgent, slane);
+            if ((OAK_MEGA_STAGES & 8u) != 0u) updateUtilities(planAgent, threadIndexInWave);
         }
         threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
     }
-}
-
-kernel void oak_fleet_snapshot(device float *params [[buffer(0)]],
-                               device float *stateArena [[buffer(1)]],
-                               device uint *uintArena [[buffer(2)]],
-                               device KernelScalars *scalars [[buffer(3)]],
-                               device OakFleetLane *lanes [[buffer(6)]],
-                               constant OakFleetEnvCfg &ecfg [[buffer(8)]],
-                               device OakLaneSnapshot *snap [[buffer(9)]],
-                               constant uint2 &snapCtl [[buffer(10)]],
-                               uint slane [[thread_index_in_simdgroup]],
-                               uint sgid [[threadgroup_position_in_grid]]) {
-    uint sgidL = sgid;
-    sgid += snapCtl.y;
-    if (sgid >= ecfg.laneCount) return;
-    device OakFleetLane *lane = &lanes[sgid];
-    device OakLaneSnapshot *o = &snap[snapCtl.x + sgid];
-    uint paramStride = layoutFor(shape()).paramStride;
-    device const float *lp = params + sgidL * paramStride;
-    uint nonFinite = 0u;
-    float mx = 0.0f;
-    for (uint i = slane; i < paramStride; i += OAK_SIMD_WIDTH) {
-        float v = lp[i];
-        if (!isfinite(v)) nonFinite = 1u;
-        else mx = max(mx, fabs(v));
-    }
-    nonFinite = simd_max(nonFinite);
-    mx = simd_max(mx);
-    if (slane != 0u) return;
-    o->scalars = scalars[sgid];
-    o->paramAbsMax = mx;
-    o->paramNonFinite = nonFinite;
-    o->rewardSum = lane->rewardSum;
-    o->rho = lane->averageReward;
-    o->deathStep = lane->deathStep;
-    o->deathDetector = lane->deathDetector;
 }

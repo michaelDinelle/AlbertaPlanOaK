@@ -1,75 +1,55 @@
 #pragma METAL fp math_mode(safe)
 
-constant uint OAK_SIMD_WIDTH = 32u;
-constant uint OAK_THREADGROUP_LANES = 4u;
-static_assert(OAK_THREADGROUP_LANES > 0u && OAK_THREADGROUP_LANES <= OAK_SIMD_WIDTH
-              && (OAK_THREADGROUP_LANES & (OAK_THREADGROUP_LANES - 1u)) == 0u,
-              "packed environment steps must fit one wave");
-constant uint OAK_WIDE_LANE_SIMDGROUPS = 2u;
-static_assert(OAK_WIDE_LANE_SIMDGROUPS * OAK_THREADGROUP_LANES * OAK_SIMD_WIDTH <= 1024u,
-              "a wide threadgroup of acting and planning waves must fit the device threadgroup limit");
-
-constant uint OAK_CANDIDATES_PER_SLOT = 7u;
-constant uint OAK_CONSTRUCTED_PER_PERCEPT = 2u;
 #if defined(OAK_PRESET_BASE)
-constant uint OAK_OPTION_COUNT = 32u;
-constant uint OAK_PERCEPT_COUNT = 32u;
+constant uint OAK_CAPACITY = 32u;
 kernel void oak_preset_base() {}
 #elif defined(OAK_PRESET_PRO)
-constant uint OAK_OPTION_COUNT = 64u;
-constant uint OAK_PERCEPT_COUNT = 64u;
+constant uint OAK_CAPACITY = 64u;
 kernel void oak_preset_pro() {}
 #elif defined(OAK_PRESET_MAX)
-constant uint OAK_OPTION_COUNT = 128u;
-constant uint OAK_PERCEPT_COUNT = 128u;
+constant uint OAK_CAPACITY = 128u;
 kernel void oak_preset_max() {}
 #elif defined(OAK_PRESET_ULTRA)
-constant uint OAK_OPTION_COUNT = 160u;
-constant uint OAK_PERCEPT_COUNT = 160u;
+constant uint OAK_CAPACITY = 160u;
 kernel void oak_preset_ultra() {}
 #else
-#error "compile with exactly one geometry preset: -DOAK_PRESET_BASE, -DOAK_PRESET_PRO, -DOAK_PRESET_MAX or -DOAK_PRESET_ULTRA"
+#error "Choose a geometry preset: base, pro, max, or ultra"
 #endif
-constant uint OAK_OPTIONS_PER_THREAD = OAK_OPTION_COUNT / OAK_SIMD_WIDTH;
+
+constant uint OAK_SIMD_WIDTH = 32u;
+constant uint OAK_THREADGROUP_LANES = 4u;
+constant uint OAK_WIDE_LANE_SIMDGROUPS = 2u;
 constant uint OAK_PLAN_PERIOD = 32u;
-
-inline uint featureCountForPercepts(uint percepts) { return percepts * (1u + OAK_CONSTRUCTED_PER_PERCEPT * OAK_CANDIDATES_PER_SLOT); }
-inline uint activeFeaturesForPercepts(uint percepts) { return percepts * (1u + OAK_CONSTRUCTED_PER_PERCEPT); }
-inline uint nurseryForPercepts(uint percepts) { return featureCountForPercepts(percepts); }
-inline uint featureTimeScaleForPercepts(uint percepts) { return percepts * (1u + OAK_CANDIDATES_PER_SLOT); }
-
-inline uint staleOptionSteps(uint featureCount, uint options) { return featureCount * options; }
-
-static_assert(OAK_PERCEPT_COUNT * (1u + OAK_CONSTRUCTED_PER_PERCEPT * OAK_CANDIDATES_PER_SLOT)
-              == OAK_PERCEPT_COUNT + OAK_PERCEPT_COUNT * OAK_CONSTRUCTED_PER_PERCEPT * OAK_CANDIDATES_PER_SLOT,
-              "every constructed slot draws from exactly one candidate pool");
-static_assert(OAK_OPTIONS_PER_THREAD * OAK_SIMD_WIDTH == OAK_OPTION_COUNT,
-              "every wave thread owns the same number of options");
-
-inline uint perceptsForStream(uint obsDim, uint actionParams) {
-    uint sources = ((obsDim + actionParams + 2u + OAK_SIMD_WIDTH - 1u) / OAK_SIMD_WIDTH) * OAK_SIMD_WIDTH;
-    return max(sources, OAK_PERCEPT_COUNT);
-}
-
-constant uint OAK_PERCEPT_SOURCES_MAX = OAK_ENV_OBS_MAX + 2u * OAK_ENV_ACT_MAX + 2u;
-constant uint OAK_PERCEPT_SOURCES_TILED =
-    ((OAK_PERCEPT_SOURCES_MAX + OAK_SIMD_WIDTH - 1u) / OAK_SIMD_WIDTH) * OAK_SIMD_WIDTH;
-constant uint OAK_PERCEPTS_MAX =
-    (OAK_PERCEPT_SOURCES_TILED > OAK_PERCEPT_COUNT) ? OAK_PERCEPT_SOURCES_TILED : OAK_PERCEPT_COUNT;
-constant uint OAK_ACTIVE_SLOTS_MAX =
-    OAK_PERCEPTS_MAX * (1u + OAK_CONSTRUCTED_PER_PERCEPT) / OAK_SIMD_WIDTH;
-constant uint OAK_POLICY_MAX = OAK_ENV_ACT_MAX;
+constant uint OAK_CANDIDATES_PER_SLOT = 7u;
+constant uint OAK_CONSTRUCTED_PER_PERCEPT = 2u;
 constant uint OAK_ACTION_PARAMS = 2u * OAK_ENV_ACT_MAX;
-static_assert(OAK_ACTION_PARAMS / 2u == OAK_POLICY_MAX, "every policy steers one action pair");
+constant uint OAK_POLICY_MAX = OAK_ENV_ACT_MAX;
+constant uint OAK_OBSERVATION_CAPACITY = OAK_ENV_OBS_MAX;
+constant uint OAK_SOURCE_COUNT = OAK_OBSERVATION_CAPACITY + OAK_ACTION_PARAMS + 2u;
+constant uint OAK_SOURCE_TILES = (OAK_SOURCE_COUNT + OAK_SIMD_WIDTH - 1u) / OAK_SIMD_WIDTH;
+constant uint OAK_SOURCE_CAPACITY = OAK_SOURCE_TILES * OAK_SIMD_WIDTH;
+constant uint OAK_PERCEPT_COUNT = OAK_CAPACITY > OAK_SOURCE_CAPACITY ? OAK_CAPACITY : OAK_SOURCE_CAPACITY;
+constant uint OAK_FEATURE_CAPACITY =
+    OAK_PERCEPT_COUNT * (1u + OAK_CONSTRUCTED_PER_PERCEPT * OAK_CANDIDATES_PER_SLOT);
+constant uint OAK_ACTIVE_CAPACITY = OAK_PERCEPT_COUNT * (1u + OAK_CONSTRUCTED_PER_PERCEPT);
+constant uint OAK_OPTION_COUNT = OAK_CAPACITY;
+constant uint OAK_ACTIVE_SLOTS_MAX = OAK_ACTIVE_CAPACITY / OAK_SIMD_WIDTH;
+constant uint OAK_TRACE_LEVELS = OAK_CANDIDATES_PER_SLOT;
+constant uint OAK_FEATURE_TIMESCALE = OAK_PERCEPT_COUNT * (1u + OAK_CANDIDATES_PER_SLOT);
+constant uint OAK_LANE_SHARED_FLOATS = 5u * OAK_OPTION_COUNT + 1u;
+constant float OAK_TRACKING_RATE = 1.0f / float(OAK_FEATURE_TIMESCALE);
+constant float OAK_INV_OPTION_COUNT = 1.0f / float(OAK_OPTION_COUNT);
+constant float OAK_META_RATE = OAK_TRACKING_RATE / float(OAK_FEATURE_TIMESCALE + OAK_ACTION_PARAMS);
+constant float OAK_SAMPLE_SIGMA = 1.0f / float(OAK_ACTION_PARAMS);
+constant float OAK_INV_TWO_SIGMA_SQUARED = 1.0f / (2.0f * OAK_SAMPLE_SIGMA * OAK_SAMPLE_SIGMA);
+constant float OAK_ACTOR_ALPHA_DENOM = float(OAK_ACTION_PARAMS * OAK_OPTION_COUNT);
 
-static_assert(OAK_OPTION_COUNT % OAK_SIMD_WIDTH == 0u,
-              "options must tile the simd width");
-static_assert(OAK_PERCEPT_COUNT % OAK_SIMD_WIDTH == 0u,
-              "declared percepts must tile the simd width");
-static_assert(OAK_PERCEPTS_MAX % OAK_SIMD_WIDTH == 0u,
-              "percepts must tile the simd width");
-static_assert(OAK_PERCEPTS_MAX >= OAK_PERCEPT_SOURCES_MAX,
-              "percepts must cover every source the widest environment emits");
-static_assert(OAK_PERCEPTS_MAX * (1u + OAK_CONSTRUCTED_PER_PERCEPT * OAK_CANDIDATES_PER_SLOT) - OAK_PERCEPTS_MAX
-              == (OAK_PERCEPTS_MAX * (1u + OAK_CONSTRUCTED_PER_PERCEPT) - OAK_PERCEPTS_MAX) * OAK_CANDIDATES_PER_SLOT,
-              "every constructed slot must draw from exactly one candidate pool");
+struct alignas(16) Record {
+    float value, aux, reward, duration, next, nextAux, twin;
+    float policy[OAK_POLICY_MAX];
+};
+
+constant uint OAK_FEATURE_STATES = 2u * OAK_FEATURE_CAPACITY;
+constant uint OAK_POLICY_BANK = OAK_OPTION_COUNT * OAK_POLICY_MAX;
+constant uint OAK_FEATURE_STATS = 4u * OAK_FEATURE_CAPACITY;
+constant uint OAK_ACTIVE_STATES = 2u * OAK_ACTIVE_CAPACITY;

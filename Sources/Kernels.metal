@@ -22,5 +22,6 @@ using namespace metal;
 #include "Env.metal"
 #include "Geometry.metal"
 #include "Fleet.metal"
-#include "Baseline.metal"
+#include "Random.metal"
+#include "PPO.metal"
 #include "OakKernel.metal"
