@@ -94,15 +94,21 @@ function series(root: string, col: string): Blob {
   return new Blob([new Uint32Array([W, L]), e, w, v]);
 }
 
-async function poses(req: Request, id: string, lane: string): Promise<Response> {
-  if (!/^\d+$/.test(lane)) throw new HttpError(400, `bad lane ${lane}`);
-  const file = Bun.file(join(runRoot(id), 'poses', lane));
-  if (!(await file.exists())) throw new HttpError(404, `no lane ${lane}`);
-  const range = /^bytes=(\d+)-$/.exec(req.headers.get('range') ?? 'bytes=0-');
-  if (range === null) throw new HttpError(400, 'range must be bytes=N-');
+async function slice(req: Request, path: string, what: string): Promise<Response> {
+  const file = Bun.file(path);
+  if (!(await file.exists())) throw new HttpError(404, `no ${what}`);
+  const range = /^bytes=(\d+)-(\d*)$/.exec(req.headers.get('range') ?? 'bytes=0-');
+  if (range === null) throw new HttpError(400, 'range must be bytes=N-[M]');
   const from = Number(range[1]);
-  return new Response(file.slice(from), { status: from > 0 ? 206 : 200 });
+  const to = range[2] === '' ? file.size : Math.min(file.size, Number(range[2]) + 1);
+  return new Response(file.slice(from, to), { status: from > 0 || to < file.size ? 206 : 200 });
 }
+
+function poses(req: Request, id: string, lane: string): Promise<Response> {
+  if (!/^\d+$/.test(lane)) throw new HttpError(400, `bad lane ${lane}`);
+  return slice(req, join(runRoot(id), 'poses', lane), `lane ${lane}`);
+}
+
 
 const workerBuild = await Bun.build({
   entrypoints: [resolve(import.meta.dir, 'src/scenes/jelly-bean-world/scentfield.worker.ts'), resolve(import.meta.dir, 'src/theater/tape.worker.ts')],

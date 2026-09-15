@@ -1,12 +1,9 @@
-import { useDeferredValue, useEffect, useRef, type ReactNode, type RefObject } from 'react';
+import { useEffect, useRef, type ReactNode, type RefObject } from 'react';
 import type { RunDetail } from '../data/oak';
 import { formatClock, formatCount, formatStep } from '../format';
-import { glass } from '../glass/glass';
-import { patch, selectPolicy, store } from '../store';
+import { cycleSpeed, patch, selectPolicy, store } from '../store';
 import { frameListeners, type Frame, type Stage } from '../theater/stage';
 import { POLICY_NAMES, POLICY_ORDER } from './charts';
-
-const SPEEDS = [1, 4, 16, 64, 256, 1024];
 
 function BarButton({ on, disabled, title, onClick, children }: { on?: boolean; disabled?: boolean; title: string; onClick: () => void; children: ReactNode }) {
   return (
@@ -28,7 +25,7 @@ const POLICY_ON = { oak: 'bg-oak/25 ring-oak/50', ppo: 'bg-ppo/25 ring-ppo/50', 
 export function PolicySwitch({ detail }: { detail: RunDetail | null }) {
   const { policy } = store.use();
   return (
-    <div ref={glass} className="glass flex h-12 items-center gap-1 rounded-lg px-2">
+    <div className="glass flex h-12 items-center gap-1 rounded-lg px-2">
       <span className="px-1.5 text-2xs uppercase tracking-label">policy</span>
       {POLICY_ORDER.map((p) => {
         const absent = p === 'oak' ? detail === null : detail?.baselines[p] === undefined;
@@ -38,7 +35,7 @@ export function PolicySwitch({ detail }: { detail: RunDetail | null }) {
             type="button"
             aria-disabled={absent}
             aria-pressed={policy === p}
-            title={absent ? `No recorded ${POLICY_NAMES[p]} baseline for this run` : `Watch the ${POLICY_NAMES[p]} fleet`}
+            title={absent ? `No recorded ${POLICY_NAMES[p]} baseline for this run` : `Watch the ${POLICY_NAMES[p]} fleet (p cycles)`}
             onClick={absent ? undefined : () => selectPolicy(p)}
             className={`flex h-8 items-center rounded-md px-3 text-xs font-medium ${absent ? 'cursor-default text-ink-faint' : policy === p ? `text-ink ring-1 ring-inset ${POLICY_ON[p]}` : 'text-ink-dim hover:bg-white/10 hover:text-ink'}`}
           >
@@ -77,7 +74,7 @@ export function PlaybackBar({ stage, stride, live }: { stage: RefObject<Stage | 
 
   const idle = meta.status !== 'ready';
   const jump = 20 * Math.max(1, stride);
-  const ticks = useDeferredValue(meta.ticks);
+  const ticks = meta.ticks;
   const busiest = ticks.reduce((max, tick) => Math.max(max, tick.count), 1);
   const step = (delta: number): void => {
     patch({ playing: false });
@@ -85,10 +82,10 @@ export function PlaybackBar({ stage, stride, live }: { stage: RefObject<Stage | 
   };
 
   return (
-    <div ref={glass} className={`glass flex h-12 w-[760px] max-w-full items-center gap-1 rounded-lg px-2 ${idle ? 'opacity-80' : ''}`}>
+    <div className={`glass flex h-12 w-[760px] max-w-full items-center gap-1 rounded-lg px-2 ${idle ? 'opacity-80' : ''}`}>
       <BarButton title={playing ? 'Pause (space)' : 'Play (space)'} disabled={idle} onClick={() => patch({ playing: !playing })}>{playing ? '❚❚' : '▶'}</BarButton>
-      <BarButton title={`Back ${formatStep(jump)} steps (←)`} disabled={idle} onClick={() => step(-jump)}>‹</BarButton>
-      <BarButton title={`Ahead ${formatStep(jump)} steps (→)`} disabled={idle} onClick={() => step(jump)}>›</BarButton>
+      <BarButton title={`Back ${formatStep(jump)} steps (← · shift for ×10)`} disabled={idle} onClick={() => step(-jump)}>‹</BarButton>
+      <BarButton title={`Ahead ${formatStep(jump)} steps (→ · shift for ×10)`} disabled={idle} onClick={() => step(jump)}>›</BarButton>
       <div className="relative mx-2 h-7 min-w-32 flex-1 rounded-md hover:bg-white/5 has-[:focus-visible]:ring-1 has-[:focus-visible]:ring-accent" title="Drag anywhere in the run">
         <div className="absolute inset-x-0 top-1/2 h-[3px] -translate-y-1/2 rounded-full bg-white/15" />
         <div ref={fillRef} className="absolute inset-x-0 top-1/2 h-[3px] origin-left rounded-full bg-accent" style={{ transform: 'translateY(-50%) scaleX(0)', willChange: 'transform' }} />
@@ -122,13 +119,13 @@ export function PlaybackBar({ stage, stride, live }: { stage: RefObject<Stage | 
           onInput={(event) => stage.current?.seekStep(Number(event.currentTarget.value))}
         />
       </div>
-      <div ref={readoutRef} className="whitespace-nowrap font-mono text-2xs text-ink">{idle ? 'nothing playing' : ''}</div>
+      <div ref={readoutRef} className="min-w-[19ch] whitespace-nowrap font-mono text-2xs tabular-nums text-ink">{idle ? 'nothing playing' : ''}</div>
       <div className="mx-0.5 h-5 w-px bg-white/10" />
-      <BarButton title={`Playing at ${speed}× the world's own pace — click for the next speed`} onClick={() => patch({ speed: SPEEDS[(SPEEDS.indexOf(speed) + 1) % SPEEDS.length] ?? 1 })}>
+      <BarButton title={`Playing at ${speed}× the world's own pace — click for the next speed (x)`} onClick={cycleSpeed}>
         <span className="inline-block w-9 text-center tabular-nums">×{speed}</span>
       </BarButton>
       <div className="mx-0.5 h-5 w-px bg-white/10" />
-      <BarButton on={debug} title="Show what the world is really doing" onClick={() => patch({ debug: !debug })}>◎</BarButton>
+      <BarButton on={debug} title="Show what the world is really doing (g)" onClick={() => patch({ debug: !debug })}>◎</BarButton>
       {live && <span className="mx-1 size-1.5 motion-safe:animate-pulse rounded-full bg-good" title="Being recorded right now" />}
     </div>
   );

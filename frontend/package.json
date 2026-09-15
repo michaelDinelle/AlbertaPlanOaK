@@ -10,7 +10,6 @@
     "meshoptimizer": "^1.1.1",
     "react": "19",
     "react-dom": "19",
-    "recharts": "^3.10.1",
     "three": "^0.185.1"
   },
   "devDependencies": {

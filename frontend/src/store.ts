@@ -67,6 +67,8 @@ export const selectRun = (runId: string): void => patch({ runId, seed: null });
 export const selectEnv = (envId: EnvId): void => patch({ envId, seed: null });
 export const selectSeed = (seed: number | null): void => patch({ seed });
 export const selectPolicy = (policy: Policy): void => patch({ policy });
+export const SPEEDS = [1, 4, 16, 64, 256, 1024];
+export const cycleSpeed = (): void => patch({ speed: SPEEDS[(SPEEDS.indexOf(value.speed) + 1) % SPEEDS.length] ?? 1 });
 export const setStage = (stage: Partial<StageMeta>): void => patch({ stage: { ...value.stage, ...stage } });
 export const fail = (error: unknown): void => patch({ error: error instanceof Error ? error.message : String(error) });
 export const addDetail = (detail: RunDetail, tape: Tape): void =>

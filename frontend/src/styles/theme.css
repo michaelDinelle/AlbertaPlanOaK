@@ -44,8 +44,6 @@
 @utility glass {
   background: linear-gradient(180deg, oklch(13% 0 0 / 0.64), oklch(13% 0 0 / 0.78));
   border: 1px solid oklch(100% 0 0 / 0.13);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
   box-shadow:
     0 24px 60px oklch(0% 0 0 / 0.45),
     inset 0 1px 1px oklch(100% 0 0 / 0.5),
@@ -95,6 +93,3 @@
   }
 }
 
-.lg-fallback {
-  background: oklch(13% 0 0 / 0.78);
-}

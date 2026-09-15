@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { MeshoptSimplifier } from 'meshoptimizer/simplifier';
 import { celebrationPulse } from '@kit/celebrate';
-import { buildComposer, type ComposerHandle } from '@kit/post';
+import { buildComposer, GLASS_RECTS, type ComposerHandle, type GlassRect } from '@kit/post';
 import { TOKENS } from '@kit/tokens';
 import type { FrameState, FrameUpdate, SceneContext, SceneModule, SceneSize } from '@kit/types';
 import type { EnvEntry } from '@sim/catalog';
@@ -74,11 +74,28 @@ function sample(source: Tape, position: number, out: FrameState): void {
   out.simTime = frame.step / source.controlHz;
 }
 
+const radii = new WeakMap<Element, number>();
+
+function glassRects(container: HTMLElement): GlassRect[] {
+  const dpr = window.devicePixelRatio || 1;
+  const height = container.clientHeight;
+  const out: GlassRect[] = [];
+  for (const el of document.querySelectorAll('.glass')) {
+    if (out.length === GLASS_RECTS) break;
+    const rect = el.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) continue;
+    let radius = radii.get(el);
+    if (radius === undefined) radii.set(el, (radius = parseFloat(getComputedStyle(el).borderTopLeftRadius) || 0));
+    out.push({ x: rect.left * dpr, y: (height - rect.bottom) * dpr, width: rect.width * dpr, height: rect.height * dpr, radius: radius * dpr });
+  }
+  return out;
+}
+
 export function mountStage(container: HTMLElement): Stage {
   const canvas = document.createElement('canvas');
   canvas.className = 'theater-canvas';
   container.appendChild(canvas);
-  const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, alpha: false, powerPreference: 'high-performance' });
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, alpha: false, powerPreference: 'high-performance', preserveDrawingBuffer: true });
   renderer.setClearColor(0x05070c, 1);
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFShadowMap;
@@ -215,6 +232,7 @@ export function mountStage(container: HTMLElement): Stage {
     hasPrevious = true;
     scene.update(update);
     post.setBloomPulse(celebrationPulse(scene.scene).bloom);
+    post.setGlass(glassRects(container));
     post.render(dt);
     frame.step = state.step;
     frame.simTime = state.simTime;

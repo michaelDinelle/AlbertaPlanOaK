@@ -4,7 +4,6 @@ import { fetchDetail, fetchRuns, loadTape, type RunIndexEntry } from './data/oak
 import { envLanes, leaderSeed, peakStep, rateWindow, runEnvs } from './derive';
 import { formatDate, formatStep } from './format';
 import { BEST_TOKEN, POLICY_NAMES, POLICY_ORDER, POLICY_TOKENS } from './panels/charts';
-import { glass } from './glass/glass';
 import { EnvPicker } from './panels/EnvPicker';
 import { HealthView } from './panels/HealthView';
 import { JbwLegend } from './panels/JbwLegend';
@@ -12,7 +11,7 @@ import { AUTHOR_LINKS } from './panels/links';
 import { PlaybackBar, PolicySwitch } from './panels/PlaybackBar';
 import { RewardView, type Comparison } from './panels/RewardView';
 import { StandingsView } from './panels/StandingsView';
-import { addDetail, addTape, fail, patch, selectEnv, selectRun, store, type Panel } from './store';
+import { addDetail, addTape, cycleSpeed, fail, patch, selectEnv, selectRun, store, type Panel } from './store';
 import { mountStage, type Alternate, type Stage } from './theater/stage';
 
 const PANELS: Record<Panel, string> = { reward: 'Reward', standings: 'Standings', health: 'Health' };
@@ -152,18 +151,41 @@ export function App() {
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
       if (event.metaKey || event.ctrlKey || event.altKey || event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement) return;
-      if (event.key === ' ') {
-        event.preventDefault();
-        patch({ playing: !store.get().playing });
-      } else if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
-        event.preventDefault();
-        patch({ playing: false });
-        stage.current?.stepBy((event.key === 'ArrowLeft' ? -20 : 20) * stride);
-      }
+      const state = store.get();
+      const cycleEnv = (direction: 1 | -1): void => {
+        const at = state.envId === null ? -1 : envs.indexOf(state.envId);
+        const next = envs[(at + direction + envs.length) % envs.length];
+        if (next !== undefined) selectEnv(next);
+      };
+      const cyclePolicy = (): void => {
+        const open = POLICY_ORDER.filter((p) => (p === 'oak' ? detail !== null : detail?.baselines[p] !== undefined));
+        const next = open[(open.indexOf(state.policy) + 1) % open.length];
+        if (next !== undefined) patch({ policy: next });
+      };
+      const actions: Record<string, () => void> = {
+        ' ': () => patch({ playing: !state.playing }),
+        k: () => patch({ playing: !state.playing }),
+        ArrowLeft: () => { patch({ playing: false }); stage.current?.stepBy(-20 * stride * (event.shiftKey ? 10 : 1)); },
+        ArrowRight: () => { patch({ playing: false }); stage.current?.stepBy(20 * stride * (event.shiftKey ? 10 : 1)); },
+        '[': () => cycleEnv(-1),
+        ']': () => cycleEnv(1),
+        g: () => patch({ debug: !state.debug }),
+        x: cycleSpeed,
+        p: cyclePolicy,
+        c: () => patch({ panelOpen: !state.panelOpen }),
+        '1': () => patch({ panel: 'reward', panelOpen: true }),
+        '2': () => patch({ panel: 'standings', panelOpen: true }),
+        '3': () => patch({ panel: 'health', panelOpen: true }),
+        f: () => { void (document.fullscreenElement === null ? document.documentElement.requestFullscreen() : document.exitFullscreen()); },
+      };
+      const action = actions[event.key.length === 1 ? event.key.toLowerCase() : event.key];
+      if (action === undefined) return;
+      event.preventDefault();
+      action();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [stride]);
+  }, [stride, envs, detail]);
 
   const notice = s.error
     ?? s.stage.note
@@ -175,17 +197,17 @@ export function App() {
       <div ref={host} className="absolute inset-0" />
       {notice !== null && (
         <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center p-6">
-          <div ref={glass} className="glass max-w-md rounded-lg px-5 py-4 font-mono text-sm text-ink">{notice}</div>
+          <div className="glass max-w-md rounded-lg px-5 py-4 font-mono text-sm text-ink">{notice}</div>
         </div>
       )}
       <div className="absolute left-4 top-4 z-20 flex items-center gap-2">
-        <select ref={glass} value={s.runId ?? ''} onChange={(event) => selectRun(event.target.value)} className="glass h-9 rounded-lg px-3 font-mono text-xs text-ink">
+        <select value={s.runId ?? ''} onChange={(event) => selectRun(event.target.value)} className="glass h-9 rounded-lg px-3 font-mono text-xs text-ink">
           {s.runs?.map((run) => <option key={run.id} value={run.id}>{runLabel(run)}</option>)}
         </select>
-        <button ref={glass} type="button" onClick={() => stage.current?.resetCamera()} title="Reset camera" className="glass flex h-9 items-center gap-2 rounded-lg px-3 text-xs text-ink-dim hover:bg-white/10 hover:text-ink">⟲<span className="hidden sm:inline">Reset camera</span></button>
+        <button type="button" onClick={() => stage.current?.resetCamera()} title="Reset camera" className="glass flex h-9 items-center gap-2 rounded-lg px-3 text-xs text-ink-dim hover:bg-white/10 hover:text-ink">⟲<span className="hidden sm:inline">Reset camera</span></button>
       </div>
       {s.panelOpen ? (
-        <aside ref={glass} className="glass absolute bottom-20 right-4 top-4 z-20 flex w-[400px] max-w-[calc(100vw-2rem)] flex-col overflow-hidden rounded-lg py-2.5">
+        <aside className="glass absolute bottom-20 right-4 top-4 z-20 flex w-[400px] max-w-[calc(100vw-2rem)] flex-col overflow-hidden rounded-lg py-2.5">
           <header className="mx-3 mb-2 flex shrink-0 items-center gap-3 border-b border-white/10 pb-2">
             <span className="min-w-0 text-xs text-ink-dim">Michael Dinelle</span>
             <nav aria-label="Michael Dinelle’s links" className="ml-auto flex items-center gap-1">
@@ -198,16 +220,16 @@ export function App() {
           </header>
           <div className="flex items-center gap-1 px-2 pb-2">
             {(Object.keys(PANELS) as Panel[]).map((panel) => (
-              <button key={panel} type="button" onClick={() => patch({ panel })} className={`rounded-md px-2.5 py-1 text-xs ${s.panel === panel ? 'bg-accent/20 text-accent' : 'text-ink-dim hover:bg-white/10 hover:text-ink'}`}>{PANELS[panel]}</button>
+              <button key={panel} type="button" onClick={() => patch({ panel })} title={`${PANELS[panel]} (${(Object.keys(PANELS) as Panel[]).indexOf(panel) + 1})`} className={`rounded-md px-2.5 py-1 text-xs ${s.panel === panel ? 'bg-accent/20 text-accent' : 'text-ink-dim hover:bg-white/10 hover:text-ink'}`}>{PANELS[panel]}</button>
             ))}
-            <button type="button" onClick={() => patch({ panelOpen: false })} aria-label="Hide the side panel" title="Hide the side panel" className="ml-auto flex size-6 items-center justify-center rounded-md text-ink-faint hover:bg-white/10 hover:text-ink">›</button>
+            <button type="button" onClick={() => patch({ panelOpen: false })} aria-label="Hide the side panel" title="Hide the side panel (c)" className="ml-auto flex size-8 items-center justify-center rounded-md text-ink-dim hover:bg-white/10 hover:text-ink"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="size-4" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2" /><path d="M15 3v18" /></svg></button>
           </div>
           {s.panel === 'reward' && active !== null && tape !== undefined && s.envId !== null && seed !== null && <RewardView stage={stage} runId={active.id} envId={s.envId} seed={seed} compare={compare} />}
           {s.panel === 'standings' && <StandingsView />}
           {s.panel === 'health' && active !== null && tape !== undefined && s.envId !== null && <HealthView runId={active.id} envId={s.envId} />}
         </aside>
       ) : (
-        <button ref={glass} type="button" onClick={() => patch({ panelOpen: true })} aria-label="Show the side panel" title="Show the side panel" className="glass absolute right-4 top-4 z-20 flex size-9 items-center justify-center rounded-lg text-ink-dim hover:bg-white/10 hover:text-ink">‹</button>
+        <button type="button" onClick={() => patch({ panelOpen: true })} aria-label="Show the side panel" title="Show the side panel (c)" className="glass absolute right-4 top-4 z-20 flex size-9 items-center justify-center rounded-lg text-ink-dim hover:bg-white/10 hover:text-ink"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="size-4" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2" /><path d="M15 3v18" /></svg></button>
       )}
       <div className="absolute inset-x-0 bottom-4 z-30 grid grid-cols-[1fr_minmax(0,760px)_1fr] items-end gap-3 px-4">
         <div className="flex flex-col items-start gap-3">

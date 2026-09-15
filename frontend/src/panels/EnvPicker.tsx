@@ -2,7 +2,6 @@ import { useMemo, useState } from 'react';
 import type { EnvId } from '../data/envs';
 import type { RunDetail } from '../data/oak';
 import { deliveredRate, envLanes } from '../derive';
-import { glass } from '../glass/glass';
 import { SCENES, nameOf } from '../scenes/table';
 import { selectEnv, store } from '../store';
 
@@ -51,7 +50,7 @@ function Wall({ envs, detail, onClose }: { envs: EnvId[]; detail: RunDetail | nu
   const pick = (env: EnvId): void => { selectEnv(env); onClose(); };
   return (
     <div className="fixed inset-0 z-40 bg-black/50" onPointerDown={onClose}>
-      <div ref={glass} className="glass absolute inset-5 flex flex-col overflow-hidden rounded-xl" onPointerDown={(event) => event.stopPropagation()}>
+      <div className="glass absolute inset-5 flex flex-col overflow-hidden rounded-xl" onPointerDown={(event) => event.stopPropagation()}>
         <div className="flex items-center gap-3 px-5 pb-3 pt-4">
           <h2 className="text-xs font-semibold uppercase tracking-wider text-ink-dim">Environments</h2>
           <input
@@ -100,7 +99,7 @@ export function EnvPicker({ envs, detail, seed }: { envs: EnvId[]; detail: RunDe
   return (
     <>
       {open && <Wall envs={envs} detail={detail} onClose={() => setOpen(false)} />}
-      <button ref={glass} type="button" onClick={() => setOpen(true)} title="Choose an environment" className="glass flex items-center gap-2.5 rounded-lg p-2 pr-3.5 hover:bg-white/10">
+      <button type="button" onClick={() => setOpen(true)} title="Choose an environment" className="glass flex items-center gap-2.5 rounded-lg p-2 pr-3.5 hover:bg-white/10">
         <span className="relative h-10 w-[71px] shrink-0 overflow-hidden rounded-md ring-1 ring-white/10" style={{ background: current === null ? undefined : gradient(current.slug) }}>
           {current !== null && <img src={`/posters/${current.slug}.webp`} alt="" draggable={false} className="absolute inset-0 h-full w-full object-cover" />}
         </span>

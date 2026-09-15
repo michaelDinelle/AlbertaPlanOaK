@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { jbwPolarity, JBW_COLOR, JBW_JELLY, JBW_ONION, JBW_BANANA, JBW_TRUFFLE, JBW_POLARITY_PERIOD } from '@sim/envs/jellybeanworld';
 import { formatCount } from '../format';
-import { glass } from '../glass/glass';
 import { frameListeners, type Frame } from '../theater/stage';
 
 function cssColor(item: number): string {
@@ -44,7 +43,7 @@ export function JbwLegend() {
   }, []);
 
   return (
-    <div ref={glass} className="glass flex flex-col gap-1.5 rounded-lg px-3 py-2 text-xs">
+    <div className="glass flex flex-col gap-1.5 rounded-lg px-3 py-2 text-xs">
       <div className="flex items-baseline justify-between gap-4">
         <span className="font-semibold tracking-[0.14em] text-ink-dim">REWARD</span>
         <span ref={flipRef} className="tabular-nums text-ink-faint" />

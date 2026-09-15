@@ -1,14 +1,36 @@
-import { memo, useCallback, useDeferredValue, useMemo, type RefObject } from 'react';
-import { Area, Line } from 'recharts';
+import { memo, useCallback, useMemo, type PointerEvent, type RefObject } from 'react';
 import type { EnvId } from '../data/envs';
 import type { RunDetail, Tape } from '../data/oak';
 import { cached, deathStep, deliveredRate, envLanes, rateWindow, windowedRates } from '../derive';
-import { formatCount, formatSigned, formatStep } from '../format';
+import { formatCount, formatRate, formatSigned, formatStep } from '../format';
 import { selectSeed, store } from '../store';
 import type { Stage } from '../theater/stage';
-import { Key, POLICY_NAMES, POLICY_TOKENS, Playhead, TimeChart, bandProps, bandRows, lineProps, scrubHandlers, seriesRows } from './charts';
+import { Key, POLICY_NAMES, POLICY_TOKENS } from './charts';
+import { Plot } from './Plot';
+import type { PlotSpec } from './plotter';
 
 const SPARK_H = 16;
+
+function scrubHandlers(seek: (step: number) => void, xMax: number, inset = { left: 0, right: 0 }, onStart?: () => void) {
+  const at = (event: PointerEvent<HTMLElement>): void => {
+    if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
+    const rect = event.currentTarget.getBoundingClientRect();
+    const width = Math.max(1, rect.width - inset.left - inset.right);
+    seek(Math.round(Math.max(0, Math.min(1, (event.clientX - rect.left - inset.left) / width)) * xMax));
+    if (event.type === 'pointerup') event.currentTarget.releasePointerCapture(event.pointerId);
+  };
+  return {
+    onPointerDown(event: PointerEvent<HTMLElement>) {
+      if (event.button !== 0 || !event.isPrimary) return;
+      event.currentTarget.setPointerCapture(event.pointerId);
+      onStart?.();
+      at(event);
+    },
+    onPointerMove: at,
+    onPointerUp: at,
+  };
+}
+
 const SPARK_PAD = 3;
 
 function sparkPath(values: readonly (number | null)[], xs: readonly number[]): { line: string; fill: string; zeroY: number | null } | null {
@@ -72,14 +94,10 @@ const seriesFor = (tape: Tape, detail: RunDetail, envId: EnvId) =>
     const rows = lanes.seeds
       .map((s, i) => ({ seed: s, rate: deliveredRate(tape, lanes.lanes[i]!), death: deathStep(tape, lanes.lanes[i]!), spark: sparkPath(rates.perLane[i] ?? [], rates.x) }))
       .sort((a, b) => (b.rate ?? -Infinity) - (a.rate ?? -Infinity) || a.seed - b.seed);
-    return { lanes, rates, band: bandRows(rates.x, rates.p10, rates.p90), average: seriesRows(rates.x, rates.iqm), rows };
+    return { lanes, rates, rows };
   });
 
-export function RewardView(props: { stage: RefObject<Stage | null>; runId: string; envId: EnvId; seed: number; compare: Comparison[] }) {
-  return <RewardPanel stage={props.stage} runId={useDeferredValue(props.runId)} envId={useDeferredValue(props.envId)} seed={useDeferredValue(props.seed)} compare={useDeferredValue(props.compare)} />;
-}
-
-const RewardPanel = memo(function RewardPanel({ stage, runId, envId, seed, compare }: { stage: RefObject<Stage | null>; runId: string; envId: EnvId; seed: number; compare: Comparison[] }) {
+export function RewardView({ stage, runId, envId, seed, compare }: { stage: RefObject<Stage | null>; runId: string; envId: EnvId; seed: number; compare: Comparison[] }) {
   const picked = store.use((s) => s.seed);
   const details = store.use((s) => s.details);
   const tapes = store.use((s) => s.tapes);
@@ -89,13 +107,21 @@ const RewardPanel = memo(function RewardPanel({ stage, runId, envId, seed, compa
   const tone = POLICY_TOKENS[policy];
   const horizon = Math.max(1, active.meta.steps);
   const win = rateWindow(active.meta.steps);
-  const { lanes, rates, band, average, rows } = seriesFor(tape, active, envId);
-  const hero = useMemo(() => seriesRows(rates.x, rates.perLane[lanes.seeds.indexOf(seed)] ?? []), [rates, lanes, seed]);
+  const { lanes, rates, rows } = seriesFor(tape, active, envId);
   const primary = `${POLICY_NAMES[policy]} average`;
-  const lines = useMemo(
-    () => [{ key: policy, label: primary, tone, width: 1.6, points: average }, ...compare.map((c) => ({ key: c.key, label: `${c.label} average`, tone: c.tone, width: 1.2, points: seriesFor(tapes[c.runId]!, details[c.runId]!, envId).average }))],
-    [policy, primary, tone, average, compare, tapes, details, envId],
-  );
+  const spec = useMemo<PlotSpec>(() => ({
+    xMax: horizon,
+    yFormat: formatRate,
+    band: { x: rates.x, lo: rates.p10, hi: rates.p90, tone },
+    lines: [
+      ...compare.map((c) => {
+        const other = seriesFor(tapes[c.runId]!, details[c.runId]!, envId).rates;
+        return { x: other.x, y: other.iqm, tone: c.tone, width: 1.2, label: `${c.label} average` };
+      }),
+      { x: rates.x, y: rates.iqm, tone, width: 1.6, label: primary },
+      { x: rates.x, y: rates.perLane[lanes.seeds.indexOf(seed)] ?? [], tone: 'var(--color-seed)', width: 1.2, label: 'selected seed' },
+    ],
+  }), [horizon, rates, tone, compare, tapes, details, envId, primary, lanes, seed]);
   const seek = useCallback((step: number): void => stage.current?.seekStep(step), [stage]);
   const last = rates.x[rates.x.length - 1] ?? 0;
 
@@ -106,13 +132,9 @@ const RewardPanel = memo(function RewardPanel({ stage, runId, envId, seed, compa
         <Key tone={tone} label={primary} />
         <Key tone="var(--color-seed)" label="selected seed" />
         <Key tone={tone} label="10–90% of seeds" block />
-        {lines.slice(1).map((l) => <Key key={l.key} tone={l.tone} label={l.label} />)}
+        {compare.map((c) => <Key key={c.key} tone={c.tone} label={`${c.label} average`} />)}
       </div>
-      <TimeChart label="Reward per step" height={188} xMax={horizon} yLabel="reward / step" overlay={<Playhead total={horizon} />} seek={seek}>
-        <Area key={runId} {...bandProps(tone)} data={band} />
-        {lines.map((l) => <Line key={l.key} {...lineProps(l.tone, l.width)} name={l.label} data={l.points} />)}
-        <Line key={`${runId}/${seed}`} {...lineProps('var(--color-seed)', 1.2)} name="selected seed" data={hero} />
-      </TimeChart>
+      <Plot label="Reward per step" height={188} spec={spec} yLabel="reward / step" playhead seek={seek} />
       <div className="flex items-center gap-2 px-2">
         <span className="text-2xs uppercase tracking-label" title="lifetime reward per step · click to stage">Seeds</span>
         <span className="font-mono text-xs text-ink-dim">{formatCount(rows.length)}</span>
@@ -138,4 +160,4 @@ const RewardPanel = memo(function RewardPanel({ stage, runId, envId, seed, compa
       </div>
     </div>
   );
-});
+}
