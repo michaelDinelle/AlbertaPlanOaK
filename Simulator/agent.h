@@ -10,16 +10,19 @@
 #define OAK_PERCEPTS 32u
 #endif
 #ifndef OAK_SLOTS
-#define OAK_SLOTS 64u
+#define OAK_SLOTS 48u
 #endif
 #ifndef OAK_CANDIDATES
-#define OAK_CANDIDATES 7u
+#define OAK_CANDIDATES 15u
 #endif
 #ifndef OAK_OPTIONS
-#define OAK_OPTIONS 32u
+#define OAK_OPTIONS 2u
 #endif
 #ifndef OAK_UPDATES
-#define OAK_UPDATES 32u
+#define OAK_UPDATES 2u
+#endif
+#ifndef OAK_MODEL_STEP
+#define OAK_MODEL_STEP 0.03f
 #endif
 #ifndef OAK_TRACES
 #define OAK_TRACES 7u
@@ -41,27 +44,13 @@
 #define OAK_ACTION_PARAMS (2u * OAK_ENV_ACT_MAX)
 #define OAK_POLICY_MAX OAK_ENV_ACT_MAX
 #define OAK_OBSERVATION_CAPACITY OAK_ENV_OBS_MAX
-#ifdef OAK_REWARDTRACE
-#define OAK_TRACE_CHANNELS(a) ((a).observationCount + 1u)
-#else
-#define OAK_TRACE_CHANNELS(a) ((a).observationCount)
-#endif
 #define OAK_SOURCE_COUNT ((1u + OAK_TRACE_LEVELS) * OAK_OBSERVATION_CAPACITY + OAK_ACTION_PARAMS + 2u)
 #define OAK_SOURCE_CAPACITY (((OAK_SOURCE_COUNT + OAK_SIMD_WIDTH - 1u) / OAK_SIMD_WIDTH) * OAK_SIMD_WIDTH)
 #define OAK_PERCEPT_COUNT OAK_PERCEPTS
 #define OAK_CONSTRUCTED_SLOTS OAK_SLOTS
 #define OAK_FEATURE_CAPACITY (OAK_PERCEPT_COUNT + OAK_CONSTRUCTED_SLOTS * OAK_CANDIDATES_PER_SLOT)
 #define OAK_ACTIVE_CAPACITY (OAK_PERCEPT_COUNT + OAK_CONSTRUCTED_SLOTS)
-#ifdef OAK_MODEL_SLOTSONLY
-#define OAK_MODEL_Z0 OAK_PERCEPT_COUNT
-#define OAK_MODEL_ZEND OAK_ACTIVE_CAPACITY
-#elif defined(OAK_MODEL_PERCEPTONLY)
-#define OAK_MODEL_Z0 0u
-#define OAK_MODEL_ZEND OAK_PERCEPT_COUNT
-#else
-#define OAK_MODEL_Z0 0u
-#define OAK_MODEL_ZEND OAK_ACTIVE_CAPACITY
-#endif
+
 #define OAK_OPTION_COUNT OAK_OPTIONS
 #define OAK_OPTION_UPDATES OAK_UPDATES
 #define OAK_OPTION_BLOCKS (OAK_OPTION_COUNT / OAK_SIMD_WIDTH)
@@ -93,7 +82,7 @@ typedef struct { uint32_t x, y, z, w; } u4;
 typedef struct { float x, y; } f2;
 
 typedef struct {
-    float value, aux, reward, duration, next, nextAux, twin;
+    float value, aux, reward, duration, next, nextAux;
     float policy[OAK_POLICY_MAX];
 } Record;
 
@@ -108,25 +97,18 @@ typedef struct {
     float observationSecondMoment[OAK_OBSERVATION_CAPACITY];
     f4 observationMeta[OAK_OBSERVATION_CAPACITY];
     float features[OAK_FEATURE_STATES];
-    float policyMean[OAK_POLICY_MAX];
     float policyMeanRaw[OAK_POLICY_MAX];
     float actionSignal[OAK_ACTION_PARAMS];
     float optionActorCredit[OAK_POLICY_BANK];
-    float optionPolicyMean[OAK_POLICY_BANK];
     float importance[OAK_OPTION_COUNT];
     float reward;
     float td;
     float optionTd[OAK_OPTION_COUNT];
-    float featureUtility[OAK_FEATURE_CAPACITY];
-    float optionUtility[OAK_OPTION_COUNT];
-    float bonusWeight[OAK_FEATURE_CAPACITY];
     f2 featureMoments[OAK_FEATURE_CAPACITY];
     f4 valueMeta[OAK_FEATURE_CAPACITY];
     f4 optionValueMeta[OAK_FEATURE_CAPACITY];
     f4 modelMeta[OAK_FEATURE_CAPACITY];
     float actorAdvantage[OAK_OPTION_COUNT];
-    float optionRewardTd[OAK_OPTION_COUNT];
-    float optionDurationTd[OAK_OPTION_COUNT];
     float observationTimescale[OAK_TRACE_LEVELS * OAK_OBSERVATION_CAPACITY];
     float optionPriority[OAK_OPTION_COUNT];
     float continuation[OAK_OPTION_COUNT];
@@ -134,8 +116,6 @@ typedef struct {
     float optionValueScale[OAK_OPTION_COUNT];
     float valueScale;
     float previousFeatureNormSq;
-    float optionValueDot[OAK_OPTION_COUNT];
-    float optionValueAuxScale[OAK_OPTION_COUNT];
     float optionAverageReward[OAK_OPTION_COUNT];
     float optionModelAverageReward[OAK_OPTION_COUNT];
     float optionFitness[OAK_OPTION_COUNT];
@@ -145,36 +125,22 @@ typedef struct {
     float predictedReward[OAK_OPTION_COUNT];
     float predictedDuration[OAK_OPTION_COUNT];
     float predictedNextValue[OAK_OPTION_COUNT];
-    float optionNextValueTd[OAK_OPTION_COUNT];
-    float optionNextValueDot[OAK_OPTION_COUNT];
-    float optionNextValueScale[OAK_OPTION_COUNT];
-    float optionNextValueAuxScale[OAK_OPTION_COUNT];
-    float nurseryStats[OAK_FEATURE_STATS];
     float optionLogit[OAK_POLICY_BANK];
     float optionPolicyCoef[OAK_POLICY_BANK];
-    float optionUseByFeature[OAK_FEATURE_CAPACITY];
-    float optionTdByFeature[OAK_FEATURE_CAPACITY];
-    float nurseryScore[OAK_FEATURE_CAPACITY];
-    float replaceScore[OAK_FEATURE_STATS];
     float currentValue;
     float previousModelEnergy;
     float crossModelEnergy;
     float currentModelEnergy;
     float planningReward;
-    float inverseFeatureNorm;
     float averageReward;
 } AgentMemory;
 
 typedef struct {
     uint32_t optionFeature[OAK_OPTION_COUNT];
     uint32_t optionAge[OAK_OPTION_COUNT];
-    uint32_t featureBirthCount[OAK_FEATURE_CAPACITY];
-    uint32_t lastStopAge[OAK_OPTION_COUNT];
     uint32_t activeFeature[OAK_ACTIVE_STATES];
-    uint32_t replaceSlot[4u];
     uint32_t parked[OAK_OPTION_COUNT];
     u4 featureMeta[OAK_FEATURE_CAPACITY];
-    u4 nurseryMeta[OAK_FEATURE_CAPACITY];
 } AgentIndices;
 
 typedef struct {
@@ -202,9 +168,7 @@ static inline uint32_t *activeFeatures(Agent a, uint32_t slot){
     return a.indices->activeFeature + slot * OAK_ACTIVE_CAPACITY;
 }
 static inline uint32_t perceptSourceCount(Agent a){
-#ifdef OAK_OBSTRACE
-    return (1u + OAK_TRACE_LEVELS) * a.observationCount;
-#elif defined(OAK_OBSCYCLE)
+#ifdef OAK_OBSCYCLE
     return a.observationCount;
 #else
     return (1u + OAK_TRACE_LEVELS) * a.observationCount + OAK_ACTION_PARAMS + 2u;
@@ -217,19 +181,8 @@ static inline uint32_t updatedOption(uint32_t transition, uint32_t budgetSlot, u
     return block * OAK_SIMD_WIDTH + threadIndex;
 }
 static inline uint32_t tileSourceIndex(Agent a, uint32_t source){
-#ifdef OAK_OBSTRACE
-    uint32_t p = (source < a.observationCount)
-               ? source
-               : a.observationCount + OAK_ACTION_PARAMS + 2u + (source - a.observationCount);
-    return (p < OAK_PERCEPT_COUNT) ? p : OAK_PERCEPT_COUNT-1u;
-#elif defined(OAK_SPREAD)
-    uint32_t n = perceptSourceCount(a);
-    uint32_t p = (n <= OAK_PERCEPT_COUNT) ? source : (uint32_t)(((uint64_t)source*OAK_PERCEPT_COUNT)/n);
-    return (p < OAK_PERCEPT_COUNT) ? p : OAK_PERCEPT_COUNT-1u;
-#else
     return (source < a.observationCount + a.envActionCount) ? source
                                                             : a.observationCount + OAK_ACTION_PARAMS;
-#endif
 }
 static inline uint32_t oakWrapTile(float f, uint32_t m){
     if (!isfinite(f)) return 0u;
@@ -238,30 +191,16 @@ static inline uint32_t oakWrapTile(float f, uint32_t m){
     return (uint32_t)q;
 }
 static inline uint32_t zoomedFeatureTile(float activation, uint32_t zoomLevel){
-#ifdef OAK_WRAPTILE
     float zoom = ldexpf(1.0f, (int)zoomLevel);
     return oakWrapTile(floorf(activation*zoom + OAK_TILE_HALF), OAK_CANDIDATES_PER_SLOT);
-#else
-    float zoom = (float)(1u << (zoomLevel<2u?zoomLevel:2u));
-    return (uint32_t)clampf_(floorf(activation*zoom + OAK_TILE_HALF), 0.0f, (float)OAK_TILE_LAST);
-#endif
 }
 static inline uint32_t jointFeatureTile(float a_, float b_, uint32_t sourceReuse){
     float candidates = (float)OAK_CANDIDATES_PER_SLOT;
-#ifdef OAK_WRAPTILE
     a_ += ((sourceReuse & 1u) == 0u) ? (candidates / (float)OAK_TILE_LAST) : 0.0f;
     uint32_t tileA = oakWrapTile(floorf((a_ + OAK_TILE_HALF) * ((float)OAK_JOINT_ROWS / candidates)),
                                  OAK_JOINT_ROWS);
     uint32_t tileB = oakWrapTile(floorf((b_ + OAK_TILE_HALF) * (2.0f / candidates)), 2u);
     return tileA * 2u + tileB;
-#else
-    if (fabsf(a_) >= OAK_TILE_HALF || fabsf(b_) >= OAK_TILE_HALF) return OAK_TILE_LAST;
-    a_ += ((sourceReuse & 1u) == 0u) ? (candidates / (float)OAK_TILE_LAST) : 0.0f;
-    uint32_t tileA = (uint32_t)clampf_(floorf((a_ + OAK_TILE_HALF) * ((float)OAK_JOINT_ROWS / candidates)),
-                                       0.0f, (float)(OAK_JOINT_ROWS - 1u));
-    uint32_t tileB = (uint32_t)clampf_(floorf((b_ + OAK_TILE_HALF) * (2.0f / candidates)), 0.0f, 1.0f);
-    return tileA * 2u + tileB;
-#endif
 }
 static inline int wasActive(const uint32_t *prevActive, uint32_t percepts, uint32_t i){
     return i < percepts || prevActive[percepts + (i - percepts) / OAK_CANDIDATES_PER_SLOT] == i;
@@ -279,20 +218,12 @@ static inline void metaOptimizeUpdate(f4 *meta, uint32_t i, float signal, float 
     float oldAlpha=old.x, oldBeta=old.y, oldH=old.z, oldGradEnergy=old.w;
     float grad = signal * x;
     float metaGradient = grad * oldH;
-#ifdef OAK_TRACKMETA
     float gradEnergyRate = 1.0f/((float)age + 1.0f);
     if (gradEnergyRate < decay) gradEnergyRate = decay;
-#else
-    float gradEnergyRate = 1.0f/((float)age + 1.0f);
-#endif
     float gradEnergy = keepFinite(oldGradEnergy,
         oldGradEnergy + gradEnergyRate*(metaGradient*metaGradient - oldGradEnergy));
-#ifdef OAK_TRACKMETA
     float ridge = 1.0f/((float)age + 1.0f);
     if (ridge < decay) ridge = decay;
-#else
-    float ridge = 1.0f/((float)age + 1.0f);
-#endif
     float ge = gradEnergy > 0.0f ? gradEnergy : 0.0f;
     float normalizedMetaGradient = metaGradient * rsqrtf_(ge + ridge);
     float newBeta = oldBeta + metaEta * normalizedMetaGradient;

@@ -1,7 +1,6 @@
 #!/bin/zsh
 set -e
 cd "$(dirname "$0")"
-flags=(-O3 -march=native -lm)
-clang $flags -DSTEPS=${STEPS:-1000000} "$@" -o oak main.c agent.c
-clang $flags -DSTEPS=${STEPS:-1000000} -o reference reference.c
-clang $flags -o separability separability.c
+f=(-O3 -march=native -flto -lm -DSTEPS=${STEPS:-1000000})
+clang $f "$@" -o oak main.c agent.c
+for t in reference separability; do clang $f -o $t $t.c; done
