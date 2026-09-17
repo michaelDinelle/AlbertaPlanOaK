@@ -110,28 +110,18 @@ typedef struct {
     f4 modelMeta[OAK_FEATURE_CAPACITY];
     float actorAdvantage[OAK_OPTION_COUNT];
     float observationTimescale[OAK_TRACE_LEVELS * OAK_OBSERVATION_CAPACITY];
-    float optionPriority[OAK_OPTION_COUNT];
     float continuation[OAK_OPTION_COUNT];
     float rewardCenter;
     float optionValueScale[OAK_OPTION_COUNT];
     float valueScale;
     float previousFeatureNormSq;
     float optionAverageReward[OAK_OPTION_COUNT];
-    float optionModelAverageReward[OAK_OPTION_COUNT];
     float optionFitness[OAK_OPTION_COUNT];
     f4 actorMeta[OAK_OPTION_COUNT];
     float importanceStaging[OAK_OPTION_COUNT];
     float actorCreditStaging[OAK_POLICY_BANK];
-    float predictedReward[OAK_OPTION_COUNT];
-    float predictedDuration[OAK_OPTION_COUNT];
-    float predictedNextValue[OAK_OPTION_COUNT];
     float optionLogit[OAK_POLICY_BANK];
     float optionPolicyCoef[OAK_POLICY_BANK];
-    float currentValue;
-    float previousModelEnergy;
-    float crossModelEnergy;
-    float currentModelEnergy;
-    float planningReward;
     float averageReward;
 } AgentMemory;
 

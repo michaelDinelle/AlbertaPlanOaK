@@ -187,10 +187,6 @@ void predictAndControl(Agent a){
         float amc = a.memory->modelMeta[ci].x;
         modelNext  = fmaf(amc*ca, ca, modelNext);
     }
-    a.memory->currentValue = currentValue;
-    a.memory->previousModelEnergy = modelPrev;
-    a.memory->crossModelEnergy = modelCross;
-    a.memory->currentModelEnergy = modelNext;
 
     float gauge = a.memory->rewardCenter;
     float previousDifferentialValue = previousValue - gauge;
@@ -201,7 +197,10 @@ void predictAndControl(Agent a){
         float delta = centeredReward + currentDifferentialValue - previousDifferentialValue;
         delta = finiteOrZero(delta);
         a.memory->td = delta;
-        float nr = averageRewardOld + OAK_TRACKING_RATE*(a.memory->reward - averageRewardOld);
+#ifndef OAK_CRATE
+#define OAK_CRATE OAK_TRACKING_RATE
+#endif
+        float nr = averageRewardOld + (OAK_CRATE)*(a.memory->reward - averageRewardOld);
         a.memory->averageReward = isfinite(nr) ? nr : averageRewardOld;
     }
     float observedReward = finiteOrZero(a.memory->reward);
@@ -278,10 +277,9 @@ void predictAndControl(Agent a){
                               + continuation*continuation*optionValueNextEnergy;
         float denom = fmaf(importanceRatio, bootstrapEnergy, 1.0f);
         a.memory->optionValueScale[k] = (isfinite(denom) && denom > 0.0f) ? (1.0f/denom) : 0.0f;
-        float auxDenom = fmaf(importanceRatio, optionValuePrevEnergy, 1.0f);
-        a.memory->predictedReward[k]=rewardHat;
-        a.memory->predictedDuration[k]=durationHat;
-        a.memory->predictedNextValue[k]=nextValueHat;
+#ifdef OAK_NOPRED
+#else
+#endif
     }
     {
         float gaugeRate = trackingRateFor(a.stepCount, OAK_FEATURE_CAPACITY);
@@ -291,50 +289,12 @@ void predictAndControl(Agent a){
     storeLearnScales(a);
 }
 
-static void planOption(Agent a, uint32_t k, float previousNextValueDot, float optionNextValueDot,
-                       float previousRewardHat, float previousDurationHat){
-    float continuation = a.memory->continuation[k];
-    float rewardHat = a.memory->predictedReward[k], durationHat = a.memory->predictedDuration[k],
-          currentNextValueHat = a.memory->predictedNextValue[k];
-    float currentValue = a.memory->currentValue;
-    float modelPrevEnergy = a.memory->previousModelEnergy;
-    float modelBootstrapNorm = a.memory->previousModelEnergy
-        - 2.0f*continuation*a.memory->crossModelEnergy
-        + continuation*continuation*a.memory->currentModelEnergy;
-    if (modelBootstrapNorm < 0.0f) modelBootstrapNorm = 0.0f;
-    modelBootstrapNorm = finiteOrZero(modelBootstrapNorm);
-    if (!isfinite(modelPrevEnergy) || modelPrevEnergy < 0.0f) modelPrevEnergy = 0.0f;
-    float modelAverageRewardOld = finiteOrZero(a.memory->optionModelAverageReward[k]);
-    float rewardModelTd = (k==0u) ? 0.0f
-        : ((a.memory->planningReward - modelAverageRewardOld) + continuation*rewardHat - previousRewardHat);
-    float importanceRatio = a.memory->importance[k];
-    if (isfinite(a.memory->planningReward))
-        a.memory->optionModelAverageReward[k] = 0.0f;
-    float durationTd = (k==0u) ? 0.0f : (1.0f + continuation*durationHat - previousDurationHat);
-    float optionNextValueTd = continuation*currentNextValueHat
-                            + (1.0f - continuation)*currentValue - previousNextValueDot;
-    int modelFinite = isfinite(rewardModelTd) && isfinite(durationTd) && isfinite(durationHat)
-                   && isfinite(optionNextValueTd);
-    rewardModelTd = finiteOrZero(rewardModelTd);
-    durationTd = finiteOrZero(durationTd);
-    optionNextValueTd = finiteOrZero(optionNextValueTd);
-    float mse = optionNextValueTd*optionNextValueTd + rewardModelTd*rewardModelTd;
-    if (modelFinite && isfinite(mse)){
-        a.memory->optionPriority[k] = sqrtf(mse > 0.0f ? mse : 0.0f);
-        a.memory->optionPriority[k] = 0.0f;
-    } else {
-        float debt = fabsf(a.memory->optionPriority[k]);
-        if (debt <= 0.0f) debt = 1.0f;
-        a.memory->optionPriority[k] = -debt;
-    }
-}
 
 void planAllOptions(Agent a, uint32_t previousSlot){
     const uint32_t *previousActive = activeFeatures(a, previousSlot);
     const float *previousFeatures = featureValues(a, previousSlot);
     for (uint32_t k = 0u; k < OAK_OPTION_COUNT; ++k){
         if (a.indices->parked[k] == 0u) continue;
-        a.memory->optionPriority[k]=0.0f;
     }
     for (uint32_t u = 0u; u < OAK_OPTION_UPDATES; ++u){
         uint32_t k = updatedOption(a.stepCount - 1u, u, u % OAK_SIMD_WIDTH);
@@ -354,7 +314,6 @@ void planAllOptions(Agent a, uint32_t previousSlot){
         } else {
             p0=g_stash[k*5u+0u]; p1=g_stash[k*5u+1u]; p2=g_stash[k*5u+2u]; p3=g_stash[k*5u+3u];
         }
-        planOption(a, k, p0, p1, p2, p3);
         float importanceRatio = a.memory->importance[k];
         float advantage = finiteOrZero(a.memory->actorAdvantage[k]);
         metaOptimizeUpdate(a.memory->actorMeta, k, advantage, 1.0f, a.indices->optionAge[k],
@@ -429,24 +388,11 @@ void learnFromTransition(Agent a, const float *previousFeatures, const float *cu
 }
 
 void writePrimaryPolicy(Agent a){
-#ifdef OAK_GPI
-
-    uint32_t best = 0u; float bestV = -3.402823466e38f; int found = 0;
-    for (uint32_t k=0u;k<OAK_OPTION_COUNT;++k){
-        if (a.indices->parked[k]!=0u) continue;
-        float q = a.memory->predictedReward[k] + a.memory->predictedNextValue[k];
-        if (!isfinite(q)) continue;
-        if (!found || q > bestV){ bestV=q; best=k; found=1; }
-    }
-    uint32_t off = best*OAK_POLICY_MAX;
-    for (uint32_t action=0u; action<OAK_POLICY_MAX; ++action){
-        a.memory->policyMeanRaw[action]= finiteOrZero(a.memory->optionLogit[off+action]);
-    }
-#else
-    for (uint32_t action=0u; action<OAK_POLICY_MAX; ++action){
-        a.memory->policyMeanRaw[action]=finiteOrZero(a.memory->optionLogit[action]);
-    }
-#endif
+    static uint32_t option;
+    option = (option + 1u) % OAK_OPTION_COUNT;
+    uint32_t off = option*OAK_POLICY_MAX;
+    for (uint32_t action=0u; action<OAK_POLICY_MAX; ++action)
+        a.memory->policyMeanRaw[action] = finiteOrZero(a.memory->optionLogit[off+action]);
 }
 
 void oakInit(Agent a, uint32_t gid, float initX, float initY, float initZ, float initW){
@@ -547,7 +493,6 @@ void oakSetStashDirty(int d){ g_stashDirty = d; }
 #define OAK_PX(z,i) g_prevV[z]
 #else
 #define OAK_PX(z,i) pf[i]
-#define MZ0 0u
 #endif
 static void headUpdate(float (*w)[OAK_POLICY_MAX], f4 (*meta)[OAK_POLICY_MAX],
                        uint32_t (*age)[OAK_POLICY_MAX], const float *pf, uint32_t act, float target){
