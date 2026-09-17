@@ -2,11 +2,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <float.h>
 #include "jbw.h"
 #include "agent.h"
 
-#define HBITS 22
-#define HMASK ((1u<<HBITS)-1u)
 #ifndef STEPS
 #define STEPS 1000000
 #endif
@@ -21,7 +20,7 @@ int main(int argc, char **argv){
     int policy = argc>2 ? atoi(argv[2]) : -1;
     float *resp = malloc(sizeof(float)*(size_t)JBW_RESPONSE_CELLS*JBW_DESTRUCTION_LIFETIME);
     jbw_buildResponse(resp);
-    uint32_t *hist = calloc(HMASK+1u, 3u*sizeof(uint32_t));
+    uint32_t *hist = calloc(JBW_HISTORY_MASK+1u, 3u*sizeof(uint32_t));
     AgentParameters *P = calloc(1,sizeof(AgentParameters));
     AgentMemory     *M = calloc(1,sizeof(AgentMemory));
     AgentIndices    *I = calloc(1,sizeof(AgentIndices));
@@ -31,7 +30,6 @@ int main(int argc, char **argv){
     oakInit(a, seed, 1.0f/sqrtf((float)OAK_FEATURE_CAPACITY), alpha, logf(alpha), 1.0f/3.0f);
 
     int px=0,py=0,hd=0,moved=0;
-    float pj=0.0f,po=0.0f;
     double total=0.0; long good=0,bad=0,fwd=0;
     long hg[HALVES]={0}, hb[HALVES]={0};
     double segR[8]={0}; long segN[8]={0};
@@ -41,14 +39,14 @@ int main(int argc, char **argv){
         for (int i=0;i<8;i++){
             int k=(2*hd+i)&7, qx=px+D8[k][0], qy=py+D8[k][1];
             uint32_t it=jbw_itemAt(seed,qx,qy);
-            view[i] = (!jbw_blocks(it) && jbw_destroyedAt(hist,HMASK,qx,qy)!=0u) ? JBW_EMPTY : it;
+            view[i] = (!jbw_blocks(it) && jbw_destroyedAt(hist,JBW_HISTORY_MASK,qx,qy)!=0u) ? JBW_EMPTY : it;
         }
-        float sc[3]; jbw_scentAt(seed,px,py,(uint32_t)t,hist,HMASK,resp,sc);
+        float sc[3]; jbw_scentAt(seed,px,py,(uint32_t)t,hist,JBW_HISTORY_MASK,resp,sc);
         float sign = ((t/EPOCH)&1)==0 ? 1.0f : -1.0f;
         uint32_t action;
 
         if (policy < 0){
-            for (int i=0;i<8;i++) M->observation[i] = jbw_energy(view[i]);
+            for (int i=0;i<8;i++) M->observation[i] = JBW_ENERGY[view[i]];
             M->observation[8]=sc[0]; M->observation[9]=sc[1]; M->observation[10]=sc[2];
             M->observation[11]=(float)moved;
             constructFeatures(a);
@@ -64,56 +62,18 @@ int main(int argc, char **argv){
             action = oakSampleDiscrete(a, 3u, w);
             oakActionModelRemember(a, action);
         } else {
-            float gs = sign>0?sc[2]:sc[1], bs = sign>0?sc[1]:sc[2];
-            uint32_t GOODI = sign>0?JBW_JELLY:JBW_ONION, BADI = sign>0?JBW_ONION:JBW_JELLY;
-            u4 rr=philox4x32(seed,2u,(u4){(uint32_t)t,7,0,0});
-            switch(policy){
-            case 0: action=0u; break;
-            case 1: action=rr.x%3u; break;
-            case 2: case 3: case 4: {
-                uint32_t ah=view[0];
-                if(ah==GOODI){action=0u;break;}
-                if(ah==BADI||ah==JBW_WALL||ah==JBW_TREE){action=1u+(rr.x&1u);break;}
-                int found=-1;
-                for(int i=1;i<8;i++) if(view[i]==GOODI){found=i;break;}
-                if(found==2){action=2u;break;}
-                if(found==6){action=1u;break;}
-                if(found==1||found==7){action=0u;break;}
-                if(found>=3&&found<=5){action=(found<5)?2u:1u;break;}
-                if(policy==2){action=0u;break;}
-                if(policy==3){
-                    if(!moved){action=0u;break;}
-                    action=((gs-pj)-(bs-po)>=0.0f)?0u:(1u+(rr.x&1u));
-                    break;
-                }
-                {   float best=-1e30f; uint32_t ba=0u; int any=0;
-                    for(uint32_t A=0;A<3;A++){
-                        int nh=hd,nx=px,ny=py;
-                        if(A==1u)nh=(hd+3)&3; else if(A==2u)nh=(hd+1)&3;
-                        else { int tx=px+FW[hd][0],ty=py+FW[hd][1];
-                               if(jbw_blocks(jbw_itemAt(seed,tx,ty))) continue;
-                               nx=tx;ny=ty; }
-                        int lx=nx+FW[nh][0], ly=ny+FW[nh][1];
-                        if(jbw_blocks(jbw_itemAt(seed,lx,ly))) continue;
-                        float s2[3]; jbw_scentAt(seed,lx,ly,(uint32_t)t+1u,hist,HMASK,resp,s2);
-                        float g2=sign>0?s2[2]:s2[1], b2=sign>0?s2[1]:s2[2];
-                        float v=g2-b2;
-                        if(!any||v>best){best=v;ba=A;any=1;}
-                    }
-                    action=any?ba:(1u+(rr.x&1u));
-                } } break;
-            case 5: action = jbw_blocks(view[0]) ? (1u+(rr.x&1u)) : 0u; break;
-            case 6: action = (jbw_blocks(view[0])||view[0]==BADI) ? (1u+(rr.x&1u)) : 0u; break;
-            case 7: { uint32_t ah=view[0];
-                if(ah==BADI||ah==JBW_WALL||ah==JBW_TREE){action=1u+(rr.x&1u);break;}
-                int found=-1;
-                for(int i=1;i<8;i++) if(view[i]==GOODI){found=i;break;}
-                if(found==2){action=2u;break;}
-                if(found==6){action=1u;break;}
-                action=0u; } break;
-            default: action=0u;
+            uint32_t good = sign>0?JBW_JELLY:JBW_ONION, bad = sign>0?JBW_ONION:JBW_JELLY;
+            u4 rr = philox4x32(seed,2u,(u4){(uint32_t)t,7,0,0});
+            uint32_t ahead = view[0];
+            if (policy == 0) action = rr.x%3u;
+            else if (ahead == good) action = 0u;
+            else if (ahead == bad || ahead == JBW_WALL || ahead == JBW_TREE) action = 1u+(rr.x&1u);
+            else {
+                int seen = -1;
+                for (int i=1;i<8;i++) if (view[i]==good){ seen=i; break; }
+                action = (seen==2) ? 2u : (seen==6) ? 1u
+                       : (seen>=3 && seen<=5) ? ((seen<5)?2u:1u) : 0u;
             }
-            pj=gs; po=bs;
         }
 
         int tx=px+FW[hd][0], ty=py+FW[hd][1];
@@ -123,10 +83,10 @@ int main(int argc, char **argv){
         else if (action==2u) hd=(hd+1)&3;
         else if (!jbw_blocks(it)){
             px=tx; py=ty; moved=1;
-            if (jbw_collectible(it) && jbw_destroyedAt(hist,HMASK,tx,ty)==0u)
-                jbw_destroy(hist,HMASK,tx,ty,(uint32_t)t);
+            if (jbw_collectible(it) && jbw_destroyedAt(hist,JBW_HISTORY_MASK,tx,ty)==0u)
+                jbw_destroy(hist,JBW_HISTORY_MASK,tx,ty,(uint32_t)t);
         }
-        if (action==0u && moved && jbw_destroyedAt(hist,HMASK,px,py)==(uint32_t)t+1u){
+        if (action==0u && moved && jbw_destroyedAt(hist,JBW_HISTORY_MASK,px,py)==(uint32_t)t+1u){
             if (it==JBW_JELLY) reward=sign; else if (it==JBW_ONION) reward=-sign;
         }
         if (policy < 0){
@@ -142,7 +102,7 @@ int main(int argc, char **argv){
 
         if (policy < 0){
             uint32_t previous = 1u - a.stateSlot;
-            planAllOptions(a, previous);
+            planAllOptions(a);
             learnFromTransition(a, previous);
         }
     }

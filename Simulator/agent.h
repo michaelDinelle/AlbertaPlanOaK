@@ -10,19 +10,16 @@
 #define OAK_PERCEPTS 32u
 #endif
 #ifndef OAK_SLOTS
-#define OAK_SLOTS 48u
+#define OAK_SLOTS 6u
 #endif
 #ifndef OAK_CANDIDATES
-#define OAK_CANDIDATES 15u
+#define OAK_CANDIDATES 31u
 #endif
 #ifndef OAK_OPTIONS
 #define OAK_OPTIONS 2u
 #endif
 #ifndef OAK_UPDATES
 #define OAK_UPDATES 2u
-#endif
-#ifndef OAK_MODEL_STEP
-#define OAK_MODEL_STEP 0.03f
 #endif
 #ifndef OAK_TRACES
 #define OAK_TRACES 7u
@@ -34,14 +31,13 @@
 #define OAK_ENV_ACT_MAX 6u
 #endif
 
-#define OAK_SIMD_WIDTH 32u
 #define OAK_CANDIDATES_PER_SLOT OAK_CANDIDATES
 #define OAK_TRACE_LEVELS OAK_TRACES
 #define OAK_TILE_LAST (OAK_CANDIDATES_PER_SLOT - 1u)
 #define OAK_JOINT_ROWS (OAK_TILE_LAST / 2u)
 #define OAK_TILE_HALF (0.5f * (float)OAK_CANDIDATES_PER_SLOT)
 #define OAK_ACTION_PARAMS (2u * OAK_ENV_ACT_MAX)
-#define OAK_POLICY_MAX OAK_ENV_ACT_MAX
+#define OAK_POLICY_MAX 3u
 #define OAK_OBSERVATION_CAPACITY OAK_ENV_OBS_MAX
 #define OAK_PERCEPT_COUNT OAK_PERCEPTS
 #define OAK_CONSTRUCTED_SLOTS OAK_SLOTS
@@ -67,9 +63,6 @@
 #define FEATURE_OBSERVATION_TIMESCALE 3u
 
 typedef struct { float x, y, z, w; } f4;
-#ifndef JBW_EXACT_H
-typedef struct { uint32_t x, y, z, w; } u4;
-#endif
 typedef struct { float x, y; } f2;
 
 typedef struct {
@@ -88,14 +81,17 @@ typedef struct {
     float observationSecondMoment[OAK_OBSERVATION_CAPACITY];
     f4 observationMeta[OAK_OBSERVATION_CAPACITY];
     float features[OAK_FEATURE_STATES];
+    float activeValue[OAK_ACTIVE_STATES];
     float policyMeanRaw[OAK_POLICY_MAX];
     float actionSignal[OAK_ACTION_PARAMS];
     float optionActorCredit[OAK_POLICY_BANK];
     float importance[OAK_OPTION_COUNT];
     float reward;
     float td;
-    f2 featureMoments[OAK_FEATURE_CAPACITY];
-    f4 valueMeta[OAK_FEATURE_CAPACITY];
+    float featureUtility[OAK_FEATURE_CAPACITY];
+    float featureMean[OAK_FEATURE_CAPACITY];
+    float featureSecondMoment[OAK_FEATURE_CAPACITY];
+    float valueAlpha[OAK_FEATURE_CAPACITY];
     float actorAdvantage[OAK_OPTION_COUNT];
     float observationTimescale[OAK_TRACE_LEVELS * OAK_OBSERVATION_CAPACITY];
     float rewardCenter;
@@ -111,11 +107,9 @@ typedef struct {
 } AgentMemory;
 
 typedef struct {
-    uint32_t optionFeature[OAK_OPTION_COUNT];
-    uint32_t optionAge[OAK_OPTION_COUNT];
     uint32_t activeFeature[OAK_ACTIVE_STATES];
-    uint32_t parked[OAK_OPTION_COUNT];
     uint32_t featureAge[OAK_FEATURE_CAPACITY];
+    float featureRate[OAK_FEATURE_CAPACITY];
 } AgentIndices;
 
 typedef struct {
@@ -127,7 +121,7 @@ typedef struct {
 
 void constructFeatures(Agent);
 void predictAndControl(Agent);
-void planAllOptions(Agent, uint32_t);
+void planAllOptions(Agent);
 void learnFromTransition(Agent, uint32_t);
 void writePrimaryPolicy(Agent);
 void oakInit(Agent, uint32_t, float, float, float, float);

@@ -1,10 +1,10 @@
-
 #ifndef JBW_EXACT_H
 #define JBW_EXACT_H
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <stdio.h>
 
 #define JBW_EMPTY 0u
 #define JBW_BANANA 1u
@@ -14,7 +14,14 @@
 #define JBW_TREE 5u
 #define JBW_TRUFFLE 6u
 #define JBW_RESPONSE_RADIUS 17u
-#define JBW_RESPONSE_CELLS 153u
+#define JBW_RESPONSE_CELLS (JBW_RESPONSE_RADIUS*(JBW_RESPONSE_RADIUS+1u)/2u)
+#define JBW_BLOCK 16
+#define JBW_ECO_BLOCK 64
+#define JBW_STREAM_ITEMS 16u
+#define JBW_STREAM_ECO 64u
+#define JBW_STREAM_WALLS 80u
+#define JBW_HISTORY_BITS 22
+#define JBW_HISTORY_MASK ((1u<<JBW_HISTORY_BITS)-1u)
 #define JBW_DESTRUCTION_LIFETIME 2000u
 #define JBW_BLOCK_ITEMS 4u
 #define ENV_RNG_STREAM 3u
@@ -24,18 +31,16 @@
 #define PHILOX_W1 0xBB67AE85u
 
 typedef struct { uint32_t x,y,z,w; } u4;
-static inline uint32_t mulhi_(uint32_t a,uint32_t b){return (uint32_t)(((uint64_t)a*(uint64_t)b)>>32);}
 static inline u4 philox4x32(uint32_t k0,uint32_t k1,u4 c){
     for(int r=0;r<10;r++){
         if(r>0){k0+=PHILOX_W0;k1+=PHILOX_W1;}
-        uint32_t hi0=mulhi_(PHILOX_M0,c.x), lo0=PHILOX_M0*c.x;
-        uint32_t hi1=mulhi_(PHILOX_M1,c.z), lo1=PHILOX_M1*c.z;
+        uint32_t hi0=(uint32_t)(((uint64_t)PHILOX_M0*c.x)>>32), lo0=PHILOX_M0*c.x;
+        uint32_t hi1=(uint32_t)(((uint64_t)PHILOX_M1*c.z)>>32), lo1=PHILOX_M1*c.z;
         u4 n={hi1^c.y^k0, lo1, hi0^c.w^k1, lo0};
         c=n;
     }
     return c;
 }
-static inline uint32_t philox_i(u4 r,uint32_t i){ return i==0?r.x:i==1?r.y:i==2?r.z:r.w; }
 static inline int jbw_floorDiv(int x,int d){int q=x/d;return q-((x<0&&x%d!=0)?1:0);}
 typedef struct { uint32_t seed,stream,live; int x,y; u4 v; } jbw_memo;
 static jbw_memo jbw_fieldMemo[256];
@@ -49,7 +54,7 @@ static inline u4 jbw_field(uint32_t seed,int x,int y,uint32_t stream){
 }
 static inline void jbw_candidate(u4 b,int bx,int by,uint32_t slot,int*cx,int*cy){
     uint32_t bits=(b.x>>(8u*slot))&255u;
-    *cx=bx*16+(int)(bits&15u); *cy=by*16+(int)((bits>>4u)&15u);
+    *cx=bx*JBW_BLOCK+(int)(bits&15u); *cy=by*JBW_BLOCK+(int)((bits>>4u)&15u);
 }
 static inline uint32_t jbw_typeOf(u4 b,u4 eco,uint32_t slot){
     uint32_t roll=(b.y>>(8u*slot))&255u;
@@ -60,59 +65,61 @@ static inline uint32_t jbw_typeOf(u4 b,u4 eco,uint32_t slot){
 }
 static inline int jbw_wallHit(u4 w,int bx,int by,int x,int y){
     if((w.z&7u)!=0u) return 0;
-    return (w.w&1u)==0u ? (y==by*16+(int)(w.y&15u)) : (x==bx*16+(int)(w.x&15u));
+    return (w.w&1u)==0u ? (y==by*JBW_BLOCK+(int)(w.y&15u)) : (x==bx*JBW_BLOCK+(int)(w.x&15u));
 }
-static inline int jbw_wallAt(uint32_t seed,int x,int y){
-    int bx=jbw_floorDiv(x,16),by=jbw_floorDiv(y,16);
-    return jbw_wallHit(jbw_field(seed,bx,by,80u),bx,by,x,y);
-}
-static inline uint32_t jbw_itemAt(uint32_t seed,int x,int y){
-    if(jbw_wallAt(seed,x,y)) return JBW_WALL;
-    int bx=jbw_floorDiv(x,16),by=jbw_floorDiv(y,16);
-    u4 b=jbw_field(seed,bx,by,16u);
-    for(uint32_t s=0;s<JBW_BLOCK_ITEMS;s++){
-        int cx,cy; jbw_candidate(b,bx,by,s,&cx,&cy);
-        if(!(cx==x&&cy==y)) continue;
-        u4 eco=jbw_field(seed,jbw_floorDiv(x,64),jbw_floorDiv(y,64),64u);
-        return jbw_typeOf(b,eco,s);
+static const float JBW_ENERGY[7] = {0.0f,2.04f,1.68f,1.29f,1.34f,0.53f,0.79f};
+static const float JBW_SCENT[7][3] = {
+    {0.00f,0.00f,0.00f},{1.92f,1.76f,0.40f},{0.68f,0.01f,0.99f},{1.64f,0.54f,0.40f},
+    {0.00f,0.00f,0.00f},{0.00f,0.47f,0.06f},{8.40f,4.80f,2.60f}};
+typedef struct { int px,py; uint32_t item; float scent[3]; } jbw_blockItem;
+typedef struct { uint32_t seed,live,count; int bx,by; jbw_blockItem item[JBW_BLOCK_ITEMS]; } jbw_blockEntry;
+static jbw_blockEntry jbw_blockMemo[256];
+static inline const jbw_blockEntry* jbw_blockItems(uint32_t seed,int bx,int by){
+    uint32_t h=((uint32_t)bx*0x9E3779B9u)^((uint32_t)by*0x85EBCA6Bu);
+    jbw_blockEntry *e=&jbw_blockMemo[(h^(h>>13))&255u];
+    if(e->live&&e->bx==bx&&e->by==by&&e->seed==seed) return e;
+    u4 block=jbw_field(seed,bx,by,JBW_STREAM_ITEMS);
+    u4 wall =jbw_field(seed,bx,by,JBW_STREAM_WALLS);
+    u4 eco  =jbw_field(seed,jbw_floorDiv(bx*JBW_BLOCK,JBW_ECO_BLOCK),jbw_floorDiv(by*JBW_BLOCK,JBW_ECO_BLOCK),JBW_STREAM_ECO);
+    e->count=0u;
+    for(uint32_t slot=0;slot<JBW_BLOCK_ITEMS;slot++){
+        int px,py; jbw_candidate(block,bx,by,slot,&px,&py);
+        int dup=0;
+        for(uint32_t pr=0;pr<slot;pr++){int qx,qy;jbw_candidate(block,bx,by,pr,&qx,&qy);
+            if(qx==px&&qy==py){dup=1;break;}}
+        if(dup) continue;
+        if(jbw_wallHit(wall,bx,by,px,py)) continue;
+        jbw_blockItem *q=&e->item[e->count++];
+        q->px=px; q->py=py; q->item=jbw_typeOf(block,eco,slot);
+        q->scent[0]=JBW_SCENT[q->item][0]; q->scent[1]=JBW_SCENT[q->item][1]; q->scent[2]=JBW_SCENT[q->item][2];
     }
+    e->seed=seed; e->bx=bx; e->by=by; e->live=1u;
+    return e;
+}
+
+static inline uint32_t jbw_itemAt(uint32_t seed,int x,int y){
+    int bx=jbw_floorDiv(x,JBW_BLOCK),by=jbw_floorDiv(y,JBW_BLOCK);
+    if(jbw_wallHit(jbw_field(seed,bx,by,JBW_STREAM_WALLS),bx,by,x,y)) return JBW_WALL;
+    const jbw_blockEntry *e=jbw_blockItems(seed,bx,by);
+    for(uint32_t k=0;k<e->count;k++)
+        if(e->item[k].px==x&&e->item[k].py==y) return e->item[k].item;
     return JBW_EMPTY;
 }
 static inline uint64_t jbw_key(int x,int y){return ((uint64_t)(uint32_t)x<<32)|(uint64_t)(uint32_t)y;}
-static inline uint32_t jbw_slot(uint64_t k,uint32_t mask){
-    k^=k>>30; k*=0xbf58476d1ce4e5b9ull; k^=k>>27; k*=0x94d049bb133111ebull; k^=k>>31;
-    return (uint32_t)k & mask;
+static inline uint32_t* jbw_slotFor(uint32_t*h,uint32_t mask,int x,int y){
+    uint64_t k=jbw_key(x,y), m=k;
+    m^=m>>30; m*=0xbf58476d1ce4e5b9ull; m^=m>>27; m*=0x94d049bb133111ebull; m^=m>>31;
+    for(uint32_t s=(uint32_t)m&mask,probe=0;;++probe,s=(s+1u)&mask){ uint32_t*e=h+3u*s;
+        if(e[2]==0u||(e[0]==(uint32_t)(k>>32)&&e[1]==(uint32_t)k)) return e;
+        if(probe>=mask){ fprintf(stderr,"jbw: destruction table full at %u slots\n",mask+1u); exit(1); } }
 }
-static inline uint32_t jbw_destroyedAt(const uint32_t*h,uint32_t mask,int x,int y){
-    uint64_t k=jbw_key(x,y); uint32_t s=jbw_slot(k,mask);
-    for(;;){ const uint32_t*e=h+3u*s;
-        if(e[2]==0u) return 0u;
-        if(e[0]==(uint32_t)(k>>32)&&e[1]==(uint32_t)k) return e[2];
-        s=(s+1u)&mask; }
-}
+static inline uint32_t jbw_destroyedAt(const uint32_t*h,uint32_t mask,int x,int y){ return jbw_slotFor((uint32_t*)h,mask,x,y)[2]; }
 static inline void jbw_destroy(uint32_t*h,uint32_t mask,int x,int y,uint32_t step){
-    uint64_t k=jbw_key(x,y); uint32_t s=jbw_slot(k,mask);
-    for(;;){ uint32_t*e=h+3u*s;
-        if(e[2]==0u){e[0]=(uint32_t)(k>>32);e[1]=(uint32_t)k;e[2]=step+1u;return;}
-        if(e[0]==(uint32_t)(k>>32)&&e[1]==(uint32_t)k) return;
-        s=(s+1u)&mask; }
+    uint32_t*e=jbw_slotFor(h,mask,x,y); if(e[2]!=0u) return;
+    uint64_t k=jbw_key(x,y); e[0]=(uint32_t)(k>>32); e[1]=(uint32_t)k; e[2]=step+1u;
 }
 static inline int jbw_blocks(uint32_t i){return i==JBW_WALL||i==JBW_TREE;}
-static inline int jbw_collectible(uint32_t i){
-    return i==JBW_BANANA||i==JBW_ONION||i==JBW_JELLY||i==JBW_TRUFFLE;}
-static inline float jbw_energy(uint32_t i){
-    switch(i){case JBW_BANANA:return 2.04f;case JBW_ONION:return 1.68f;case JBW_JELLY:return 1.29f;
-    case JBW_WALL:return 1.34f;case JBW_TREE:return 0.53f;case JBW_TRUFFLE:return 0.79f;default:return 0.0f;}
-}
-static inline void jbw_scent(uint32_t i,float*o){
-    switch(i){
-    case JBW_BANANA: o[0]=1.92f;o[1]=1.76f;o[2]=0.40f;break;
-    case JBW_ONION:  o[0]=0.68f;o[1]=0.01f;o[2]=0.99f;break;
-    case JBW_JELLY:  o[0]=1.64f;o[1]=0.54f;o[2]=0.40f;break;
-    case JBW_TREE:   o[0]=0.00f;o[1]=0.47f;o[2]=0.06f;break;
-    case JBW_TRUFFLE:o[0]=8.40f;o[1]=4.80f;o[2]=2.60f;break;
-    default: o[0]=o[1]=o[2]=0.0f; }
-}
+static inline int jbw_collectible(uint32_t i){return i!=JBW_EMPTY&&!jbw_blocks(i);}
 static inline float jbw_response(const float*t,uint32_t time,int dx,int dy){
     uint32_t x=(uint32_t)abs(dx),y=(uint32_t)abs(dy);
     if(x<y){uint32_t s=x;x=y;y=s;}
@@ -143,35 +150,27 @@ static inline void jbw_buildResponse(float*r){
     }
 }
 
+
 static inline void jbw_scentAt(uint32_t seed,int x,int y,uint32_t step,
                                const uint32_t*hist,uint32_t mask,const float*resp,float*out){
     out[0]=out[1]=out[2]=0.0f;
     int reach=(int)JBW_RESPONSE_RADIUS-1;
-    int bx0=jbw_floorDiv(x-reach,16),bx1=jbw_floorDiv(x+reach,16);
-    int by0=jbw_floorDiv(y-reach,16),by1=jbw_floorDiv(y+reach,16);
+    int bx0=jbw_floorDiv(x-reach,JBW_BLOCK),bx1=jbw_floorDiv(x+reach,JBW_BLOCK);
+    int by0=jbw_floorDiv(y-reach,JBW_BLOCK),by1=jbw_floorDiv(y+reach,JBW_BLOCK);
     for(int by=by0;by<=by1;by++) for(int bx=bx0;bx<=bx1;bx++){
-        u4 block=jbw_field(seed,bx,by,16u);
-        u4 wall =jbw_field(seed,bx,by,80u);
-        u4 eco  =jbw_field(seed,jbw_floorDiv(bx*16,64),jbw_floorDiv(by*16,64),64u);
-        for(uint32_t slot=0;slot<JBW_BLOCK_ITEMS;slot++){
-            int px,py; jbw_candidate(block,bx,by,slot,&px,&py);
-            int dup=0;
-            for(uint32_t pr=0;pr<slot;pr++){int qx,qy;jbw_candidate(block,bx,by,pr,&qx,&qy);
-                if(qx==px&&qy==py){dup=1;break;}}
-            if(dup) continue;
-            int dx=px-x,dy=py-y;
+        const jbw_blockEntry *e=jbw_blockItems(seed,bx,by);
+        for(uint32_t k=0;k<e->count;k++){
+            const jbw_blockItem *q=&e->item[k];
+            int dx=q->px-x,dy=q->py-y;
             if(abs(dx)>=(int)JBW_RESPONSE_RADIUS||abs(dy)>=(int)JBW_RESPONSE_RADIUS) continue;
-            if(jbw_wallHit(wall,bx,by,px,py)) continue;
-            uint32_t item=jbw_typeOf(block,eco,slot);
-            uint32_t del=jbw_collectible(item)?jbw_destroyedAt(hist,mask,px,py):0u;
+            uint32_t del=jbw_collectible(q->item)?jbw_destroyedAt(hist,mask,q->px,q->py):0u;
             float value=jbw_response(resp,JBW_DESTRUCTION_LIFETIME-1u,dx,dy);
             if(del!=0u){
                 uint32_t age=step-(del-1u);
                 if(age>=JBW_DESTRUCTION_LIFETIME) value=0.0f;
                 else value-=jbw_response(resp,age,dx,dy);
             }
-            float c[3]; jbw_scent(item,c);
-            out[0]+=c[0]*value; out[1]+=c[1]*value; out[2]+=c[2]*value;
+            out[0]+=q->scent[0]*value; out[1]+=q->scent[1]*value; out[2]+=q->scent[2]*value;
         }
     }
 }
