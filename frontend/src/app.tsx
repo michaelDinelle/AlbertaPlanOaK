@@ -31,7 +31,7 @@ async function ensure(id: string): Promise<void> {
 }
 
 const runLabel = (run: RunIndexEntry): string =>
-  [formatDate(run.startedAt), run.role === 'best' ? 'best' : null, run.inFlight ? 'live' : null, run.id.slice(0, 7), `${run.envIds.length} envs · ${formatStep(run.steps)} steps · ${run.preset}`]
+  [formatDate(run.startedAt), run.role === 'best' ? 'best' : null, run.inFlight ? 'live' : null, run.id.slice(0, 7), `${run.envIds.length} envs · ${formatStep(run.steps)} steps · ${run.geometry}`]
     .filter((part) => part !== null)
     .join(' · ');
 

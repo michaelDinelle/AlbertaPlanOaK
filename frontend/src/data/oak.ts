@@ -12,7 +12,7 @@ export interface RunIndexEntry {
   startedAt: string;
   inFlight: boolean;
   policy: Policy;
-  preset: string;
+  geometry: string;
   role: 'best' | null;
 }
 
@@ -21,7 +21,7 @@ export interface RunMeta {
   steps: number;
   batch: number;
   policy: Policy;
-  preset: string;
+  geometry: string;
   startedAt: string;
   envSchedule: { envId: string; seedStart: number; seedEnd: number }[];
   envCatalog: unknown;

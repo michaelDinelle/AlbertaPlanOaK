@@ -1,17 +1,18 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { networkInterfaces } from 'node:os';
 import { join, resolve } from 'node:path';
 import index from './index.html';
 
 const BENCH = resolve(import.meta.dir, '../.oak-benchmarks');
 const PUBLIC = resolve(import.meta.dir, 'public');
-const BEST = resolve(import.meta.dir, '../best');
+const BEST = resolve(import.meta.dir, '../.oak-benchmarks/best');
 
 interface Meta {
   seeds: number[];
   steps: number;
   batch: number;
   policy: string;
-  preset: string;
+  geometry: string;
   startedAt: string;
   finishedAt?: string;
   envSchedule: { envId: string; seedStart: number; seedEnd: number }[];
@@ -27,7 +28,7 @@ const bytes = (path: string): ArrayBuffer => {
   return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength) as ArrayBuffer;
 };
 
-const META_FIELDS = ['seeds', 'steps', 'batch', 'policy', 'preset', 'startedAt', 'envSchedule', 'envCatalog'];
+const META_FIELDS = ['seeds', 'steps', 'batch', 'policy', 'geometry', 'startedAt', 'envSchedule', 'envCatalog'];
 
 function meta(root: string): Meta {
   const m = JSON.parse(readFileSync(join(root, 'meta.json'), 'utf8')) as Meta;
@@ -48,7 +49,7 @@ function runRoot(id: string): string {
 }
 
 function runs(): unknown[] {
-  const best = existsSync(BEST) ? readFileSync(BEST, 'utf8').trim() : '';
+  const best = new Set(existsSync(BEST) ? readdirSync(BEST).map((g) => readFileSync(join(BEST, g), 'utf8').trim()) : []);
   const ids = readdirSync(BENCH).filter((n) => n !== 'baselines' && !n.startsWith('.') && existsSync(join(BENCH, n, 'meta.json')));
   return ids
     .map((id) => {
@@ -60,8 +61,8 @@ function runs(): unknown[] {
         startedAt: m.startedAt,
         inFlight: m.finishedAt === undefined,
         policy: m.policy,
-        preset: m.preset,
-        role: id === best ? 'best' : null,
+        geometry: m.geometry,
+        role: best.has(id) ? 'best' : null,
         windows: ends(join(BENCH, id)).length,
       };
     })
@@ -132,6 +133,8 @@ async function publicFile(req: Request): Promise<Response> {
 }
 
 const server = Bun.serve({
+  hostname: process.env.OAK_HOST ?? '0.0.0.0',
+  port: Number(process.env.OAK_PORT ?? 3000),
   development: { hmr: true, console: true },
   routes: {
     '/': index,
@@ -148,4 +151,8 @@ const server = Bun.serve({
   fetch: () => new Response('unknown endpoint', { status: 404 }),
   error: (error) => new Response(String(error), { status: error instanceof HttpError ? error.status : 500 }),
 });
-console.log(`serving ${BENCH} on ${server.url}`);
+const addresses = Object.values(networkInterfaces()).flat()
+  .filter((n) => n && n.family === 'IPv4' && !n.internal)
+  .map((n) => `http://${n!.address}:${server.port}/`);
+console.log(`serving ${BENCH}`);
+for (const url of [`http://localhost:${server.port}/`, ...addresses]) console.log(`  ${url}`);
