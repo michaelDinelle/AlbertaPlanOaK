@@ -16,10 +16,10 @@
 #define OAK_CANDIDATES 31u
 #endif
 #ifndef OAK_OPTIONS
-#define OAK_OPTIONS 2u
+#define OAK_OPTIONS 1u
 #endif
 #ifndef OAK_UPDATES
-#define OAK_UPDATES 2u
+#define OAK_UPDATES 1u
 #endif
 #ifndef OAK_TRACES
 #define OAK_TRACES 7u
@@ -63,15 +63,14 @@
 #define FEATURE_OBSERVATION_TIMESCALE 3u
 
 typedef struct { float x, y, z, w; } f4;
-typedef struct { float x, y; } f2;
 
 typedef struct {
-    float value;
     float policy[OAK_POLICY_MAX];
 } __attribute__((aligned(16))) Record;
 
 typedef struct {
-    float valueWeight[OAK_FEATURE_CAPACITY];
+    struct { float weight; f4 meta; uint32_t age; float utility; }
+        __attribute__((aligned(32))) value[OAK_FEATURE_CAPACITY];
     Record option[OAK_FEATURE_CAPACITY * OAK_OPTION_COUNT];
 } AgentParameters;
 
@@ -88,10 +87,8 @@ typedef struct {
     float importance[OAK_OPTION_COUNT];
     float reward;
     float td;
-    float featureUtility[OAK_FEATURE_CAPACITY];
     float featureMean[OAK_FEATURE_CAPACITY];
     float featureSecondMoment[OAK_FEATURE_CAPACITY];
-    float valueAlpha[OAK_FEATURE_CAPACITY];
     float actorAdvantage[OAK_OPTION_COUNT];
     float observationTimescale[OAK_TRACE_LEVELS * OAK_OBSERVATION_CAPACITY];
     float rewardCenter;
@@ -123,8 +120,7 @@ void constructFeatures(Agent);
 void predictAndControl(Agent);
 void planAllOptions(Agent);
 void learnFromTransition(Agent, uint32_t);
-void writePrimaryPolicy(Agent);
-void oakInit(Agent, uint32_t, float, float, float, float);
+void oakInit(Agent, uint32_t, float, float, float);
 uint32_t oakSampleDiscrete(Agent, uint32_t, const uint32_t*);
 void oakActionModelLearn(Agent, float);
 void oakActionModelRemember(Agent, uint32_t);

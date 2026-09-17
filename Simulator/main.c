@@ -10,7 +10,6 @@
 #define STEPS 1000000
 #endif
 #define EPOCH 100000
-#define HALVES (2*(STEPS/EPOCH))
 
 static const int FW[4][2]={{0,-1},{1,0},{0,1},{-1,0}};
 static const int D8[8][2]={{0,-1},{1,-1},{1,0},{1,1},{0,1},{-1,1},{-1,0},{-1,-1}};
@@ -27,11 +26,10 @@ int main(int argc, char **argv){
     Agent a; a.observationCount=12u; a.envActionCount=3u; a.stepCount=0u; a.stateSlot=0u;
     a.parameters=P; a.memory=M; a.indices=I;
     float alpha = 1.0f/(float)(2u*OAK_PERCEPT_COUNT);
-    oakInit(a, seed, 1.0f/sqrtf((float)OAK_FEATURE_CAPACITY), alpha, logf(alpha), 1.0f/3.0f);
+    oakInit(a, seed, alpha, logf(alpha), 1.0f/3.0f);
 
     int px=0,py=0,hd=0,moved=0;
     double total=0.0; long good=0,bad=0,fwd=0;
-    long hg[HALVES]={0}, hb[HALVES]={0};
     double segR[8]={0}; long segN[8]={0};
 
     for (long t=0;t<STEPS;t++){
@@ -53,7 +51,6 @@ int main(int argc, char **argv){
             predictAndControl(a);
             a.stepCount += 1u;
             a.stateSlot ^= 1u;
-            writePrimaryPolicy(a);
             oakActionModelBiasScaleFree(a);
             uint32_t w[8];
             u4 r0=philox4x32(seed,2u,(u4){(uint32_t)t,0,0,0});
@@ -97,8 +94,7 @@ int main(int argc, char **argv){
         if (action==0u) fwd++;
         total += reward;
         { int sg=(int)(t*8/STEPS); if(sg>7)sg=7; segR[sg]+=reward; segN[sg]++; }
-        long h = t/(STEPS/HALVES); if (h>=HALVES) h=HALVES-1;
-        if (reward>0){ good++; hg[h]++; } else if (reward<0){ bad++; hb[h]++; }
+        if (reward>0) good++; else if (reward<0) bad++;
 
         if (policy < 0){
             uint32_t previous = 1u - a.stateSlot;
@@ -113,13 +109,5 @@ int main(int argc, char **argv){
     printf("  eaten         %ld good / %ld bad  (%.1f%% correct)\n",
            good,bad,(good+bad)?100.0*good/(good+bad):0.0);
     printf("  %%forward      %.1f%%\n", 100.0*fwd/STEPS);
-    double e=0,l=0; int en=0,ln=0;
-    for (int i=0;i<HALVES;i+=2){
-        long g1=hg[i],b1=hb[i],g2=hg[i+1],b2=hb[i+1];
-        double c1=(g1+b1)?100.0*g1/(g1+b1):-1, c2=(g2+b2)?100.0*g2/(g2+b2):-1;
-        if(c1>=0){e+=c1;en++;} if(c2>=0){l+=c2;ln++;}
-    }
-    printf("  adaptation    %.1f%% -> %.1f%%  (%+.1f pts)\n",
-           en?e/en:0.0, ln?l/ln:0.0, (ln?l/ln:0.0)-(en?e/en:0.0));
     return 0;
 }
