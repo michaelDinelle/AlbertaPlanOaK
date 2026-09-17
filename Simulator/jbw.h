@@ -18,7 +18,6 @@
 #define JBW_DESTRUCTION_LIFETIME 2000u
 #define JBW_BLOCK_ITEMS 4u
 #define ENV_RNG_STREAM 3u
-#define RNG_STREAM_RANDOM_ACT 4u
 #define PHILOX_M0 0xD2511F53u
 #define PHILOX_M1 0xCD9E8D57u
 #define PHILOX_W0 0x9E3779B9u
@@ -36,14 +35,17 @@ static inline u4 philox4x32(uint32_t k0,uint32_t k1,u4 c){
     }
     return c;
 }
-static inline float u01_(uint32_t x){ return (float)(x>>8)*0x1p-24f; }
 static inline uint32_t philox_i(u4 r,uint32_t i){ return i==0?r.x:i==1?r.y:i==2?r.z:r.w; }
-static inline uint32_t baselineWord(uint32_t seed,uint32_t stream,uint32_t step,uint32_t i){
-    return philox_i(philox4x32(seed,stream,(u4){step,i>>2,0,0}), i&3u);
-}
 static inline int jbw_floorDiv(int x,int d){int q=x/d;return q-((x<0&&x%d!=0)?1:0);}
+typedef struct { uint32_t seed,stream,live; int x,y; u4 v; } jbw_memo;
+static jbw_memo jbw_fieldMemo[256];
 static inline u4 jbw_field(uint32_t seed,int x,int y,uint32_t stream){
-    return philox4x32(seed,ENV_RNG_STREAM,(u4){(uint32_t)x,(uint32_t)y,stream,0});
+    uint32_t h=((uint32_t)x*0x9E3779B9u)^((uint32_t)y*0x85EBCA6Bu)^(stream*0xC2B2AE35u);
+    jbw_memo *e=&jbw_fieldMemo[(h^(h>>13))&255u];
+    if(e->live&&e->x==x&&e->y==y&&e->stream==stream&&e->seed==seed) return e->v;
+    u4 r=philox4x32(seed,ENV_RNG_STREAM,(u4){(uint32_t)x,(uint32_t)y,stream,0});
+    e->seed=seed; e->stream=stream; e->x=x; e->y=y; e->live=1u; e->v=r;
+    return r;
 }
 static inline void jbw_candidate(u4 b,int bx,int by,uint32_t slot,int*cx,int*cy){
     uint32_t bits=(b.x>>(8u*slot))&255u;

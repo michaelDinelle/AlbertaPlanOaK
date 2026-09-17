@@ -2,28 +2,118 @@
 
 #include "agent.h"
 
-static float g_actQ[OAK_FEATURE_CAPACITY][OAK_POLICY_MAX];
-static f4    g_actMeta[OAK_FEATURE_CAPACITY][OAK_POLICY_MAX];
-static uint32_t g_actAge[OAK_FEATURE_CAPACITY][OAK_POLICY_MAX];
+static float keepFinite(float o, float n){ return isfinite(n) ? n : o; }
+static float finiteOrZero(float v){ return isfinite(v) ? v : 0.0f; }
+static float clampf_(float v, float lo, float hi){ return v<lo?lo:(v>hi?hi:v); }
+static float rsqrtf_(float v){ return 1.0f/sqrtf(v); }
+static float trackingRateFor(uint32_t step, uint32_t cap){
+    float a = 1.0f/((float)step + 1.0f), b = 1.0f/(float)(cap>1u?cap:1u);
+    return a>b?a:b;
+}
+static Record *optionRecord(Agent a, uint32_t feature, uint32_t option){
+    return &a.parameters->option[feature * OAK_OPTION_COUNT + option];
+}
+static float *featureValues(Agent a, uint32_t slot){
+    return a.memory->features + slot * OAK_FEATURE_CAPACITY;
+}
+static uint32_t *activeFeatures(Agent a, uint32_t slot){
+    return a.indices->activeFeature + slot * OAK_ACTIVE_CAPACITY;
+}
+static uint32_t perceptSourceCount(Agent a){
+    return (1u + OAK_TRACE_LEVELS) * a.observationCount + OAK_ACTION_PARAMS + 2u;
+}
+static uint32_t tileSourceIndex(Agent a, uint32_t source){
+    return (source < a.observationCount + a.envActionCount) ? source
+                                                            : a.observationCount + OAK_ACTION_PARAMS;
+}
+static uint32_t oakWrapTile(float f, uint32_t m){
+    if (fabsf(f) < 2147483648.0f){
+        int32_t r = (int32_t)f % (int32_t)m;
+        return (uint32_t)(r < 0 ? r + (int32_t)m : r);
+    }
+    if (!isfinite(f)) return 0u;
+    double q = fmod((double)f, (double)m);
+    if (q < 0.0) q += (double)m;
+    return (uint32_t)q;
+}
+static float exp2u(uint32_t k){
+    if (k > 127u) return ldexpf(1.0f, (int)k);
+    union { uint32_t u; float f; } b; b.u = (127u + k) << 23; return b.f;
+}
+static uint32_t zoomedFeatureTile(float activation, uint32_t zoomLevel){
+    float zoom = exp2u(zoomLevel);
+    return oakWrapTile(floorf(activation*zoom + OAK_TILE_HALF), OAK_CANDIDATES_PER_SLOT);
+}
+static uint32_t jointFeatureTile(float a_, float b_, uint32_t sourceReuse){
+    float candidates = (float)OAK_CANDIDATES_PER_SLOT;
+    a_ += ((sourceReuse & 1u) == 0u) ? (candidates / (float)OAK_TILE_LAST) : 0.0f;
+    uint32_t tileA = oakWrapTile(floorf((a_ + OAK_TILE_HALF) * ((float)OAK_JOINT_ROWS / candidates)),
+                                 OAK_JOINT_ROWS);
+    uint32_t tileB = oakWrapTile(floorf((b_ + OAK_TILE_HALF) * (2.0f / candidates)), 2u);
+    return tileA * 2u + tileB;
+}
+static float normalizedObservation(Agent a, uint32_t o){
+    float mean = a.memory->observationMean[o];
+    float second = a.memory->observationSecondMoment[o];
+    float var = second - mean*mean; if (var < 0.0f) var = 0.0f;
+    return (a.memory->observation[o] - mean) * rsqrtf_(var + 1.0f/(float)(2u*OAK_PERCEPT_COUNT));
+}
+
+static float g_actQ[OAK_POLICY_MAX][OAK_FEATURE_CAPACITY];
+static f4    g_actMeta[OAK_POLICY_MAX][OAK_FEATURE_CAPACITY];
+static uint32_t g_actAge[OAK_POLICY_MAX][OAK_FEATURE_CAPACITY];
 static int   g_actInit;
 static uint32_t g_prevAct;
 static uint32_t g_prevF[OAK_ACTIVE_CAPACITY];
-static float g_prevV[OAK_ACTIVE_CAPACITY];
 static int   g_havePrevAct;
-static float g_stash[OAK_OPTION_COUNT * 5u];
-static int   g_stashDirty;
 
 static uint32_t g_traceMod;
 typedef struct { uint16_t pa, pb, kind, trace; } CVPlan;
 static CVPlan g_cv[OAK_FEATURE_CAPACITY];
+static float g_invAge[OAK_FEATURE_TIMESCALE];
+static float g_traceRate[OAK_TRACE_LEVELS + 1u];
+static inline float trackingRate(uint32_t age){
+    uint32_t cap = OAK_FEATURE_TIMESCALE - 1u;
+    return g_invAge[age < cap ? age : cap];
+}
+static inline float ridgeRate(uint32_t age){
+    uint32_t cap = 2u*OAK_PERCEPT_COUNT - 1u;
+    return g_invAge[age < cap ? age : cap];
+}
+static void metaOptimizeUpdate(f4 *meta, uint32_t i, float signal, float x, uint32_t age){
+    if (!isfinite(signal) || !isfinite(x)) return;
+    f4 old = meta[i];
+    float oldAlpha=old.x, oldBeta=old.y, oldH=old.z, oldGradEnergy=old.w;
+    float grad = signal * x;
+    float metaGradient = grad * oldH;
+    float gradEnergyRate = trackingRate(age);
+    float gradEnergy = keepFinite(oldGradEnergy,
+        oldGradEnergy + gradEnergyRate*(metaGradient*metaGradient - oldGradEnergy));
+    float ge = gradEnergy > 0.0f ? gradEnergy : 0.0f;
+    float normalizedMetaGradient = metaGradient * rsqrtf_(ge + gradEnergyRate);
+    float newBeta = oldBeta + OAK_META_RATE * normalizedMetaGradient;
+    float beta = keepFinite(oldBeta, clampf_(newBeta, 2.0f*logf(OAK_TRACKING_RATE), 0.0f));
+    float alpha = keepFinite(oldAlpha, expf(beta));
+    float featureCurvature = x * x;
+    float hDecay = (1.0f - OAK_TRACKING_RATE) * ((1.0f - oldAlpha*featureCurvature) > 0.0f
+                                                 ? (1.0f - oldAlpha*featureCurvature) : 0.0f);
+    f4 nv; nv.x=alpha; nv.y=beta; nv.z=keepFinite(oldH, hDecay*oldH + oldAlpha*grad); nv.w=gradEnergy;
+    meta[i]=nv;
+}
 static void buildPlans(Agent a){
+    uint32_t traceChannels = OAK_TRACE_LEVELS*a.observationCount;
+    if (traceChannels < 1u) traceChannels = 1u;
     for (uint32_t i=0;i<OAK_FEATURE_CAPACITY;++i){
-        u4 m = a.indices->featureMeta[i];
-        uint32_t k = m.z % 4u;
-        g_cv[i].kind  = (uint16_t)k;
-        g_cv[i].trace = (uint16_t)(m.x % g_traceMod);
-        g_cv[i].pa    = (uint16_t)(m.x % OAK_FEATURE_CAPACITY);
-        g_cv[i].pb    = (uint16_t)(m.y % OAK_FEATURE_CAPACITY);
+        uint32_t x=0u, y=0u, z=0u;
+        if (i >= OAK_PERCEPT_COUNT){
+            uint32_t source = i - OAK_PERCEPT_COUNT;
+            if (source < traceChannels){ x=source; z=3u; }
+            else { x=source % OAK_PERCEPT_COUNT; y=(source*7u+3u)%OAK_PERCEPT_COUNT; z=source % 3u; }
+        }
+        g_cv[i].kind  = (uint16_t)(z % 4u);
+        g_cv[i].trace = (uint16_t)(x % g_traceMod);
+        g_cv[i].pa    = (uint16_t)(x % OAK_FEATURE_CAPACITY);
+        g_cv[i].pb    = (uint16_t)(y % OAK_FEATURE_CAPACITY);
     }
 }
 static inline float constructedAt(Agent a, const float *features, uint32_t i){
@@ -39,22 +129,22 @@ void constructFeatures(Agent a){
     g_traceMod = OAK_TRACE_LEVELS * a.observationCount;
     if (a.stepCount == 0u) buildPlans(a);
     float standardized[OAK_OBSERVATION_CAPACITY];
+    float stepRate = 1.0f/((float)a.stepCount + 1.0f);
     for (uint32_t o = 0u; o < a.observationCount; ++o){
         float x = a.memory->observation[o];
         if (isfinite(x)){
             float observationMean = a.memory->observationMean[o];
             uint32_t age = a.stepCount < OAK_FEATURE_CAPACITY ? a.stepCount : OAK_FEATURE_CAPACITY;
-            metaOptimizeUpdate(a.memory->observationMeta, o, x - observationMean, 1.0f, age,
-                               OAK_META_RATE, OAK_TRACKING_RATE);
-            float r1 = 1.0f/((float)a.stepCount + 1.0f), r2 = a.memory->observationMeta[o].x;
-            float obsRate = r1 > r2 ? r1 : r2;
+            metaOptimizeUpdate(a.memory->observationMeta, o, x - observationMean, 1.0f, age);
+            float r2 = a.memory->observationMeta[o].x;
+            float obsRate = stepRate > r2 ? stepRate : r2;
             a.memory->observationMean[o] += obsRate * (x - observationMean);
             a.memory->observationSecondMoment[o] +=
                 obsRate * (x*x - a.memory->observationSecondMoment[o]);
             standardized[o] = normalizedObservation(a, o);
             for (uint32_t m = 1u; m <= OAK_TRACE_LEVELS; ++m){
                 uint32_t slot = (m-1u)*a.observationCount + o;
-                float rate = 1.0f/(float)(1u << m);
+                float rate = g_traceRate[m];
                 a.memory->observationTimescale[slot] +=
                     rate * (standardized[o] - a.memory->observationTimescale[slot]);
             }
@@ -88,7 +178,7 @@ void constructFeatures(Agent a){
         x = finiteOrZero(x);
         currentFeatures[i] = x;
         currentActive[i] = i;
-        if (a.indices->featureMeta[i].w < 0xffffffffu) a.indices->featureMeta[i].w += 1u;
+        if (a.indices->featureAge[i] < 0xffffffffu) a.indices->featureAge[i] += 1u;
     }
 
     uint32_t sourceCount = perceptSourceCount(a);
@@ -96,12 +186,7 @@ void constructFeatures(Agent a){
         uint32_t sourceIndex = s % sourceCount, occupancy = s / sourceCount;
         uint32_t tile;
         if (occupancy == 0u)
-#ifdef OAK_OBS0ZOOM
-            tile = zoomedFeatureTile(currentFeatures[tileSourceIndex(a, sourceIndex)],
-                                     (s < a.observationCount) ? (OAK_OBS0ZOOM) : 0u);
-#else
             tile = zoomedFeatureTile(currentFeatures[tileSourceIndex(a, sourceIndex)], 0u);
-#endif
         else if ((s & 1u) == 0u)
             tile = zoomedFeatureTile(currentFeatures[tileSourceIndex(a, sourceIndex)], occupancy);
         else {
@@ -112,56 +197,26 @@ void constructFeatures(Agent a){
         uint32_t bankLo = OAK_PERCEPT_COUNT + s*OAK_CANDIDATES_PER_SLOT;
         uint32_t bankHi = bankLo + OAK_CANDIDATES_PER_SLOT;
         uint32_t winner = bankLo + tile;
-        float winningValue = 0.0f;
-#ifdef OAK_WINNERONLY
-        {   winningValue = constructedAt(a, previousFeatures, winner);
-            float rr = 1.0f/((float)a.indices->featureMeta[winner].w + 1.0f);
-            float rate = rr > OAK_TRACKING_RATE ? rr : OAK_TRACKING_RATE;
-            f2 moments = a.memory->featureMoments[winner];
-            moments.x += rate * (winningValue - moments.x);
-            moments.y += rate * (winningValue*winningValue - moments.y);
-            a.memory->featureMoments[winner] = moments;
-        }
-#else
+        float winningValue = constructedAt(a, previousFeatures, winner);
         for (uint32_t i = bankLo; i < bankHi; ++i){
             float constructed = constructedAt(a, previousFeatures, i);
-            float rr = 1.0f/((float)a.indices->featureMeta[i].w + 1.0f);
-            float rate = rr > OAK_TRACKING_RATE ? rr : OAK_TRACKING_RATE;
+            float rate = trackingRate(a.indices->featureAge[i]);
             f2 moments = a.memory->featureMoments[i];
             moments.x += rate * (constructed - moments.x);
             moments.y += rate * (constructed*constructed - moments.y);
             a.memory->featureMoments[i] = moments;
-            if (i == winner) winningValue = constructed;
         }
-#endif
         currentFeatures[currentActive[OAK_PERCEPT_COUNT + s]] = 0.0f;
         f2 wm = a.memory->featureMoments[winner];
         float var = wm.y - wm.x*wm.x; if (var < 0.0f) var = 0.0f;
-        float r1 = 1.0f/((float)a.indices->featureMeta[winner].w + 1.0f);
-        float r2 = 1.0f/(float)(2u*OAK_PERCEPT_COUNT);
-        float ridge = r1 > r2 ? r1 : r2;
+        float ridge = ridgeRate(a.indices->featureAge[winner]);
         winningValue = (winningValue - wm.x) * rsqrtf_(var + ridge);
         currentFeatures[winner] = finiteOrZero(winningValue);
         currentActive[OAK_PERCEPT_COUNT + s] = winner;
-        if (a.indices->featureMeta[winner].w < 0xffffffffu) a.indices->featureMeta[winner].w += 1u;
+        if (a.indices->featureAge[winner] < 0xffffffffu) a.indices->featureAge[winner] += 1u;
     }
 }
 
-static void storeLearnScales(Agent a){
-    const uint32_t *previousActive = activeFeatures(a, a.stateSlot);
-    const float *previousFeatures = featureValues(a, a.stateSlot);
-    float valueStepDenominator = 1.0f, previousFeatureNormSq = 0.0f;
-    for (uint32_t i = 0u; i < OAK_ACTIVE_CAPACITY; ++i){
-        uint32_t pi = previousActive[i];
-        float x = previousFeatures[pi];
-        float alpha = a.memory->valueMeta[pi].x;
-        valueStepDenominator += alpha * (x*x);
-        previousFeatureNormSq = fmaf(x, x, previousFeatureNormSq);
-    }
-    a.memory->valueScale = (isfinite(valueStepDenominator) && valueStepDenominator > 0.0f)
-                           ? (1.0f/valueStepDenominator) : 0.0f;
-    a.memory->previousFeatureNormSq = previousFeatureNormSq;
-}
 
 void predictAndControl(Agent a){
     const float *previousFeatures = featureValues(a, a.stateSlot);
@@ -169,23 +224,14 @@ void predictAndControl(Agent a){
     const uint32_t *previousActive = activeFeatures(a, a.stateSlot);
     const uint32_t *currentActive = activeFeatures(a, 1u - a.stateSlot);
     float previousValue=0.0f, currentValue=0.0f;
-    float optionValuePrevEnergy=0.0f, optionValueCrossEnergy=0.0f, optionValueNextEnergy=0.0f;
-    float modelPrev=0.0f, modelCross=0.0f, modelNext=0.0f;
+    float valueStepDenominator=1.0f, previousFeatureNormSq=0.0f;
     for (uint32_t i = 0u; i < OAK_ACTIVE_CAPACITY; ++i){
         uint32_t pi = previousActive[i], ci = currentActive[i];
         float pa = previousFeatures[pi], ca = currentFeatures[ci];
         previousValue = fmaf(a.parameters->valueWeight[pi], pa, previousValue);
         currentValue  = fmaf(a.parameters->valueWeight[ci], ca, currentValue);
-        float ap = a.memory->optionValueMeta[pi].x;
-        optionValuePrevEnergy  = fmaf(ap*pa, pa, optionValuePrevEnergy);
-        optionValueCrossEnergy = fmaf(ap*pa, currentFeatures[pi], optionValueCrossEnergy);
-        float acps = a.memory->optionValueMeta[ci].x;
-        optionValueNextEnergy  = fmaf(acps*ca, ca, optionValueNextEnergy);
-        float am = a.memory->modelMeta[pi].x;
-        modelPrev  = fmaf(am*pa, pa, modelPrev);
-        modelCross = fmaf(am*pa, currentFeatures[pi], modelCross);
-        float amc = a.memory->modelMeta[ci].x;
-        modelNext  = fmaf(amc*ca, ca, modelNext);
+        valueStepDenominator += a.memory->valueMeta[pi].x * (pa*pa);
+        previousFeatureNormSq = fmaf(pa, pa, previousFeatureNormSq);
     }
 
     float gauge = a.memory->rewardCenter;
@@ -197,53 +243,37 @@ void predictAndControl(Agent a){
         float delta = centeredReward + currentDifferentialValue - previousDifferentialValue;
         delta = finiteOrZero(delta);
         a.memory->td = delta;
-#ifndef OAK_CRATE
-#define OAK_CRATE OAK_TRACKING_RATE
-#endif
-        float nr = averageRewardOld + (OAK_CRATE)*(a.memory->reward - averageRewardOld);
+        float nr = averageRewardOld + OAK_TRACKING_RATE*(a.memory->reward - averageRewardOld);
         a.memory->averageReward = isfinite(nr) ? nr : averageRewardOld;
     }
     float observedReward = finiteOrZero(a.memory->reward);
 
     for (uint32_t k = 0u; k < OAK_OPTION_COUNT; ++k){
         if (a.indices->parked[k] == 0u) continue;
-        a.memory->continuation[k]=0.0f; a.memory->optionTd[k]=0.0f; a.memory->actorAdvantage[k]=0.0f;
+        a.memory->actorAdvantage[k]=0.0f;
     }
     for (uint32_t u = 0u; u < OAK_OPTION_UPDATES; ++u){
-        uint32_t k = updatedOption(a.stepCount, u, u % OAK_SIMD_WIDTH);
+        uint32_t k = u;
         int slotLive = a.indices->parked[k] == 0u;
         uint32_t slot = k;
-        float rewardHat=0.0f, durationHat=0.0f, nextValueHat=0.0f;
         float optionValuePrev=0.0f, optionValueNext=0.0f;
-        float previousNextValue=0.0f, previousRewardHat=0.0f,
-              previousDurationHat=0.0f;
         float policyLogit[OAK_POLICY_MAX];
         for (uint32_t j=0u;j<OAK_POLICY_MAX;++j) policyLogit[j]=0.0f;
         for (uint32_t idx = 0u; idx < OAK_ACTIVE_CAPACITY; ++idx){
             uint32_t pi = previousActive[idx], ci = currentActive[idx];
             float pa = previousFeatures[pi], ca = currentFeatures[ci];
             if (slotLive && pa != 0.0f){
-                const Record *rp = optionRecord(a, pi, slot);
-                optionValuePrev        = fmaf(rp->value, pa, optionValuePrev);
-                previousNextValue      = fmaf(rp->next, pa, previousNextValue);
-                previousRewardHat      = fmaf(rp->reward, pa, previousRewardHat);
-                previousDurationHat    = fmaf(rp->duration, pa, previousDurationHat);
+                optionValuePrev = fmaf(optionRecord(a, pi, slot)->value, pa, optionValuePrev);
             }
             if (slotLive && ca != 0.0f){
                 const Record *rc = optionRecord(a, ci, slot);
                 optionValueNext = fmaf(rc->value, ca, optionValueNext);
-                rewardHat       = fmaf(rc->reward, ca, rewardHat);
-                durationHat     = fmaf(rc->duration, ca, durationHat);
-                nextValueHat    = fmaf(rc->next, ca, nextValueHat);
                 for (uint32_t j=0u;j<OAK_POLICY_MAX;++j)
                     policyLogit[j] = fmaf(rc->policy[j], ca, policyLogit[j]);
             }
         }
         if (!slotLive) continue;
         uint32_t optionFeatureIndex = a.indices->optionFeature[k] % OAK_FEATURE_CAPACITY;
-        g_stash[k*5u+0u]=previousNextValue;
-        g_stash[k*5u+2u]=previousRewardHat;
-        g_stash[k*5u+3u]=previousDurationHat;
         for (uint32_t j=0u;j<OAK_POLICY_MAX;++j)
             a.memory->optionLogit[k*OAK_POLICY_MAX+j]=policyLogit[j];
 
@@ -255,7 +285,6 @@ void predictAndControl(Agent a){
                      ? 1.0f : 0.0f;
         if (k == 0u) stop = 0.0f;
         float continuation = 1.0f - stop;
-        a.memory->continuation[k] = continuation;
 
         float optionAverageRewardOld = a.memory->optionAverageReward[k];
         float optionTdError = subtaskFinite
@@ -263,61 +292,31 @@ void predictAndControl(Agent a){
                + stop*stoppingValue - optionValuePrev) : 0.0f;
         optionTdError = finiteOrZero(optionTdError);
         if (k == 0u) optionTdError = a.memory->td - optionAverageRewardOld;
-        a.memory->optionTd[k] = optionTdError;
         a.memory->actorAdvantage[k] = finiteOrZero(optionTdError);
         a.memory->optionAverageReward[k] =
             keepFinite(optionAverageRewardOld, optionAverageRewardOld + OAK_TRACKING_RATE*optionTdError);
-        float importanceRatio = a.memory->importance[k];
-        {
-            float prev = a.memory->optionFitness[k];
-            a.memory->optionFitness[k] = keepFinite(prev,
-                prev + OAK_TRACKING_RATE*importanceRatio*(observedReward - prev));
-        }
-        float bootstrapEnergy = optionValuePrevEnergy - 2.0f*continuation*optionValueCrossEnergy
-                              + continuation*continuation*optionValueNextEnergy;
-        float denom = fmaf(importanceRatio, bootstrapEnergy, 1.0f);
-        a.memory->optionValueScale[k] = (isfinite(denom) && denom > 0.0f) ? (1.0f/denom) : 0.0f;
-#ifdef OAK_NOPRED
-#else
-#endif
     }
     {
         float gaugeRate = trackingRateFor(a.stepCount, OAK_FEATURE_CAPACITY);
         float gaugeNew = a.memory->rewardCenter + gaugeRate*(currentValue - a.memory->rewardCenter);
         a.memory->rewardCenter = keepFinite(a.memory->rewardCenter, gaugeNew);
     }
-    storeLearnScales(a);
+    a.memory->valueScale = (isfinite(valueStepDenominator) && valueStepDenominator > 0.0f)
+                           ? (1.0f/valueStepDenominator) : 0.0f;
+    a.memory->previousFeatureNormSq = previousFeatureNormSq;
 }
 
 
 void planAllOptions(Agent a, uint32_t previousSlot){
     const uint32_t *previousActive = activeFeatures(a, previousSlot);
     const float *previousFeatures = featureValues(a, previousSlot);
-    for (uint32_t k = 0u; k < OAK_OPTION_COUNT; ++k){
-        if (a.indices->parked[k] == 0u) continue;
-    }
     for (uint32_t u = 0u; u < OAK_OPTION_UPDATES; ++u){
-        uint32_t k = updatedOption(a.stepCount - 1u, u, u % OAK_SIMD_WIDTH);
+        uint32_t k = u;
         if (a.indices->parked[k] != 0u) continue;
         uint32_t slot = k;
-        float p0,p1,p2,p3;
-        if (g_stashDirty){
-            p0=p1=p2=p3=0.0f;
-            for (uint32_t idx=0u; idx<OAK_ACTIVE_CAPACITY; ++idx){
-                uint32_t pi = previousActive[idx];
-                float pa = previousFeatures[pi];
-                if (pa == 0.0f) continue;
-                const Record *rp = optionRecord(a, pi, slot);
-                p0=fmaf(rp->next,pa,p0); p1=fmaf(rp->nextAux,pa,p1);
-                p2=fmaf(rp->reward,pa,p2); p3=fmaf(rp->duration,pa,p3);
-            }
-        } else {
-            p0=g_stash[k*5u+0u]; p1=g_stash[k*5u+1u]; p2=g_stash[k*5u+2u]; p3=g_stash[k*5u+3u];
-        }
         float importanceRatio = a.memory->importance[k];
         float advantage = finiteOrZero(a.memory->actorAdvantage[k]);
-        metaOptimizeUpdate(a.memory->actorMeta, k, advantage, 1.0f, a.indices->optionAge[k],
-                           OAK_META_RATE, OAK_TRACKING_RATE);
+        metaOptimizeUpdate(a.memory->actorMeta, k, advantage, 1.0f, a.indices->optionAge[k]);
         float actorAlpha = a.memory->actorMeta[k].x / OAK_ACTOR_ALPHA_DENOM;
         float previousFeatureNormSq = a.memory->previousFeatureNormSq;
         for (uint32_t d=0u; d<OAK_POLICY_MAX; ++d){
@@ -330,24 +329,19 @@ void planAllOptions(Agent a, uint32_t previousSlot){
     }
 }
 
-void learnFromTransition(Agent a, const float *previousFeatures, const float *currentFeatures,
-                         uint32_t previousSlot, uint32_t policyN){
+void learnFromTransition(Agent a, uint32_t previousSlot){
+    const uint32_t policyN = a.envActionCount;
+    const float *previousFeatures = featureValues(a, previousSlot);
+    const float *currentFeatures  = featureValues(a, 1u - previousSlot);
     const uint32_t *previousActive = activeFeatures(a, previousSlot);
     const uint32_t activeFeatureCount = OAK_ACTIVE_CAPACITY;
     for (uint32_t sb = 0u; sb < OAK_OPTION_UPDATES; ++sb){
-        uint32_t slot = updatedOption(a.stepCount - 1u, sb, sb % OAK_SIMD_WIDTH);
+        uint32_t slot = sb;
         uint32_t k = slot;
         int optionLive = a.indices->parked[k] == 0u;
-        float importanceRatio=0.0f, continuation=0.0f;
-
         float actorCoefficient[OAK_POLICY_MAX];
         for (uint32_t j=0u;j<policyN;++j) actorCoefficient[j]=0.0f;
-        float optionValueStepScale=0.0f, td=0.0f;
         if (optionLive){
-            importanceRatio = a.memory->importance[k];
-            continuation = a.memory->continuation[k];
-            optionValueStepScale = a.memory->optionValueScale[k];
-            td = a.memory->optionTd[k];
             for (uint32_t j=0u;j<policyN;++j)
                 actorCoefficient[j]=a.memory->optionPolicyCoef[k*OAK_POLICY_MAX+j];
         }
@@ -357,23 +351,12 @@ void learnFromTransition(Agent a, const float *previousFeatures, const float *cu
             float previousActivation = previousFeatures[i], currentActivation = currentFeatures[i];
             if (previousActivation == 0.0f && currentActivation == 0.0f) continue;
             if (!optionLive) continue;
-            Record *recv = optionRecord(a, i, slot);
-            Record rec = *recv;
+            Record *rec = optionRecord(a, i, slot);
             for (uint32_t j=0u;j<policyN;++j){
-                float w = rec.policy[j];
-                rec.policy[j] = keepFinite(w, w + actorCoefficient[j]*previousActivation);
+                float w = rec->policy[j];
+                rec->policy[j] = keepFinite(w, w + actorCoefficient[j]*previousActivation);
             }
-            if (!baseOption){
-                float g = (continuation > 0.0f) ? 0.0f : (td*previousActivation);
-                float value = rec.value;
-                rec.value = 0.0f; (void)value; (void)g;
-            }
-            float next=rec.next, duration=rec.duration,
-                  rewardWeight=rec.reward;
-            rec.next = 0.0f; (void)next;
-            rec.duration = 0.0f; (void)duration;
-            rec.reward = 0.0f; (void)rewardWeight;
-            *recv = rec;
+            if (!baseOption) rec->value = 0.0f;
         }
     }
 
@@ -388,25 +371,17 @@ void learnFromTransition(Agent a, const float *previousFeatures, const float *cu
 }
 
 void writePrimaryPolicy(Agent a){
-    static uint32_t option;
-    option = (option + 1u) % OAK_OPTION_COUNT;
+    static uint32_t option, held;
+    option = (option + 1u) % OAK_OPTION_COUNT; (void)held;
     uint32_t off = option*OAK_POLICY_MAX;
     for (uint32_t action=0u; action<OAK_POLICY_MAX; ++action)
         a.memory->policyMeanRaw[action] = finiteOrZero(a.memory->optionLogit[off+action]);
 }
 
 void oakInit(Agent a, uint32_t gid, float initX, float initY, float initZ, float initW){
-    uint32_t traceChannels = OAK_TRACE_LEVELS*a.observationCount;
-    if (traceChannels < 1u) traceChannels = 1u;
+    for (uint32_t n=0u; n<OAK_FEATURE_TIMESCALE; ++n) g_invAge[n] = 1.0f/((float)n + 1.0f);
+    for (uint32_t m=1u; m<=OAK_TRACE_LEVELS; ++m) g_traceRate[m] = 1.0f/(float)(1u << m);
     for (uint32_t feature=0u; feature<OAK_FEATURE_CAPACITY; ++feature){
-        if (feature >= OAK_PERCEPT_COUNT){
-            uint32_t source = feature - OAK_PERCEPT_COUNT;
-            u4 fm;
-            if (source < traceChannels){ fm.x=source; fm.y=0u; fm.z=3u; fm.w=0u; }
-            else { fm.x=source % OAK_PERCEPT_COUNT; fm.y=(source*7u+3u)%OAK_PERCEPT_COUNT;
-                   fm.z=source % 3u; fm.w=0u; }
-            a.indices->featureMeta[feature]=fm;
-        }
         if (feature < a.observationCount){
             float s = 1.0f/(float)(2u*OAK_PERCEPT_COUNT);
             f4 om = { s, logf(s), 0.0f, 0.0f };
@@ -414,8 +389,6 @@ void oakInit(Agent a, uint32_t gid, float initX, float initY, float initZ, float
         }
         f4 meta = { initY, initZ, 0.0f, 0.0f };
         a.memory->valueMeta[feature]=meta;
-        a.memory->optionValueMeta[feature]=meta;
-        a.memory->modelMeta[feature]=meta;
     }
     for (uint32_t option=0u; option<OAK_OPTION_COUNT; ++option){
         a.indices->optionFeature[option]=option;
@@ -487,30 +460,23 @@ uint32_t oakSampleDiscrete(Agent a, uint32_t discreteActionCount, const uint32_t
     return sampledAction;
 }
 
-void oakSetStashDirty(int d){ g_stashDirty = d; }
 
-#ifdef OAK_ALIGN
-#define OAK_PX(z,i) g_prevV[z]
-#else
-#define OAK_PX(z,i) pf[i]
-#endif
-static void headUpdate(float (*w)[OAK_POLICY_MAX], f4 (*meta)[OAK_POLICY_MAX],
-                       uint32_t (*age)[OAK_POLICY_MAX], const float *pf, uint32_t act, float target){
+static void headUpdate(float *w, f4 *meta, uint32_t *age, const float *pf, float target){
     float pred=0.0f, denom=1.0f;
     for (uint32_t z=0u;z<OAK_ACTIVE_CAPACITY;++z){
-        uint32_t i=g_prevF[z]; float x=OAK_PX(z,i);
-        pred += w[i][act]*x;
-        denom += meta[i][act].x * x*x;
+        uint32_t i=g_prevF[z]; float x=pf[i];
+        pred += w[i]*x;
+        denom += meta[i].x * x*x;
     }
     float err = target - pred;
     if (!isfinite(err)) return;
     float scale = (denom>0.0f)?1.0f/denom:0.0f;
     for (uint32_t z=0u;z<OAK_ACTIVE_CAPACITY;++z){
-        uint32_t i=g_prevF[z]; float x=OAK_PX(z,i);
-        float v = w[i][act] + meta[i][act].x*err*x*scale;
-        if (isfinite(v)) w[i][act]=v;
-        metaOptimizeUpdate(&meta[i][act], 0u, err, x, age[i][act], OAK_META_RATE, OAK_TRACKING_RATE);
-        age[i][act]++;
+        uint32_t i=g_prevF[z]; float x=pf[i];
+        float v = w[i] + meta[i].x*err*x*scale;
+        if (isfinite(v)) w[i]=v;
+        metaOptimizeUpdate(&meta[i], 0u, err, x, age[i]);
+        age[i]++;
     }
 }
 
@@ -520,7 +486,7 @@ void oakActionModelLearn(Agent a, float reward){
         f4 m={a0,logf(a0),0.0f,0.0f};
         for (uint32_t i=0;i<OAK_FEATURE_CAPACITY;++i)
             for (uint32_t d=0;d<OAK_POLICY_MAX;++d){
-                g_actQ[i][d]=0.0f; g_actAge[i][d]=0u; g_actMeta[i][d]=m;
+                g_actQ[d][i]=0.0f; g_actAge[d][i]=0u; g_actMeta[d][i]=m;
             }
         g_actInit=1;
     }
@@ -531,80 +497,16 @@ void oakActionModelLearn(Agent a, float reward){
     for (uint32_t z=0;z<OAK_ACTIVE_CAPACITY;++z){ uint32_t i=ca[z]; vNext += a.parameters->valueWeight[i]*cf[i]; }
     const float *pf = featureValues(a, 1u - a.stateSlot);
     float centered = reward - a.memory->averageReward;
-#ifdef OAK_ADVANTAGE
-    float vPrev=0.0f;
-    for (uint32_t z=0;z<OAK_ACTIVE_CAPACITY;++z){ uint32_t i=g_prevF[z]; vPrev += a.parameters->valueWeight[i]*g_prevV[z]; }
-#endif
-#ifdef OAK_ADVANTAGE
-    headUpdate(g_actQ, g_actMeta, g_actAge, pf, g_prevAct, centered + vNext - vPrev);
-#else
-    headUpdate(g_actQ, g_actMeta, g_actAge, pf, g_prevAct, centered + vNext);
-#endif
+    headUpdate(g_actQ[g_prevAct], g_actMeta[g_prevAct], g_actAge[g_prevAct], pf, centered + vNext);
 }
 void oakActionModelRemember(Agent a, uint32_t action){
-    const uint32_t *ca = activeFeatures(a, a.stateSlot);
-    const float *cv = featureValues(a, a.stateSlot);
-    for (uint32_t z=0;z<OAK_ACTIVE_CAPACITY;++z){ g_prevF[z]=ca[z]; g_prevV[z]=cv[ca[z]]; }
+    memcpy(g_prevF, activeFeatures(a, a.stateSlot), sizeof g_prevF);
     g_prevAct=action; g_havePrevAct=1;
 }
 
 static float g_qVar, g_lVar;
 
 #define OAK_NACT (a.envActionCount)
-
-float oakSlot0Q(Agent a){
-    const uint32_t *ca = activeFeatures(a, a.stateSlot);
-    const float *cf = featureValues(a, a.stateSlot);
-    uint32_t w = ca[OAK_PERCEPT_COUNT];
-    return g_actQ[w][0] * cf[w];
-}
-uint32_t oakSlot0Idx(Agent a){ return activeFeatures(a, a.stateSlot)[OAK_PERCEPT_COUNT]; }
-
-float oakValueNow(Agent a){
-    const uint32_t *ca = activeFeatures(a, a.stateSlot);
-    const float *cf = featureValues(a, a.stateSlot);
-    float v=0.0f;
-    for (uint32_t z=0;z<OAK_ACTIVE_CAPACITY;++z){ uint32_t i=ca[z]; v += a.parameters->valueWeight[i]*cf[i]; }
-    return v;
-}
-void oakModelQ(Agent a, float *out){
-    const uint32_t *ca = activeFeatures(a, a.stateSlot);
-    const float *cf = featureValues(a, a.stateSlot);
-    for (uint32_t d=0;d<3;++d){ float v=0.0f;
-        for (uint32_t z=0u;z<OAK_ACTIVE_CAPACITY;++z){ uint32_t i=ca[z]; v += g_actQ[i][d]*cf[i]; }
-        out[d]=v; }
-}
-
-void oakDriftReport(Agent a, int seg){
-    const uint32_t *ca = activeFeatures(a, a.stateSlot);
-    double vw=0, aq=0, fv=0, fm=0; float mx=0;
-    for (uint32_t z=0;z<OAK_ACTIVE_CAPACITY;++z){ uint32_t i=ca[z];
-        vw += fabsf(a.parameters->valueWeight[i]);
-        for (uint32_t d=0;d<3;++d) aq += fabsf(g_actQ[i][d]);
-        float x=fabsf(featureValues(a,a.stateSlot)[i]); fv += x; if(x>mx) mx=x;
-        fm += fabsf(a.memory->featureMoments[i].x);
-    }
-    uint32_t n=OAK_ACTIVE_CAPACITY;
-    printf("    seg%d |w_V| %.4f  |w_Q| %.4f  |phi| %.3f (max %.1f)  |mom| %.3f  qVar %.3g  rbar %+.6f\n",
-           seg, vw/n, aq/(3*n), fv/n, mx, fm/n, g_qVar, a.memory->averageReward);
-}
-
-void oakStepSizeReport(Agent a){
-    const uint32_t *ca = activeFeatures(a, a.stateSlot);
-    float v[OAK_ACTIVE_CAPACITY], q[OAK_ACTIVE_CAPACITY];
-    for (uint32_t z=0;z<OAK_ACTIVE_CAPACITY;++z){ uint32_t i=ca[z];
-        v[z]=a.memory->valueMeta[i].x; q[z]=g_actMeta[i][0].x; }
-    for (uint32_t i=1;i<OAK_ACTIVE_CAPACITY;++i){ float t=v[i]; int j=i-1;
-        while(j>=0&&v[j]>t){v[j+1]=v[j];j--;} v[j+1]=t; }
-    for (uint32_t i=1;i<OAK_ACTIVE_CAPACITY;++i){ float t=q[i]; int j=i-1;
-        while(j>=0&&q[j]>t){q[j+1]=q[j];j--;} q[j+1]=t; }
-    uint32_t n=OAK_ACTIVE_CAPACITY;
-    printf("  step sizes over %u active features (min/p25/median/p75/max)\n", n);
-    printf("    critic  %.3g %.3g %.3g %.3g %.3g   spread %.1fx\n",
-           v[0],v[n/4],v[n/2],v[3*n/4],v[n-1], v[n-1]/(v[0]>0?v[0]:1e-30f));
-    printf("    model   %.3g %.3g %.3g %.3g %.3g   spread %.1fx\n",
-           q[0],q[n/4],q[n/2],q[3*n/4],q[n-1], q[n-1]/(q[0]>0?q[0]:1e-30f));
-}
 
 void oakActionModelBiasScaleFree(Agent a){
     if (!g_actInit) return;
@@ -613,7 +515,7 @@ void oakActionModelBiasScaleFree(Agent a){
     float q[OAK_POLICY_MAX]; float qm=0.0f;
     for (uint32_t d=0;d<OAK_NACT;++d){
         float v=0.0f;
-        for (uint32_t z=0u;z<OAK_ACTIVE_CAPACITY;++z){ uint32_t i=ca[z]; v += g_actQ[i][d]*cf[i]; }
+        for (uint32_t z=0u;z<OAK_ACTIVE_CAPACITY;++z){ uint32_t i=ca[z]; v += g_actQ[d][i]*cf[i]; }
         q[d]=isfinite(v)?v:0.0f;
         qm += q[d]/(float)OAK_NACT;
     }
@@ -627,11 +529,7 @@ void oakActionModelBiasScaleFree(Agent a){
     g_qVar += OAK_TRACKING_RATE*(qs - g_qVar);
 
     g_lVar += OAK_TRACKING_RATE*(ls - g_lVar);
-#ifdef OAK_LOCALNORM
-    float qsd = sqrtf(qs > 1e-30f ? qs : 1e-30f);
-#else
     float qsd = sqrtf(g_qVar > 1e-30f ? g_qVar : 1e-30f);
-#endif
     float lsd = sqrtf(g_lVar > 1e-30f ? g_lVar : 1e-30f);
     float gain = lsd/qsd;
     if (!isfinite(gain)) return;
