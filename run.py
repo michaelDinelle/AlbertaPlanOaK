@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import subprocess
+import sys
 from array import array
 from pathlib import Path
 
@@ -24,7 +25,7 @@ def digest(entries):
             result.update(str(path.relative_to(REPO)).encode() + b"\0" + path.read_bytes() + b"\0")
     return result.hexdigest()
 
-def read(root, expected=None, keys=SCHEDULE):
+def read(root, expected=None):
     meta = json.loads((root / "meta.json").read_text())
     ends = array("I", (root / "ends.u32").read_bytes())
     size = (root / "series/rewardSum.f32").stat().st_size
@@ -34,27 +35,36 @@ def read(root, expected=None, keys=SCHEDULE):
         lanes = entry["seedEnd"] - entry["seedStart"] + 1
         if (root / "rewards" / f"{entry['envId']}.f32").stat().st_size != 4 * meta["steps"] * lanes:
             raise SystemExit(f"Incomplete rewards: {root}/{entry['envId']}")
-    if expected and any(meta[key] != expected[key] for key in keys):
-        raise SystemExit(f"Recording does not match the best: {root}")
+    if expected and any(meta[key] != expected[key] for key in SCHEDULE):
+        raise SystemExit(f"Recording does not match the reference: {root}")
     return meta
 
-best_root = BENCH / (REPO / "best").read_text().strip()
-best = read(best_root)
-if best["steps"] != 1_000_000 or "OAK_MEGA_STAGE_MASK" in os.environ:
-    raise SystemExit("A fleet comparison requires one million steps and no timing instruments")
-subprocess.run([REPO / "setup.sh", "--preset", best["preset"]], cwd=REPO, check=True)
-schedule = json.dumps({key: best[key] for key in SCHEDULE}, sort_keys=True).encode()
-baseline_id = hashlib.sha256(schedule + digest(ENV_SOURCES).encode()).hexdigest()[:40]
-baselines = BENCH / "baselines" / baseline_id
+def record(policy, root, steps):
+    print(f"Recording {policy} {root.name}: {schedule['batch']} lanes x {steps:,} steps", flush=True)
+    subprocess.run(["caffeinate", "-i", REPO / ".build/release/OaK", policy, str(steps), root],
+                   check=True, cwd=REPO)
+
+if "OAK_MEGA_STAGE_MASK" in os.environ:
+    raise SystemExit("A recording requires no timing instruments")
+subprocess.run([REPO / "setup.sh"] + sys.argv[1:], cwd=REPO, check=True)
+geometry = (REPO / ".build/OakKernel.geometry").read_text().strip()
+schedule = json.loads((BENCH / "schedule.json").read_text())
+steps = schedule["steps"]
+
+baselines = BENCH / "baselines" / hashlib.sha256(
+    json.dumps({k: schedule[k] for k in SCHEDULE}, sort_keys=True).encode() + digest(ENV_SOURCES).encode()
+).hexdigest()[:40]
 for policy in ("ppo", "random"):
-    read(baselines / policy, best)
+    if not (baselines / policy / "meta.json").exists():
+        record(policy, baselines / policy, steps)
+    read(baselines / policy, schedule)
+
 candidate = BENCH / digest((
-    "Sources", "Package.swift", "setup.sh", "fleet.py", ".build/release/OaK", ".build/OakKernel.metallib",
+    "Sources", "Package.swift", "setup.sh", "run.py", ".build/release/OaK", ".build/OakKernel.metallib",
 ))[:40]
 if not candidate.exists():
-    print(f"Recording {candidate.name}: {best['batch']} lanes × {best['steps']:,} steps", flush=True)
-    subprocess.run(["caffeinate", "-i", REPO / ".build/release/OaK", "oak", str(best["steps"]), candidate], check=True, cwd=REPO)
-meta = read(candidate, best, SCHEDULE + ("preset",))
+    record("oak", candidate, steps)
+meta = read(candidate, schedule)
 (candidate / "baselines").mkdir(exist_ok=True)
 for policy in ("ppo", "random"):
     link = candidate / "baselines" / policy
@@ -62,14 +72,22 @@ for policy in ("ppo", "random"):
         link.symlink_to(os.path.relpath(baselines / policy, link.parent))
     if link.resolve() != (baselines / policy).resolve():
         raise SystemExit(f"Incorrect baseline link: {link}")
-different = []
-for entry in best["envSchedule"]:
-    file = Path("rewards") / f"{entry['envId']}.f32"
-    if not filecmp.cmp(candidate / file, best_root / file, shallow=False):
-        different.append(entry["envId"])
+
+reference = BENCH / "best" / geometry
+if not reference.exists():
+    reference.parent.mkdir(parents=True, exist_ok=True)
+    reference.write_text(candidate.name + "\n")
+    print(f"Steps/s: {meta['stepsPerSecond']:,.0f}")
+    raise SystemExit(f"ADOPT {geometry}: {candidate.name}")
+
+best_root = BENCH / reference.read_text().strip()
+best = read(best_root, schedule)
+different = [entry["envId"] for entry in schedule["envSchedule"]
+             if not filecmp.cmp(candidate / "rewards" / f"{entry['envId']}.f32",
+                                best_root / "rewards" / f"{entry['envId']}.f32", shallow=False)]
 print(f"Changed reward streams: {different}")
 print(f"Steps/s: {meta['stepsPerSecond']:,.0f}; best: {best['stepsPerSecond']:,.0f}")
 if different or not meta["stepsPerSecond"] >= best["stepsPerSecond"]:
-    raise SystemExit(f"REJECT: best stays {best_root.name}")
-(REPO / "best").write_text(candidate.name + "\n")
-print(f"PROMOTE: {candidate.name}")
+    raise SystemExit(f"REJECT {geometry}: best stays {best_root.name}")
+reference.write_text(candidate.name + "\n")
+print(f"PROMOTE {geometry}: {candidate.name}")

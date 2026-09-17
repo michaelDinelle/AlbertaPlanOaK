@@ -153,8 +153,11 @@ final class SharedBuffer<T> {
   let values: UnsafeMutablePointer<T>
 
   init(_ device: MTLDevice, _ count: Int, _ value: T) {
-    buffer = device.makeBuffer(
-      length: max(count, 1) * MemoryLayout<T>.stride, options: .storageModeShared)!
+    let length = max(count, 1) * MemoryLayout<T>.stride
+    guard let allocated = device.makeBuffer(length: length, options: .storageModeShared) else {
+      fatalError("cannot allocate \(length) bytes; maxBufferLength is \(device.maxBufferLength)")
+    }
+    buffer = allocated
     values = buffer.contents().bindMemory(to: T.self, capacity: max(count, 1))
     values.initialize(repeating: value, count: max(count, 1))
   }
@@ -441,7 +444,7 @@ final class Fleet {
   let snapshot: MTLComputePipelineState
   let gpu: GPU
   let groups: [Group]
-  let resources: [MTLBuffer]
+  let resources: [[MTLBuffer]]
   let environment: EnvironmentStorage
   let common: [(Int, MTLBuffer)]
   let kinds: MTLBuffer
@@ -499,7 +502,9 @@ final class Fleet {
       groups = [try Group(gpu, policy: policy, kind: nil, count: seeds.count)]
       if policy == "ppo" { strides = table.ppoStrides }
     }
-    resources = strides.map { SharedBuffer<Float>(device, seeds.count * $0, 0).buffer }
+    resources = groups.map { group in
+      strides.map { SharedBuffer<Float>(device, group.count * $0, 0).buffer }
+    }
   }
 
   func encode(
@@ -507,9 +512,8 @@ final class Fleet {
     pipeline: MTLComputePipelineState
   ) {
     encoder.setComputePipelineState(pipeline)
-    for (index, buffer) in resources.enumerated() {
-      let offset = group.first * (buffer.length / count)
-      encoder.setBuffer(buffer, offset: offset, index: index)
+    for (index, buffer) in resources[group.first / group.count].enumerated() {
+      encoder.setBuffer(buffer, offset: 0, index: index)
     }
     for (index, buffer) in common {
       encoder.setBuffer(buffer, offset: 0, index: index)
@@ -747,13 +751,13 @@ func main() throws {
   let gpu = try GPU()
   let table = try EnvironmentTable(gpu)
   let codecs = RecordCodec.byKind(table.specs)
-  let presets = gpu.library.functionNames.filter { $0.hasPrefix("oak_preset_") }
-  guard presets.count == 1 else { throw err("Metal library must declare one geometry preset") }
+  let geometries = gpu.library.functionNames.filter { $0.hasPrefix("oak_geometry_") }
+  guard geometries.count == 1 else { throw err("Metal library must declare one geometry") }
   let fleet = try Fleet(gpu, table: table, policy: policy, steps: steps)
   let recording = try Recording(root: root, fleet: fleet, codecs: codecs)
   var metadata: [String: Any] = [
     "batch": fleet.count, "steps": steps, "policy": policy,
-    "preset": String(presets[0].dropFirst("oak_preset_".count)),
+    "geometry": String(geometries[0].dropFirst("oak_geometry_".count)),
     "startedAt": ISO8601DateFormatter().string(from: Date()),
     "seeds": schedule.flatMap { $0.1..<($0.1 + seedsPerEnvironment) },
     "envSchedule": schedule.map {
