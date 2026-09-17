@@ -33,8 +33,6 @@
 
 #define OAK_CANDIDATES_PER_SLOT OAK_CANDIDATES
 #define OAK_TRACE_LEVELS OAK_TRACES
-#define OAK_TILE_LAST (OAK_CANDIDATES_PER_SLOT - 1u)
-#define OAK_JOINT_ROWS (OAK_TILE_LAST / 2u)
 #define OAK_TILE_HALF (0.5f * (float)OAK_CANDIDATES_PER_SLOT)
 #define OAK_ACTION_PARAMS (2u * OAK_ENV_ACT_MAX)
 #define OAK_POLICY_MAX 3u
@@ -48,11 +46,10 @@
 #define OAK_OPTION_UPDATES OAK_UPDATES
 #define OAK_FEATURE_TIMESCALE (OAK_PERCEPT_COUNT * (1u + OAK_CANDIDATES_PER_SLOT))
 #define OAK_TRACKING_RATE (1.0f / (float)OAK_FEATURE_TIMESCALE)
+#define OAK_VALUE_STEP (1.0f / (float)(2u*OAK_PERCEPT_COUNT))
+#define OAK_HEAD_STEP (1.0f / (float)OAK_ACTIVE_CAPACITY)
 #ifndef OAK_ACTOR_ALPHA_DENOM
 #define OAK_ACTOR_ALPHA_DENOM ((float)(OAK_ACTION_PARAMS * OAK_OPTION_COUNT))
-#endif
-#ifndef OAK_META_RATE
-#define OAK_META_RATE (OAK_TRACKING_RATE / (float)(OAK_FEATURE_TIMESCALE + OAK_ACTION_PARAMS))
 #endif
 #define OAK_FEATURE_STATES (2u * OAK_FEATURE_CAPACITY)
 #define OAK_POLICY_BANK (OAK_OPTION_COUNT * OAK_POLICY_MAX)
@@ -62,15 +59,12 @@
 #define FEATURE_NORMALIZED_SUM 1u
 #define FEATURE_OBSERVATION_TIMESCALE 3u
 
-typedef struct { float x, y, z, w; } f4;
-
 typedef struct {
     float policy[OAK_POLICY_MAX];
 } __attribute__((aligned(16))) Record;
 
 typedef struct {
-    struct { float weight; f4 meta; uint32_t age; float utility; }
-        __attribute__((aligned(32))) value[OAK_FEATURE_CAPACITY];
+    struct { float weight; float utility; } value[OAK_FEATURE_CAPACITY];
     Record option[OAK_FEATURE_CAPACITY * OAK_OPTION_COUNT];
 } AgentParameters;
 
@@ -78,7 +72,6 @@ typedef struct {
     float observation[OAK_OBSERVATION_CAPACITY];
     float observationMean[OAK_OBSERVATION_CAPACITY];
     float observationSecondMoment[OAK_OBSERVATION_CAPACITY];
-    f4 observationMeta[OAK_OBSERVATION_CAPACITY];
     float features[OAK_FEATURE_STATES];
     float activeValue[OAK_ACTIVE_STATES];
     float policyMeanRaw[OAK_POLICY_MAX];
@@ -91,11 +84,9 @@ typedef struct {
     float featureSecondMoment[OAK_FEATURE_CAPACITY];
     float actorAdvantage[OAK_OPTION_COUNT];
     float observationTimescale[OAK_TRACE_LEVELS * OAK_OBSERVATION_CAPACITY];
-    float rewardCenter;
     float valueScale;
     float previousFeatureNormSq;
     float optionAverageReward[OAK_OPTION_COUNT];
-    f4 actorMeta[OAK_OPTION_COUNT];
     float importanceStaging[OAK_OPTION_COUNT];
     float actorCreditStaging[OAK_POLICY_BANK];
     float optionLogit[OAK_POLICY_BANK];
@@ -120,7 +111,7 @@ void constructFeatures(Agent);
 void predictAndControl(Agent);
 void planAllOptions(Agent);
 void learnFromTransition(Agent, uint32_t);
-void oakInit(Agent, uint32_t, float, float, float);
+void oakInit(Agent, uint32_t, float);
 uint32_t oakSampleDiscrete(Agent, uint32_t, const uint32_t*);
 void oakActionModelLearn(Agent, float);
 void oakActionModelRemember(Agent, uint32_t);

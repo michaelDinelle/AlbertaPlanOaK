@@ -25,8 +25,7 @@ int main(int argc, char **argv){
     AgentIndices    *I = calloc(1,sizeof(AgentIndices));
     Agent a; a.observationCount=12u; a.envActionCount=3u; a.stepCount=0u; a.stateSlot=0u;
     a.parameters=P; a.memory=M; a.indices=I;
-    float alpha = 1.0f/(float)(2u*OAK_PERCEPT_COUNT);
-    oakInit(a, seed, alpha, logf(alpha), 1.0f/3.0f);
+    oakInit(a, seed, 1.0f/3.0f);
 
     int px=0,py=0,hd=0,moved=0;
     double total=0.0; long good=0,bad=0,fwd=0;
