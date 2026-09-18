@@ -21,14 +21,11 @@ int main(int argc, char **argv){
     jbw_buildResponse(resp);
     size_t cap=(size_t)STEPS*JBW_BLOCK_ITEMS*2u/((size_t)JBW_BLOCK*JBW_BLOCK)+2u, slots=2u; while(slots<cap) slots<<=1;
     uint32_t hmask=(uint32_t)(slots-1u); uint32_t *hist=calloc(slots,3u*sizeof(uint32_t));
-    AgentParameters *P = calloc(1,sizeof(AgentParameters));
     AgentMemory     *M = calloc(1,sizeof(AgentMemory));
-    AgentIndices    *I = calloc(1,sizeof(AgentIndices));
-    Agent a; a.observationCount=12u; a.envActionCount=3u; a.stepCount=0u; a.stateSlot=0u;
-    a.parameters=P; a.memory=M; a.indices=I;
-    oakInit(a, seed, 1.0f/3.0f);
+    Agent a; a.observationCount=12u; a.envActionCount=3u; a.memory=M;
+    oakInit(a);
 
-    int px=0,py=0,hd=0,moved=0;
+    int px=0,py=0,hd=0,moved=0; long drought=0,record=0;
     double total=0.0; long good=0,bad=0,fwd=0,mv=0;
     double segR[8]={0}; long segN[8]={0};
 
@@ -49,9 +46,6 @@ int main(int argc, char **argv){
             M->observation[8]=sc[0]; M->observation[9]=sc[1]; M->observation[10]=sc[2];
             M->observation[11]=(float)moved;
             constructFeatures(a);
-            predictAndControl(a);
-            a.stepCount += 1u;
-            a.stateSlot ^= 1u;
             oakActionModelBiasScaleFree(a);
             u4 r0=philox4x32(seed,2u,(u4){(uint32_t)t,0,0,0});
             uint32_t w[3]={r0.x,r0.y,r0.z};
@@ -61,7 +55,7 @@ int main(int argc, char **argv){
             uint32_t good = sign>0?JBW_JELLY:JBW_ONION, bad = sign>0?JBW_ONION:JBW_JELLY;
             u4 rr = philox4x32(seed,2u,(u4){(uint32_t)t,7,0,0});
             uint32_t ahead = view[0];
-            if (policy == 0) action = rr.x%3u;
+            if (policy == 0 || drought > record) action = rr.x%3u;
             else if (ahead == good) action = 0u;
             else if (ahead == bad || ahead == JBW_WALL || ahead == JBW_TREE) action = 1u+(rr.x&1u);
             else {
@@ -83,6 +77,7 @@ int main(int argc, char **argv){
                 if (it==JBW_JELLY) reward=sign; else if (it==JBW_ONION) reward=-sign;
             }
         }
+        if (reward!=0.0f){ if(drought>record) record=drought; drought=0; } else drought++;
         if (policy < 0) oakActionModelLearn(a, reward);
 
         if (action==0u) fwd++;
@@ -91,7 +86,6 @@ int main(int argc, char **argv){
         { int sg=(int)(t*8/STEPS); if(sg>7)sg=7; segR[sg]+=reward; segN[sg]++; }
         if (reward>0) good++; else if (reward<0) bad++;
 
-        if (policy < 0) learnFromTransition(a, 1u - a.stateSlot);
     }
 
     printf("  by eighth    ");
