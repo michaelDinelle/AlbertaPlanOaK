@@ -56,11 +56,13 @@ When a rule drifts from the cited research, fix the rule — never preserve folk
 `Simulator/./oak` runs the whole fleet itself — seeds 101-108 forked from one process, sharing the response table copy-on-write — and prints mean and worst at every rung `1M · 4^k` that fits in `STEPS`. A short run is bitwise identical to that prefix of a long one, so a single run yields the entire ladder; never build one horizon at a time. `./oak` is the agent, `./oak 0` random, `./oak 1` the hand reactive ceiling.
 
 ```
-STEPS=16000000 ./build.sh && ./oak      # screen: 1M, 4M, 16M in ~6s
+STEPS=16000000 ./build.sh && ./oak      # screen: 1M, 4M, 16M
 STEPS=256000000 ./build.sh && ./oak     # confirm: adds 64M and 256M
 ```
 
 **Screen at 16M, never at 1M.** Measured over seven candidates, 16M reproduces the 256M ranking to within adjacent swaps while 1M inverts it — at 1M the agent is still on its learning curve, so the mean measures convergence speed, not skill, and mechanisms trade one against the other. Confirm survivors at 256M before believing them; the simulator screens hypotheses and decides nothing (rule 16).
+
+Every run reports throughput, so the speed gate costs nothing extra — currently **2.88M SPS per lane, 23.0M SPS across the eight**. A single run's wall time varies 1-2%, so gate anything under ~3% with interleaved repetitions instead. The environment is 47% of the step and the agent 53% (compare `./oak 0`, which skips the agent), so agent-side speed work caps out near 2x however much is deleted.
 
 Snapshot candidates with `git show HEAD:Simulator/agent.c`, never by copying the working tree — a dirty tree silently yields a mislabelled baseline.
 

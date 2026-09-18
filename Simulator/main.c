@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <time.h>
 #include <unistd.h>
 #include <sys/mman.h>
 #include <sys/wait.h>
@@ -79,19 +80,18 @@ static void runSeed(uint32_t seed, int policy, const float *resp, Result *out){
 }
 
 int main(int argc, char **argv){
-    int policy = argc>1 ? atoi(argv[1]) : -1;
+    int policy = argc>1 ? atoi(argv[1]) : -1; struct timespec c0,c1;
     float *resp = malloc(sizeof(float)*(size_t)JBW_RESPONSE_CELLS*JBW_DESTRUCTION_LIFETIME);
     jbw_buildResponse(resp);
-    Result *res = mmap(NULL, SEEDS*sizeof(Result), PROT_READ|PROT_WRITE, MAP_SHARED|MAP_ANON, -1, 0);
+    Result *res = mmap(NULL, SEEDS*sizeof(Result), PROT_READ|PROT_WRITE, MAP_SHARED|MAP_ANON, -1, 0); clock_gettime(CLOCK_MONOTONIC,&c0);
     for (int i=0;i<SEEDS;i++) if (fork()==0){ runSeed(101u+(uint32_t)i, policy, resp, &res[i]); _exit(0); }
-    while (wait(NULL) > 0);
+    while (wait(NULL) > 0) {} clock_gettime(CLOCK_MONOTONIC,&c1);
     long g=0,b=0,f=0,m=0; for(int i=0;i<SEEDS;i++){ g+=res[i].good; b+=res[i].bad; f+=res[i].fwd; m+=res[i].mv; }
     for (int k=0;k<RUNGS && RUNG[k]<=(long)STEPS;k++){
-        double s=0,w=res[0].rung[k];
-        for(int i=0;i<SEEDS;i++){ s+=res[i].rung[k]; if(res[i].rung[k]<w) w=res[i].rung[k]; }
+        double s=0,w=res[0].rung[k]; for(int i=0;i<SEEDS;i++){ s+=res[i].rung[k]; if(res[i].rung[k]<w) w=res[i].rung[k]; }
         printf("  %4ldM  mean %+.9f  worst %+.9f\n", RUNG[k]/1000000L, s/SEEDS, w);
     }
-    printf("  eaten %ld good / %ld bad (%.1f%% correct)   %%forward %.1f%%   moves/step %.4f\n",
-           g,b,(g+b)?100.0*g/(g+b):0.0, 100.0*f/((double)STEPS*SEEDS), (double)m/((double)STEPS*SEEDS));
+    double sec=(c1.tv_sec-c0.tv_sec)+1e-9*(c1.tv_nsec-c0.tv_nsec);
+    printf("  eaten %ld good / %ld bad (%.1f%% correct)   %%forward %.1f%%   moves/step %.4f   %.2fM SPS/lane   %.1fM SPS\n", g,b,(g+b)?100.0*g/(g+b):0.0, 100.0*f/((double)STEPS*SEEDS), (double)m/((double)STEPS*SEEDS), STEPS/sec/1e6, (double)STEPS*SEEDS/sec/1e6);
     return 0;
 }
