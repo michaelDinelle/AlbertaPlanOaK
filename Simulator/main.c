@@ -1,34 +1,28 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
-#include <math.h>
-#include <float.h>
+#include <unistd.h>
+#include <sys/mman.h>
+#include <sys/wait.h>
 #include "jbw.h"
 #include "agent.h"
 
 #ifndef STEPS
 #define STEPS 1000000
 #endif
-#define EPOCH 100000
+#define SEEDS 8
+#define RUNGS 5
 
 static const int FW[4][2]={{0,-1},{1,0},{0,1},{-1,0}};
 static const int D8[8][2]={{0,-1},{1,-1},{1,0},{1,1},{0,1},{-1,1},{-1,0},{-1,-1}};
+static const long RUNG[RUNGS]={1000000L,4000000L,16000000L,64000000L,256000000L};
+typedef struct { double rung[RUNGS]; long good,bad,fwd,mv; } Result;
 
-int main(int argc, char **argv){
-    uint32_t seed = (uint32_t)(argc>1?atoi(argv[1]):1);
-    int policy = argc>2 ? atoi(argv[2]) : -1;
-    float *resp = malloc(sizeof(float)*(size_t)JBW_RESPONSE_CELLS*JBW_DESTRUCTION_LIFETIME);
-    jbw_buildResponse(resp);
+static void runSeed(uint32_t seed, int policy, const float *resp, Result *out){
     size_t cap=(size_t)STEPS*JBW_BLOCK_ITEMS*2u/((size_t)JBW_BLOCK*JBW_BLOCK)+2u, slots=2u; while(slots<cap) slots<<=1;
     uint32_t hmask=(uint32_t)(slots-1u); uint32_t *hist=calloc(slots,3u*sizeof(uint32_t));
-    AgentMemory     *M = calloc(1,sizeof(AgentMemory));
-    Agent a; a.observationCount=12u; a.envActionCount=3u; a.memory=M;
-    oakInit(a);
-
-    int px=0,py=0,hd=0,moved=0; long drought=0,record=0;
-    double total=0.0; long good=0,bad=0,fwd=0,mv=0;
-    double segR[8]={0}; long segN[8]={0};
-
+    AgentMemory *M = calloc(1,sizeof(AgentMemory));
+    Agent a; a.observationCount=12u; a.envActionCount=3u; a.memory=M; oakInit(a);
+    int px=0,py=0,hd=0,moved=0,rk=0; long drought=0,record=0; double total=0.0;
     for (long t=0;t<STEPS;t++){
         uint32_t view[8], fwdItem=JBW_EMPTY, fwdDel=0u;
         for (int i=0;i<8;i++){
@@ -38,9 +32,8 @@ int main(int argc, char **argv){
             view[i] = del!=0u ? JBW_EMPTY : it;
         }
         float sc[3]; jbw_scentAt(seed,px,py,(uint32_t)t,hist,hmask,resp,sc);
-        float sign = ((t/EPOCH)&1)==0 ? 1.0f : -1.0f;
+        float sign = ((t/100000L)&1)==0 ? 1.0f : -1.0f;
         uint32_t action;
-
         if (policy < 0){
             for (int i=0;i<8;i++) M->observation[i] = JBW_ENERGY[view[i]];
             M->observation[8]=sc[0]; M->observation[9]=sc[1]; M->observation[10]=sc[2];
@@ -65,7 +58,6 @@ int main(int argc, char **argv){
                        : (seen>=3 && seen<=5) ? ((seen<5)?2u:1u) : 0u;
             }
         }
-
         int tx=px+FW[hd][0], ty=py+FW[hd][1]; uint32_t it=fwdItem;
         float reward=0.0f; moved=0;
         if (action==1u) hd=(hd+3)&3;
@@ -79,20 +71,27 @@ int main(int argc, char **argv){
         }
         if (reward!=0.0f){ if(drought>record) record=drought; drought=0; } else drought++;
         if (policy < 0) oakActionModelLearn(a, reward);
-
-        if (action==0u) fwd++;
-        mv += moved;
-        total += reward;
-        { int sg=(int)(t*8/STEPS); if(sg>7)sg=7; segR[sg]+=reward; segN[sg]++; }
-        if (reward>0) good++; else if (reward<0) bad++;
-
+        if (action==0u) out->fwd++;
+        out->mv += moved; total += reward;
+        if (reward>0) out->good++; else if (reward<0) out->bad++;
+        if (rk<RUNGS && t+1==RUNG[rk]){ out->rung[rk]=total/(double)RUNG[rk]; rk++; }
     }
+}
 
-    printf("  by eighth    ");
-    for(int i=0;i<8;i++) printf(" %+.6f", segN[i]?segR[i]/segN[i]:0.0);
-    printf("\n  mean reward   %+.17g\n", total/(double)STEPS);
-    printf("  eaten         %ld good / %ld bad  (%.1f%% correct)\n",
-           good,bad,(good+bad)?100.0*good/(good+bad):0.0);
-    printf("  %%forward      %.1f%%\n  moves/step    %.4f\n", 100.0*fwd/STEPS, (double)mv/STEPS);
+int main(int argc, char **argv){
+    int policy = argc>1 ? atoi(argv[1]) : -1;
+    float *resp = malloc(sizeof(float)*(size_t)JBW_RESPONSE_CELLS*JBW_DESTRUCTION_LIFETIME);
+    jbw_buildResponse(resp);
+    Result *res = mmap(NULL, SEEDS*sizeof(Result), PROT_READ|PROT_WRITE, MAP_SHARED|MAP_ANON, -1, 0);
+    for (int i=0;i<SEEDS;i++) if (fork()==0){ runSeed(101u+(uint32_t)i, policy, resp, &res[i]); _exit(0); }
+    while (wait(NULL) > 0);
+    long g=0,b=0,f=0,m=0; for(int i=0;i<SEEDS;i++){ g+=res[i].good; b+=res[i].bad; f+=res[i].fwd; m+=res[i].mv; }
+    for (int k=0;k<RUNGS && RUNG[k]<=(long)STEPS;k++){
+        double s=0,w=res[0].rung[k];
+        for(int i=0;i<SEEDS;i++){ s+=res[i].rung[k]; if(res[i].rung[k]<w) w=res[i].rung[k]; }
+        printf("  %4ldM  mean %+.9f  worst %+.9f\n", RUNG[k]/1000000L, s/SEEDS, w);
+    }
+    printf("  eaten %ld good / %ld bad (%.1f%% correct)   %%forward %.1f%%   moves/step %.4f\n",
+           g,b,(g+b)?100.0*g/(g+b):0.0, 100.0*f/((double)STEPS*SEEDS), (double)m/((double)STEPS*SEEDS));
     return 0;
 }

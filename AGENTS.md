@@ -51,6 +51,19 @@ When a rule drifts from the cited research, fix the rule — never preserve folk
 16. **Never opt out of a recording.** `./run.py` is the only way to exercise a change: it builds at the declared geometry, records the `oak` candidate at the pinned schedule and horizon, reuses matching `ppo` and `random` baselines, and gates against that geometry's own reference — adopting one when the geometry has none yet. Never hand-roll a benchmark request to OaK to check whether something worked, never point a run root outside `.oak-benchmarks/`, and never let a scratch run, a decoded pose tape, a rebuilt older tree, or a reference simulator stand in for the recording. A scratch run is not a smaller gate; it is no gate. When the harness itself is broken, fix the harness and rerun the gate — never route around it. The single exception is the timing instruments under Performance, which are wall-clock probes and make no claim about behaviour or reward.
 17. **Never push without the user's explicit approval in that turn.** Benchmark recordings stay local and are ignored by Git. Nothing uploads them.
 
+## Measuring in the simulator
+
+`Simulator/./oak` runs the whole fleet itself — seeds 101-108 forked from one process, sharing the response table copy-on-write — and prints mean and worst at every rung `1M · 4^k` that fits in `STEPS`. A short run is bitwise identical to that prefix of a long one, so a single run yields the entire ladder; never build one horizon at a time. `./oak` is the agent, `./oak 0` random, `./oak 1` the hand reactive ceiling.
+
+```
+STEPS=16000000 ./build.sh && ./oak      # screen: 1M, 4M, 16M in ~6s
+STEPS=256000000 ./build.sh && ./oak     # confirm: adds 64M and 256M
+```
+
+**Screen at 16M, never at 1M.** Measured over seven candidates, 16M reproduces the 256M ranking to within adjacent swaps while 1M inverts it — at 1M the agent is still on its learning curve, so the mean measures convergence speed, not skill, and mechanisms trade one against the other. Confirm survivors at 256M before believing them; the simulator screens hypotheses and decides nothing (rule 16).
+
+Snapshot candidates with `git show HEAD:Simulator/agent.c`, never by copying the working tree — a dirty tree silently yields a mislabelled baseline.
+
 ## Performance: profiling (HEADLESS — verified 2026-07-04)
 
 The repo template records without the Instruments GUI. Never trace (or rebuild the metallib) while a fleet run is in flight.
