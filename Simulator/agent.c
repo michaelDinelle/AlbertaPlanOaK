@@ -47,12 +47,12 @@ static uint32_t encodeSymbol(uint32_t o, float x){
     if (n == OAK_SYMBOLS) return OAK_SYMBOLS;
     g_symbolValue[o][n] = x; g_symbolCount[o] = n + 1u; return n;
 }
+static uint32_t g_livePercepts, g_activeCount;
 static uint32_t g_prevAct;
 static int   g_havePrevAct;
 
 typedef struct { uint16_t pa, pb, kind; } CVPlan;
 static CVPlan g_cv[OAK_FEATURE_CAPACITY];
-static float g_constructed[OAK_FEATURE_CAPACITY];
 static uint16_t g_live[OAK_FEATURE_CAPACITY], g_liveAt[OAK_FEATURE_CAPACITY];
 static uint32_t g_liveCount;
 static float g_invAge[OAK_FEATURE_TIMESCALE];
@@ -102,6 +102,7 @@ void constructFeatures(Agent a){
     uint32_t *currentActive = activeFeatures(a, 1u - a.stateSlot);
     float *currentActiveValue = activeValues(a, 1u - a.stateSlot);
 
+    uint32_t live = 0u;
     for (uint32_t i = 0u; i < OAK_PERCEPT_COUNT; ++i){
         float x;
         if (i < a.observationCount) x = standardized[i];
@@ -111,9 +112,10 @@ void constructFeatures(Agent a){
         else x = 0.0f;
         x = finiteOrZero(x);
         currentFeatures[i] = x;
-        currentActive[i] = i;
-        currentActiveValue[i] = x;
+        if (i < a.observationCount + a.envActionCount || i - (a.observationCount + OAK_ACTION_PARAMS) < 2u){
+            currentActive[live] = i; currentActiveValue[live] = x; ++live; }
     }
+    g_livePercepts = live; g_activeCount = live + OAK_CONSTRUCTED_SLOTS;
 
     for (uint32_t o = 0u; o < a.observationCount; ++o) g_symbol[o] = encodeSymbol(o, a.memory->observation[o]);
     uint32_t winners[OAK_CONSTRUCTED_SLOTS];
@@ -124,7 +126,6 @@ void constructFeatures(Agent a){
     for (uint32_t n = 0u; n < g_liveCount; ++n){
         uint32_t i = g_live[n];
         float value = constructedFrom(a, previousFeatures, g_cv[i]);
-        g_constructed[i] = value;
         float rate = a.indices->featureRate[i];
         float mean = a.memory->featureMean[i], second = a.memory->featureSecondMoment[i];
         a.memory->featureMean[i] = mean + rate * (value - mean);
@@ -134,7 +135,6 @@ void constructFeatures(Agent a){
         uint32_t winner = winners[s];
         if (!a.indices->featureAge[winner]){
             float value = constructedFrom(a, previousFeatures, g_cv[winner]);
-            g_constructed[winner] = value;
             a.memory->featureMean[winner] = value;
             a.memory->featureSecondMoment[winner] = value*value;
             g_liveAt[winner] = (uint16_t)(g_liveCount + 1u);
@@ -142,13 +142,13 @@ void constructFeatures(Agent a){
         }
         float mean = a.memory->featureMean[winner], second = a.memory->featureSecondMoment[winner];
         float var = second - mean*mean; if (var < 0.0f) var = 0.0f;
-        currentFeatures[currentActive[OAK_PERCEPT_COUNT + s]] = 0.0f;
+        currentFeatures[currentActive[g_livePercepts + s]] = 0.0f;
         uint32_t ridgeAge = a.indices->featureAge[winner], ridgeCap = 2u*OAK_PERCEPT_COUNT - 1u;
-        float standardized = finiteOrZero((g_constructed[winner] - mean)
+        float standardized = finiteOrZero((constructedFrom(a, previousFeatures, g_cv[winner]) - mean)
                            * rsqrtf_(var + g_invAge[ridgeAge < ridgeCap ? ridgeAge : ridgeCap]));
         currentFeatures[winner] = standardized;
-        currentActive[OAK_PERCEPT_COUNT + s] = winner;
-        currentActiveValue[OAK_PERCEPT_COUNT + s] = standardized;
+        currentActive[g_livePercepts + s] = winner;
+        currentActiveValue[g_livePercepts + s] = standardized;
         if (a.indices->featureAge[winner] < 0xffffffffu) a.indices->featureAge[winner] += 1u;
         a.indices->featureRate[winner] = trackingRate(a.indices->featureAge[winner]);
     }
@@ -161,7 +161,7 @@ void predictAndControl(Agent a){
     const float *currentActiveValue = activeValues(a, 1u - a.stateSlot);
     float previousValue=0.0f, currentValue=0.0f;
     float valueStepDenominator=1.0f, previousFeatureNormSq=0.0f;
-    for (uint32_t i = 0u; i < OAK_ACTIVE_CAPACITY; ++i){
+    for (uint32_t i = 0u; i < g_activeCount; ++i){
         uint32_t pi = previousActive[i], ci = currentActive[i];
         float pa = previousActiveValue[i], ca = currentActiveValue[i];
         previousValue = fmaf(a.parameters->value[pi].weight, pa, previousValue);
@@ -179,7 +179,7 @@ void predictAndControl(Agent a){
     for (uint32_t k = 0u; k < OAK_OPTION_UPDATES; ++k){
         float policyLogit[OAK_POLICY_MAX];
         for (uint32_t j=0u;j<OAK_POLICY_MAX;++j) policyLogit[j]=0.0f;
-        for (uint32_t idx = 0u; idx < OAK_ACTIVE_CAPACITY; ++idx){
+        for (uint32_t idx = 0u; idx < g_activeCount; ++idx){
             float ca = currentActiveValue[idx];
             if (ca == 0.0f) continue;
             const Record *rc = optionRecord(a, currentActive[idx], k);
@@ -248,7 +248,7 @@ void learnFromTransition(Agent a, uint32_t previousSlot){
             actorCoefficient[k][d] = finiteOrZero(actorAlpha*advantage*gradScale*scale);
         }
     }
-    for (uint32_t idx=0u; idx<OAK_ACTIVE_CAPACITY; ++idx){
+    for (uint32_t idx=0u; idx<g_activeCount; ++idx){
         uint32_t i = previousActive[idx];
         float x = previousActiveValue[idx];
         if (x != 0.0f || currentFeatures[i] != 0.0f)
@@ -262,7 +262,7 @@ void learnFromTransition(Agent a, uint32_t previousSlot){
         float w = a.parameters->value[i].weight;
         float updated = keepFinite(w, w + OAK_VALUE_STEP*a.memory->td*x*a.memory->valueScale);
         a.parameters->value[i].weight = updated;
-        if (idx >= OAK_PERCEPT_COUNT){ float utility = a.parameters->value[i].utility;
+        if (idx >= g_livePercepts){ float utility = a.parameters->value[i].utility;
         a.parameters->value[i].utility = keepFinite(utility,
             utility + OAK_TRACKING_RATE * (fabsf(updated*x) - utility)); }
     }
@@ -302,7 +302,7 @@ uint32_t oakSampleDiscrete(Agent a, uint32_t discreteActionCount, const uint32_t
     uint32_t sampledAction = 0u;
     float bestGumbelScore = -FLT_MAX;
     for (uint32_t d=0u; d<discreteActionCount; ++d){
-        float u = ((float)(words[d & 7u] >> 8) + 1.0f) * 0x1p-24f;
+        float u = ((float)(words[d] >> 8) + 1.0f) * 0x1p-24f;
         if (u > 0x1.fffffep-1f) u = 0x1.fffffep-1f;
         float g = logit[d] - logf(-logf(u));
         if (g > bestGumbelScore){ bestGumbelScore = g; sampledAction = d; }

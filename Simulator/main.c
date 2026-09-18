@@ -53,9 +53,8 @@ int main(int argc, char **argv){
             a.stepCount += 1u;
             a.stateSlot ^= 1u;
             oakActionModelBiasScaleFree(a);
-            uint32_t w[8];
-            u4 r0=philox4x32(seed,2u,(u4){(uint32_t)t,0,0,0}), r1=philox4x32(seed,2u,(u4){(uint32_t)t,1,0,0});
-            w[0]=r0.x;w[1]=r0.y;w[2]=r0.z;w[3]=r0.w;w[4]=r1.x;w[5]=r1.y;w[6]=r1.z;w[7]=r1.w;
+            u4 r0=philox4x32(seed,2u,(u4){(uint32_t)t,0,0,0});
+            uint32_t w[3]={r0.x,r0.y,r0.z};
             action = oakSampleDiscrete(a, 3u, w);
             oakActionModelRemember(a, action);
         } else {
