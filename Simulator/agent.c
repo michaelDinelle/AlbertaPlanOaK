@@ -11,12 +11,12 @@ typedef struct { float reward, effect; } Predict;
 static Predict g_model[OAK_SYMBOLS][OAK_POLICY_MAX][OAK_OBSERVATION_CAPACITY][OAK_SYMBOLS];
 static uint32_t g_mem;
 static float g_actMean[OAK_POLICY_MAX][OAK_OBSERVATION_CAPACITY], g_chMean[OAK_OBSERVATION_CAPACITY], g_chSq[OAK_OBSERVATION_CAPACITY];
-static float g_context = 1.0f, g_canonical[OAK_SYMBOLS];
-static uint32_t g_stale, g_gate;
+static float g_context = 1.0f, g_canonical[OAK_SYMBOLS], g_moveValue;
+static uint32_t g_stale, g_gate, g_banks;
 static uint32_t encodeSymbol(uint32_t o, float x){
     uint32_t n = g_symbolCount[o];
-    for (uint32_t c = 0u; c < n; ++c) if (x == g_symbolValue[o][c]) return c;
     if (n == OAK_SYMBOLS) return OAK_SYMBOLS;
+    for (uint32_t c = 0u; c < n; ++c) if (x == g_symbolValue[o][c]) return c;
     g_symbolValue[o][n] = x; g_symbolCount[o] = n + 1u; return n;
 }
 static uint32_t convertSymbol(uint32_t from, uint32_t c, uint32_t to){
@@ -60,9 +60,6 @@ uint32_t oakSampleDiscrete(Agent a, uint32_t discreteActionCount, const uint32_t
     return sampledAction;
 }
 
-
-
-
 void oakActionModelLearn(Agent a, float reward){
     g_stale++;
     if (reward != 0.0f){
@@ -72,7 +69,7 @@ void oakActionModelLearn(Agent a, float reward){
             float spread = 0.0f;
             for (uint32_t d = 0u; d < a.envActionCount; ++d)
                 for (uint32_t c = 0u; c < g_symbolCount[o]; ++c)
-                    for (uint32_t m = 0u; m < OAK_SYMBOLS; ++m) spread += g_model[m][d][o][c].reward*g_model[m][d][o][c].reward;
+                    for (uint32_t m = 0u; m < g_banks; ++m) spread += g_model[m][d][o][c].reward*g_model[m][d][o][c].reward;
             if (spread > bestGate){ bestGate = spread; g_gate = o; }
         }
         if (g_symbol[g_gate] < OAK_SYMBOLS){
@@ -84,6 +81,7 @@ void oakActionModelLearn(Agent a, float reward){
         }
     }
     a.memory->reward = finiteOrZero(reward / g_context);
+    g_moveValue += OAK_TRACKING_RATE*(a.memory->reward - g_moveValue);
     if (g_haveAlign){
         uint32_t d = g_alignAct;
         for (uint32_t o = 0u; o < a.observationCount; ++o){
@@ -114,7 +112,7 @@ void oakActionModelLearn(Agent a, float reward){
             Predict *e = &g_model[g_mem][g_alignAct][o][g_prevSymbol[o]];
             e->effect = keepFinite(e->effect, e->effect + OAK_TRACKING_RATE*(a.memory->observation[ind] - e->effect));
         }
-    g_mem = (g_prevSymbol[ind] < OAK_SYMBOLS) ? g_prevSymbol[ind] : 0u;
+    g_mem = (g_prevSymbol[ind] < OAK_SYMBOLS) ? g_prevSymbol[ind] : 0u; g_banks = g_symbolCount[ind];
     memcpy(g_prevSymbol, g_symbol, sizeof g_prevSymbol);
     g_alignAct = g_prevAct; g_haveAlign = g_havePrevAct;
     if (!g_havePrevAct) return;
@@ -141,7 +139,7 @@ void oakActionModelBiasScaleFree(Agent a){
                 reward += e.reward; effect *= e.effect; ++effectN; }
         }
         effect = (float)effectN*powf(effect, 1.0f/(float)effectN);
-        q[d] = finiteOrZero(g_context*(reward*effect + ahead));
+        q[d] = finiteOrZero(g_context*((reward + g_moveValue/(float)actionCount)*effect + ahead));
         qm += q[d]/(float)actionCount;
     }
     float qs=0.0f;
