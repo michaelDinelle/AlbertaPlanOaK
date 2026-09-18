@@ -85,10 +85,7 @@ int main(int argc, char **argv){
         if (action==0u && moved && jbw_destroyedAt(hist,JBW_HISTORY_MASK,px,py)==(uint32_t)t+1u){
             if (it==JBW_JELLY) reward=sign; else if (it==JBW_ONION) reward=-sign;
         }
-        if (policy < 0){
-            M->reward = reward;
-            oakActionModelLearn(a, reward);
-        }
+        if (policy < 0) oakActionModelLearn(a, reward);
 
         if (action==0u) fwd++;
         total += reward;
