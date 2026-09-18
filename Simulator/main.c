@@ -19,7 +19,8 @@ int main(int argc, char **argv){
     int policy = argc>2 ? atoi(argv[2]) : -1;
     float *resp = malloc(sizeof(float)*(size_t)JBW_RESPONSE_CELLS*JBW_DESTRUCTION_LIFETIME);
     jbw_buildResponse(resp);
-    uint32_t *hist = calloc(JBW_HISTORY_MASK+1u, 3u*sizeof(uint32_t));
+    size_t cap=(size_t)STEPS*JBW_BLOCK_ITEMS*2u/((size_t)JBW_BLOCK*JBW_BLOCK)+2u, slots=2u; while(slots<cap) slots<<=1;
+    uint32_t hmask=(uint32_t)(slots-1u); uint32_t *hist=calloc(slots,3u*sizeof(uint32_t));
     AgentParameters *P = calloc(1,sizeof(AgentParameters));
     AgentMemory     *M = calloc(1,sizeof(AgentMemory));
     AgentIndices    *I = calloc(1,sizeof(AgentIndices));
@@ -32,13 +33,14 @@ int main(int argc, char **argv){
     double segR[8]={0}; long segN[8]={0};
 
     for (long t=0;t<STEPS;t++){
-        uint32_t view[8];
+        uint32_t view[8], fwdItem=JBW_EMPTY, fwdDel=0u;
         for (int i=0;i<8;i++){
             int k=(2*hd+i)&7, qx=px+D8[k][0], qy=py+D8[k][1];
-            uint32_t it=jbw_itemAt(seed,qx,qy);
-            view[i] = (jbw_collectible(it) && jbw_destroyedAt(hist,JBW_HISTORY_MASK,qx,qy)!=0u) ? JBW_EMPTY : it;
+            uint32_t it=jbw_itemAt(seed,qx,qy), del=jbw_collectible(it)?jbw_destroyedAt(hist,hmask,qx,qy):0u;
+            if(!i){ fwdItem=it; fwdDel=del; }
+            view[i] = del!=0u ? JBW_EMPTY : it;
         }
-        float sc[3]; jbw_scentAt(seed,px,py,(uint32_t)t,hist,JBW_HISTORY_MASK,resp,sc);
+        float sc[3]; jbw_scentAt(seed,px,py,(uint32_t)t,hist,hmask,resp,sc);
         float sign = ((t/EPOCH)&1)==0 ? 1.0f : -1.0f;
         uint32_t action;
 
@@ -52,8 +54,7 @@ int main(int argc, char **argv){
             a.stateSlot ^= 1u;
             oakActionModelBiasScaleFree(a);
             uint32_t w[8];
-            u4 r0=philox4x32(seed,2u,(u4){(uint32_t)t,0,0,0});
-            u4 r1=philox4x32(seed,2u,(u4){(uint32_t)t,1,0,0});
+            u4 r0=philox4x32(seed,2u,(u4){(uint32_t)t,0,0,0}), r1=philox4x32(seed,2u,(u4){(uint32_t)t,1,0,0});
             w[0]=r0.x;w[1]=r0.y;w[2]=r0.z;w[3]=r0.w;w[4]=r1.x;w[5]=r1.y;w[6]=r1.z;w[7]=r1.w;
             action = oakSampleDiscrete(a, 3u, w);
             oakActionModelRemember(a, action);
@@ -72,15 +73,14 @@ int main(int argc, char **argv){
             }
         }
 
-        int tx=px+FW[hd][0], ty=py+FW[hd][1];
-        uint32_t it=jbw_itemAt(seed,tx,ty);
+        int tx=px+FW[hd][0], ty=py+FW[hd][1]; uint32_t it=fwdItem;
         float reward=0.0f; moved=0;
         if (action==1u) hd=(hd+3)&3;
         else if (action==2u) hd=(hd+1)&3;
         else if (!jbw_blocks(it)){
             px=tx; py=ty; moved=1;
-            if (jbw_collectible(it) && jbw_destroyedAt(hist,JBW_HISTORY_MASK,tx,ty)==0u){
-                jbw_destroy(hist,JBW_HISTORY_MASK,tx,ty,(uint32_t)t);
+            if (jbw_collectible(it) && fwdDel==0u){
+                jbw_destroy(hist,hmask,tx,ty,(uint32_t)t);
                 if (it==JBW_JELLY) reward=sign; else if (it==JBW_ONION) reward=-sign;
             }
         }
