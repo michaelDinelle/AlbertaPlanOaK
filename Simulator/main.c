@@ -28,7 +28,7 @@ int main(int argc, char **argv){
     oakInit(a, seed, 1.0f/3.0f);
 
     int px=0,py=0,hd=0,moved=0;
-    double total=0.0; long good=0,bad=0,fwd=0;
+    double total=0.0; long good=0,bad=0,fwd=0,mv=0;
     double segR[8]={0}; long segN[8]={0};
 
     for (long t=0;t<STEPS;t++){
@@ -87,6 +87,7 @@ int main(int argc, char **argv){
         if (policy < 0) oakActionModelLearn(a, reward);
 
         if (action==0u) fwd++;
+        mv += moved;
         total += reward;
         { int sg=(int)(t*8/STEPS); if(sg>7)sg=7; segR[sg]+=reward; segN[sg]++; }
         if (reward>0) good++; else if (reward<0) bad++;
@@ -99,6 +100,6 @@ int main(int argc, char **argv){
     printf("\n  mean reward   %+.17g\n", total/(double)STEPS);
     printf("  eaten         %ld good / %ld bad  (%.1f%% correct)\n",
            good,bad,(good+bad)?100.0*good/(good+bad):0.0);
-    printf("  %%forward      %.1f%%\n", 100.0*fwd/STEPS);
+    printf("  %%forward      %.1f%%\n  moves/step    %.4f\n", 100.0*fwd/STEPS, (double)mv/STEPS);
     return 0;
 }

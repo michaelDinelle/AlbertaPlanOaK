@@ -37,7 +37,8 @@ static float normalizedObservation(Agent a, uint32_t o){
 
 static float g_symbolValue[OAK_OBSERVATION_CAPACITY][OAK_SYMBOLS];
 static uint32_t g_symbolCount[OAK_OBSERVATION_CAPACITY], g_symbol[OAK_OBSERVATION_CAPACITY];
-static float g_immediate[OAK_POLICY_MAX][OAK_OBSERVATION_CAPACITY][OAK_SYMBOLS];
+typedef struct { float reward, effect; } Predict;
+static Predict g_model[OAK_POLICY_MAX][OAK_OBSERVATION_CAPACITY][OAK_SYMBOLS];
 static float g_context = 1.0f, g_canonical[OAK_SYMBOLS];
 static uint32_t g_stale, g_gate;
 static uint32_t encodeSymbol(uint32_t o, float x){
@@ -49,36 +50,29 @@ static uint32_t encodeSymbol(uint32_t o, float x){
 static uint32_t g_prevAct;
 static int   g_havePrevAct;
 
-static uint32_t g_traceMod;
-typedef struct { uint16_t pa, pb, kind, trace; } CVPlan;
+typedef struct { uint16_t pa, pb, kind; } CVPlan;
 static CVPlan g_cv[OAK_FEATURE_CAPACITY];
 static float g_constructed[OAK_FEATURE_CAPACITY];
 static uint16_t g_live[OAK_FEATURE_CAPACITY], g_liveAt[OAK_FEATURE_CAPACITY];
 static uint32_t g_liveCount;
 static float g_invAge[OAK_FEATURE_TIMESCALE];
-static float g_traceRate[OAK_TRACE_LEVELS + 1u];
 static inline float trackingRate(uint32_t age){
     uint32_t cap = OAK_FEATURE_TIMESCALE - 1u;
     return g_invAge[age < cap ? age : cap];
 }
 static void buildPlans(Agent a){
-    uint32_t traceChannels = OAK_TRACE_LEVELS*a.observationCount;
-    if (traceChannels < 1u) traceChannels = 1u;
     for (uint32_t i=0;i<OAK_FEATURE_CAPACITY;++i){
         uint32_t x=0u, y=0u, z=0u;
         if (i >= OAK_PERCEPT_COUNT){
             uint32_t source = i - OAK_PERCEPT_COUNT;
-            if (source < traceChannels){ x=source; z=3u; }
-            else { x=source % OAK_PERCEPT_COUNT; y=(source*7u+3u)%OAK_PERCEPT_COUNT; z=source % 3u; }
+            x=source % OAK_PERCEPT_COUNT; y=(source*7u+3u)%OAK_PERCEPT_COUNT; z=source % 3u;
         }
         g_cv[i].kind  = (uint16_t)(z % 4u);
-        g_cv[i].trace = (uint16_t)(x % g_traceMod);
         g_cv[i].pa    = (uint16_t)(x % OAK_FEATURE_CAPACITY);
         g_cv[i].pb    = (uint16_t)(y % OAK_FEATURE_CAPACITY);
     }
 }
 static inline float constructedFrom(Agent a, const float *features, CVPlan p){
-    if (p.kind == FEATURE_OBSERVATION_TIMESCALE) return a.memory->observationTimescale[p.trace];
     float x = features[p.pa], y = features[p.pb];
     return p.kind == FEATURE_PRODUCT ? x*y
          : p.kind == FEATURE_NORMALIZED_SUM ? (x+y)*0.7071067811865475f
@@ -86,7 +80,6 @@ static inline float constructedFrom(Agent a, const float *features, CVPlan p){
 }
 
 void constructFeatures(Agent a){
-    g_traceMod = OAK_TRACE_LEVELS * a.observationCount;
     if (a.stepCount == 0u) buildPlans(a);
     float standardized[OAK_OBSERVATION_CAPACITY];
     float stepRate = 1.0f/((float)a.stepCount + 1.0f);
@@ -98,16 +91,8 @@ void constructFeatures(Agent a){
             a.memory->observationMean[o] += obsRate * (x - observationMean);
             a.memory->observationSecondMoment[o] +=
                 obsRate * (x*x - a.memory->observationSecondMoment[o]);
-            standardized[o] = normalizedObservation(a, o);
-            for (uint32_t m = 1u; m <= OAK_TRACE_LEVELS; ++m){
-                uint32_t slot = (m-1u)*a.observationCount + o;
-                float rate = g_traceRate[m];
-                a.memory->observationTimescale[slot] +=
-                    rate * (standardized[o] - a.memory->observationTimescale[slot]);
-            }
-        } else {
-            standardized[o] = normalizedObservation(a, o);
         }
+        standardized[o] = normalizedObservation(a, o);
     }
     memcpy(a.memory->importance, a.memory->importanceStaging, sizeof a.memory->importance);
     memcpy(a.memory->optionActorCredit, a.memory->actorCreditStaging, sizeof a.memory->optionActorCredit);
@@ -123,16 +108,11 @@ void constructFeatures(Agent a){
         else if (i < a.observationCount + OAK_ACTION_PARAMS) x = a.memory->actionSignal[i - a.observationCount];
         else if (i == a.observationCount + OAK_ACTION_PARAMS) x = a.memory->reward;
         else if (i == a.observationCount + OAK_ACTION_PARAMS + 1u) x = 1.0f;
-        else {
-            uint32_t j = i - (a.observationCount + OAK_ACTION_PARAMS + 2u);
-            x = j < g_traceMod ? a.memory->observationTimescale[j] : 0.0f;
-        }
+        else x = 0.0f;
         x = finiteOrZero(x);
         currentFeatures[i] = x;
         currentActive[i] = i;
         currentActiveValue[i] = x;
-        if (a.indices->featureAge[i] < 0xffffffffu) a.indices->featureAge[i] += 1u;
-        a.indices->featureRate[i] = trackingRate(a.indices->featureAge[i]);
     }
 
     for (uint32_t o = 0u; o < a.observationCount; ++o) g_symbol[o] = encodeSymbol(o, a.memory->observation[o]);
@@ -237,7 +217,6 @@ static void replaceLeastUsefulFeature(Agent a){
 
     uint32_t draw = a.stepCount*2654435761u + worst*40503u + 977u;
     g_cv[worst].kind  = (uint16_t)(draw % 3u);
-    g_cv[worst].trace = (uint16_t)((draw >> 8u) % g_traceMod);
     g_cv[worst].pa    = (uint16_t)((draw >> 11u) % OAK_PERCEPT_COUNT);
     g_cv[worst].pb    = (uint16_t)((draw >> 19u) % OAK_PERCEPT_COUNT);
 
@@ -283,9 +262,9 @@ void learnFromTransition(Agent a, uint32_t previousSlot){
         float w = a.parameters->value[i].weight;
         float updated = keepFinite(w, w + OAK_VALUE_STEP*a.memory->td*x*a.memory->valueScale);
         a.parameters->value[i].weight = updated;
-        float utility = a.parameters->value[i].utility;
+        if (idx >= OAK_PERCEPT_COUNT){ float utility = a.parameters->value[i].utility;
         a.parameters->value[i].utility = keepFinite(utility,
-            utility + OAK_TRACKING_RATE * (fabsf(updated*x) - utility));
+            utility + OAK_TRACKING_RATE * (fabsf(updated*x) - utility)); }
     }
     replaceLeastUsefulFeature(a);
 }
@@ -293,7 +272,6 @@ void learnFromTransition(Agent a, uint32_t previousSlot){
 void oakInit(Agent a, uint32_t gid, float initW){
     for (uint32_t n=0u; n<OAK_FEATURE_TIMESCALE; ++n) g_invAge[n] = 1.0f/((float)n + 1.0f);
     for (uint32_t i=0u; i<OAK_FEATURE_CAPACITY; ++i) a.indices->featureRate[i] = trackingRate(0u);
-    for (uint32_t m=1u; m<=OAK_TRACE_LEVELS; ++m) g_traceRate[m] = 1.0f/(float)(1u << m);
     for (uint32_t option=0u; option<OAK_OPTION_COUNT; ++option){
         uint32_t hash = gid*2654435761u + option*40503u + 977u, action = hash % OAK_ENV_ACT_MAX;
         if (action < OAK_POLICY_MAX)
@@ -355,30 +333,33 @@ uint32_t oakSampleDiscrete(Agent a, uint32_t discreteActionCount, const uint32_t
 
 void oakActionModelLearn(Agent a, float reward){
     g_stale++;
-    if (reward != 0.0f && g_symbol[g_gate] < OAK_SYMBOLS){
-        g_stale = 0u;
+    if (reward != 0.0f){
         float bestGate = 0.0f;
         for (uint32_t o = 0u; o < a.observationCount; ++o){
             if (g_symbolCount[o] == OAK_SYMBOLS) continue;
             float spread = 0.0f;
             for (uint32_t d = 0u; d < a.envActionCount; ++d)
                 for (uint32_t c = 0u; c < g_symbolCount[o]; ++c)
-                    spread += g_immediate[d][o][c]*g_immediate[d][o][c];
+                    spread += g_model[d][o][c].reward*g_model[d][o][c].reward;
             if (spread > bestGate){ bestGate = spread; g_gate = o; }
         }
-        uint32_t s = g_symbol[g_gate];
-        float canonical = g_canonical[s];
-        if (canonical != 0.0f){
-            float context = reward / canonical;
-            g_context = keepFinite(g_context, context);
+        if (g_symbol[g_gate] < OAK_SYMBOLS){
+            g_stale = 0u;
+            uint32_t s = g_symbol[g_gate];
+            float canonical = g_canonical[s];
+            if (canonical != 0.0f) g_context = keepFinite(g_context, reward / canonical);
+            else g_canonical[s] = keepFinite(0.0f, reward / g_context);
         }
-        if (canonical == 0.0f) g_canonical[s] = keepFinite(0.0f, reward / g_context);
     }
     a.memory->reward = finiteOrZero(reward / g_context);
     if (!g_havePrevAct) return;
+    uint32_t indicator = 0u;
+    for (uint32_t o = 1u; o < a.observationCount; ++o)
+        if (g_symbolCount[o] < g_symbolCount[indicator]) indicator = o;
     for (uint32_t o = 0u; o < a.observationCount; ++o) if (g_symbol[o] < OAK_SYMBOLS){
-        float *m = &g_immediate[g_prevAct][o][g_symbol[o]];
-        *m = keepFinite(*m, *m + OAK_TRACKING_RATE*(a.memory->reward - *m));
+        Predict *e = &g_model[g_prevAct][o][g_symbol[o]];
+        e->reward = keepFinite(e->reward, e->reward + OAK_TRACKING_RATE*(a.memory->reward - e->reward));
+        e->effect = keepFinite(e->effect, e->effect + OAK_TRACKING_RATE*(a.memory->observation[indicator] - e->effect));
     }
 }
 void oakActionModelRemember(Agent a, uint32_t action){ g_prevAct=action; g_havePrevAct=1; }
@@ -393,10 +374,11 @@ void oakActionModelBiasScaleFree(Agent a){
     float q[OAK_POLICY_MAX]; float qm=0.0f;
     float trust = 1.0f/(1.0f + (float)g_stale*OAK_TRACKING_RATE);
     for (uint32_t d=0;d<actionCount;++d){
-        float immediate = 0.0f;
+        float reward = 0.0f, effect = 0.0f;
         for (uint32_t o = 0u; o < a.observationCount; ++o)
-            if (g_symbol[o] < OAK_SYMBOLS) immediate += g_immediate[d][o][g_symbol[o]];
-        q[d] = finiteOrZero(g_context*immediate);
+            if (g_symbol[o] < OAK_SYMBOLS){ Predict e = g_model[d][o][g_symbol[o]];
+                reward += e.reward; effect += e.effect; }
+        q[d] = finiteOrZero(g_context*reward*effect);
         qm += q[d]/(float)actionCount;
     }
     float lm=0.0f;

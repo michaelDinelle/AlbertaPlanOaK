@@ -21,9 +21,6 @@
 #ifndef OAK_UPDATES
 #define OAK_UPDATES 1u
 #endif
-#ifndef OAK_TRACES
-#define OAK_TRACES 7u
-#endif
 #ifndef OAK_ENV_OBS_MAX
 #define OAK_ENV_OBS_MAX 12u
 #endif
@@ -32,7 +29,6 @@
 #endif
 
 #define OAK_CANDIDATES_PER_SLOT OAK_CANDIDATES
-#define OAK_TRACE_LEVELS OAK_TRACES
 #define OAK_TILE_HALF (0.5f * (float)OAK_CANDIDATES_PER_SLOT)
 #define OAK_ACTION_PARAMS (2u * OAK_ENV_ACT_MAX)
 #define OAK_POLICY_MAX 3u
@@ -57,7 +53,6 @@
 
 #define FEATURE_PRODUCT 0u
 #define FEATURE_NORMALIZED_SUM 1u
-#define FEATURE_OBSERVATION_TIMESCALE 3u
 
 typedef struct {
     float policy[OAK_POLICY_MAX];
@@ -83,7 +78,6 @@ typedef struct {
     float featureMean[OAK_FEATURE_CAPACITY];
     float featureSecondMoment[OAK_FEATURE_CAPACITY];
     float actorAdvantage[OAK_OPTION_COUNT];
-    float observationTimescale[OAK_TRACE_LEVELS * OAK_OBSERVATION_CAPACITY];
     float valueScale;
     float previousFeatureNormSq;
     float optionAverageReward[OAK_OPTION_COUNT];
