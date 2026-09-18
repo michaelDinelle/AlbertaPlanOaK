@@ -26,7 +26,6 @@ static uint32_t convertSymbol(uint32_t from, uint32_t c, uint32_t to){
     return OAK_SYMBOLS;
 }
 static float g_marginal[OAK_SYMBOLS][OAK_OBSERVATION_CAPACITY][OAK_SYMBOLS];
-static float g_value[OAK_OBSERVATION_CAPACITY][OAK_SYMBOLS], g_avgReward, g_vBar;
 static uint32_t g_source[OAK_POLICY_MAX][OAK_OBSERVATION_CAPACITY];
 static float g_align[OAK_POLICY_MAX][OAK_OBSERVATION_CAPACITY][OAK_OBSERVATION_CAPACITY];
 static uint32_t g_prevSymbol[OAK_OBSERVATION_CAPACITY], g_alignAct;
@@ -99,21 +98,6 @@ void oakActionModelLearn(Agent a, float reward){
             g_source[d][o] = arg;
         }
     }
-    if (g_haveAlign){
-        float vPrev = 0.0f, vNow = 0.0f;
-        for (uint32_t o = 0u; o < a.observationCount; ++o){
-            if (g_prevSymbol[o] < OAK_SYMBOLS) vPrev += g_value[o][g_prevSymbol[o]];
-            if (g_symbol[o] < OAK_SYMBOLS)     vNow  += g_value[o][g_symbol[o]];
-        }
-        float delta = OAK_TRACKING_RATE*((a.memory->reward - g_avgReward) + vNow - vPrev);
-        g_vBar += OAK_TRACKING_RATE*(vPrev - g_vBar);
-        float gauge = OAK_TRACKING_RATE*g_vBar;
-        for (uint32_t o = 0u; o < a.observationCount; ++o)
-            if (g_prevSymbol[o] < OAK_SYMBOLS)
-                g_value[o][g_prevSymbol[o]] = keepFinite(g_value[o][g_prevSymbol[o]],
-                                                          g_value[o][g_prevSymbol[o]] + delta - gauge);
-        g_avgReward += OAK_TRACKING_RATE*(a.memory->reward - g_avgReward);
-    }
     uint32_t ind = 0u; float bestInd = -1.0f;
     for (uint32_t o = 0u; o < a.observationCount; ++o){
         float x = a.memory->observation[o], m = 0.0f, between = 0.0f;
@@ -143,7 +127,7 @@ void oakActionModelLearn(Agent a, float reward){
     }
 }
 void oakActionModelRemember(Agent a, uint32_t action){ g_prevAct=action; g_havePrevAct=1; }
-static float g_qSd;
+static float g_qSd, g_gainLog; static uint32_t g_gainFor;
 void oakActionModelBiasScaleFree(Agent a){
     const uint32_t actionCount = a.envActionCount;
     float q[OAK_POLICY_MAX]; float qm=0.0f;
@@ -152,7 +136,7 @@ void oakActionModelBiasScaleFree(Agent a){
         float reward = 0.0f, effect = 1.0f, ahead = 0.0f; uint32_t effectN = 0u;
         for (uint32_t o = 0u; o < a.observationCount; ++o){
             uint32_t p = g_source[d][o], t = g_xlat[p][o][g_symbol[p]];
-            if (t < OAK_SYMBOLS) ahead += g_marginal[g_mem][o][t] + g_value[o][t];
+            if (t < OAK_SYMBOLS) ahead += g_marginal[g_mem][o][t];
             if (g_symbol[o] < OAK_SYMBOLS){ Predict e = g_model[g_mem][d][o][g_symbol[o]];
                 reward += e.reward; effect *= e.effect; ++effectN; }
         }
@@ -163,9 +147,9 @@ void oakActionModelBiasScaleFree(Agent a){
     float qs=0.0f;
     for (uint32_t d=0;d<actionCount;++d){ float dq=q[d]-qm; qs += dq*dq; }
     g_qSd += OAK_TRACKING_RATE*(sqrtf(qs) - g_qSd);
-    float gain = logf((float)(actionCount-1u)*(float)OAK_FEATURE_TIMESCALE)
-                 / (g_qSd > 0.0f ? g_qSd : 1.0f);
-    for (uint32_t d=0;d<OAK_POLICY_MAX;++d) a.memory->policyMeanRaw[d] = 0.0f;
+    if (actionCount != g_gainFor){ g_gainFor = actionCount; g_gainLog = logf((float)(actionCount-1u)*(float)OAK_FEATURE_TIMESCALE); }
+    float gain = g_gainLog / (g_qSd > 0.0f ? g_qSd : 1.0f);
+    for (uint32_t d=actionCount;d<OAK_POLICY_MAX;++d) a.memory->policyMeanRaw[d] = 0.0f;
     for (uint32_t d=0;d<actionCount;++d)
         a.memory->policyMeanRaw[d] = finiteOrZero(gain*(q[d]-qm)*trust);
 }
