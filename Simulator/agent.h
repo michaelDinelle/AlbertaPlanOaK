@@ -47,7 +47,6 @@
 #define OAK_FEATURE_TIMESCALE (OAK_PERCEPT_COUNT * (1u + OAK_CANDIDATES_PER_SLOT))
 #define OAK_TRACKING_RATE (1.0f / (float)OAK_FEATURE_TIMESCALE)
 #define OAK_VALUE_STEP (1.0f / (float)(2u*OAK_PERCEPT_COUNT))
-#define OAK_HEAD_STEP (1.0f / (float)OAK_ACTIVE_CAPACITY)
 #define OAK_SYMBOLS 16u
 #ifndef OAK_ACTOR_ALPHA_DENOM
 #define OAK_ACTOR_ALPHA_DENOM ((float)(OAK_ACTION_PARAMS * OAK_OPTION_COUNT))
@@ -91,7 +90,6 @@ typedef struct {
     float importanceStaging[OAK_OPTION_COUNT];
     float actorCreditStaging[OAK_POLICY_BANK];
     float optionLogit[OAK_POLICY_BANK];
-    float optionPolicyCoef[OAK_POLICY_BANK];
     float averageReward;
 } AgentMemory;
 
@@ -110,7 +108,6 @@ typedef struct {
 
 void constructFeatures(Agent);
 void predictAndControl(Agent);
-void planAllOptions(Agent);
 void learnFromTransition(Agent, uint32_t);
 void oakInit(Agent, uint32_t, float);
 uint32_t oakSampleDiscrete(Agent, uint32_t, const uint32_t*);

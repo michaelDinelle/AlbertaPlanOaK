@@ -61,10 +61,6 @@ static inline float trackingRate(uint32_t age){
     uint32_t cap = OAK_FEATURE_TIMESCALE - 1u;
     return g_invAge[age < cap ? age : cap];
 }
-static inline float ridgeRate(uint32_t age){
-    uint32_t cap = 2u*OAK_PERCEPT_COUNT - 1u;
-    return g_invAge[age < cap ? age : cap];
-}
 static void buildPlans(Agent a){
     uint32_t traceChannels = OAK_TRACE_LEVELS*a.observationCount;
     if (traceChannels < 1u) traceChannels = 1u;
@@ -167,8 +163,9 @@ void constructFeatures(Agent a){
         float mean = a.memory->featureMean[winner], second = a.memory->featureSecondMoment[winner];
         float var = second - mean*mean; if (var < 0.0f) var = 0.0f;
         currentFeatures[currentActive[OAK_PERCEPT_COUNT + s]] = 0.0f;
+        uint32_t ridgeAge = a.indices->featureAge[winner], ridgeCap = 2u*OAK_PERCEPT_COUNT - 1u;
         float standardized = finiteOrZero((g_constructed[winner] - mean)
-                           * rsqrtf_(var + ridgeRate(a.indices->featureAge[winner])));
+                           * rsqrtf_(var + g_invAge[ridgeAge < ridgeCap ? ridgeAge : ridgeCap]));
         currentFeatures[winner] = standardized;
         currentActive[OAK_PERCEPT_COUNT + s] = winner;
         currentActiveValue[OAK_PERCEPT_COUNT + s] = standardized;
@@ -222,21 +219,6 @@ void predictAndControl(Agent a){
     a.memory->previousFeatureNormSq = previousFeatureNormSq;
 }
 
-void planAllOptions(Agent a){
-    for (uint32_t k = 0u; k < OAK_OPTION_UPDATES; ++k){
-        float importanceRatio = a.memory->importance[k];
-        float advantage = finiteOrZero(a.memory->actorAdvantage[k]);
-        float actorAlpha = 1.0f / OAK_ACTOR_ALPHA_DENOM;
-        float previousFeatureNormSq = a.memory->previousFeatureNormSq;
-        for (uint32_t d=0u; d<OAK_POLICY_MAX; ++d){
-            float targetGrad = a.memory->optionActorCredit[k*OAK_POLICY_MAX+d];
-            float gradScale = importanceRatio*targetGrad;
-            float denom = 1.0f + actorAlpha*advantage*advantage*gradScale*gradScale*previousFeatureNormSq;
-            float scale = (isfinite(denom) && denom > 0.0f) ? (1.0f/denom) : 0.0f;
-            a.memory->optionPolicyCoef[k*OAK_POLICY_MAX+d] = finiteOrZero(actorAlpha*advantage*gradScale*scale);
-        }
-    }
-}
 
 static void replaceLeastUsefulFeature(Agent a){
     const uint32_t *restrict age = a.indices->featureAge;
@@ -276,9 +258,17 @@ void learnFromTransition(Agent a, uint32_t previousSlot){
     const uint32_t *previousActive = activeFeatures(a, previousSlot);
     const float *previousActiveValue = activeValues(a, previousSlot);
     float actorCoefficient[OAK_OPTION_UPDATES][OAK_POLICY_MAX];
-    for (uint32_t k=0u;k<OAK_OPTION_UPDATES;++k)
-        for (uint32_t j=0u;j<policyN;++j)
-            actorCoefficient[k][j]=a.memory->optionPolicyCoef[k*OAK_POLICY_MAX+j];
+    for (uint32_t k=0u;k<OAK_OPTION_UPDATES;++k){
+        float importanceRatio = a.memory->importance[k];
+        float advantage = finiteOrZero(a.memory->actorAdvantage[k]);
+        float actorAlpha = 1.0f / OAK_ACTOR_ALPHA_DENOM;
+        for (uint32_t d=0u; d<OAK_POLICY_MAX; ++d){
+            float gradScale = importanceRatio*a.memory->optionActorCredit[k*OAK_POLICY_MAX+d];
+            float denom = 1.0f + actorAlpha*advantage*advantage*gradScale*gradScale*a.memory->previousFeatureNormSq;
+            float scale = (isfinite(denom) && denom > 0.0f) ? (1.0f/denom) : 0.0f;
+            actorCoefficient[k][d] = finiteOrZero(actorAlpha*advantage*gradScale*scale);
+        }
+    }
     for (uint32_t idx=0u; idx<OAK_ACTIVE_CAPACITY; ++idx){
         uint32_t i = previousActive[idx];
         float x = previousActiveValue[idx];
@@ -369,6 +359,7 @@ void oakActionModelLearn(Agent a, float reward){
         g_stale = 0u;
         float bestGate = 0.0f;
         for (uint32_t o = 0u; o < a.observationCount; ++o){
+            if (g_symbolCount[o] == OAK_SYMBOLS) continue;
             float spread = 0.0f;
             for (uint32_t d = 0u; d < a.envActionCount; ++d)
                 for (uint32_t c = 0u; c < g_symbolCount[o]; ++c)

@@ -36,7 +36,7 @@ int main(int argc, char **argv){
         for (int i=0;i<8;i++){
             int k=(2*hd+i)&7, qx=px+D8[k][0], qy=py+D8[k][1];
             uint32_t it=jbw_itemAt(seed,qx,qy);
-            view[i] = (!jbw_blocks(it) && jbw_destroyedAt(hist,JBW_HISTORY_MASK,qx,qy)!=0u) ? JBW_EMPTY : it;
+            view[i] = (jbw_collectible(it) && jbw_destroyedAt(hist,JBW_HISTORY_MASK,qx,qy)!=0u) ? JBW_EMPTY : it;
         }
         float sc[3]; jbw_scentAt(seed,px,py,(uint32_t)t,hist,JBW_HISTORY_MASK,resp,sc);
         float sign = ((t/EPOCH)&1)==0 ? 1.0f : -1.0f;
@@ -79,11 +79,10 @@ int main(int argc, char **argv){
         else if (action==2u) hd=(hd+1)&3;
         else if (!jbw_blocks(it)){
             px=tx; py=ty; moved=1;
-            if (jbw_collectible(it) && jbw_destroyedAt(hist,JBW_HISTORY_MASK,tx,ty)==0u)
+            if (jbw_collectible(it) && jbw_destroyedAt(hist,JBW_HISTORY_MASK,tx,ty)==0u){
                 jbw_destroy(hist,JBW_HISTORY_MASK,tx,ty,(uint32_t)t);
-        }
-        if (action==0u && moved && jbw_destroyedAt(hist,JBW_HISTORY_MASK,px,py)==(uint32_t)t+1u){
-            if (it==JBW_JELLY) reward=sign; else if (it==JBW_ONION) reward=-sign;
+                if (it==JBW_JELLY) reward=sign; else if (it==JBW_ONION) reward=-sign;
+            }
         }
         if (policy < 0) oakActionModelLearn(a, reward);
 
@@ -92,11 +91,7 @@ int main(int argc, char **argv){
         { int sg=(int)(t*8/STEPS); if(sg>7)sg=7; segR[sg]+=reward; segN[sg]++; }
         if (reward>0) good++; else if (reward<0) bad++;
 
-        if (policy < 0){
-            uint32_t previous = 1u - a.stateSlot;
-            planAllOptions(a);
-            learnFromTransition(a, previous);
-        }
+        if (policy < 0) learnFromTransition(a, 1u - a.stateSlot);
     }
 
     printf("  by eighth    ");
