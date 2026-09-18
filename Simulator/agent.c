@@ -116,11 +116,11 @@ void oakActionModelLearn(Agent a, float reward){
     memcpy(g_prevSymbol, g_symbol, sizeof g_prevSymbol);
     g_alignAct = g_prevAct; g_haveAlign = g_havePrevAct;
     if (!g_havePrevAct) return;
+    float pred = 0.0f; for (uint32_t o = 0u; o < a.observationCount; ++o) if (g_symbol[o] < OAK_SYMBOLS) pred += g_model[g_mem][g_prevAct][o][g_symbol[o]].reward; float err = OAK_TRACKING_RATE*(a.memory->reward - pred);
     for (uint32_t o = 0u; o < a.observationCount; ++o) if (g_symbol[o] < OAK_SYMBOLS){
         Predict *e = &g_model[g_mem][g_prevAct][o][g_symbol[o]];
-        e->reward = keepFinite(e->reward, e->reward + OAK_TRACKING_RATE*(a.memory->reward - e->reward));
-        { float sum = 0.0f;
-          for (uint32_t m = 0u; m < a.envActionCount; ++m) sum += g_model[g_mem][m][o][g_symbol[o]].reward;
+        e->reward = keepFinite(e->reward, e->reward + err);
+        { float sum = 0.0f; for (uint32_t m = 0u; m < a.envActionCount; ++m) sum += g_model[g_mem][m][o][g_symbol[o]].reward;
           g_marginal[g_mem][o][g_symbol[o]] = sum; }
     }
 }
@@ -131,15 +131,14 @@ void oakActionModelBiasScaleFree(Agent a){
     float q[OAK_POLICY_MAX]; float qm=0.0f;
     float trust = 1.0f/(1.0f + (float)g_stale*OAK_TRACKING_RATE);
     for (uint32_t d=0;d<actionCount;++d){
-        float reward = 0.0f, effect = 1.0f, ahead = 0.0f; uint32_t effectN = 0u;
+        float reward = 0.0f, effect = FLT_MAX, ahead = 0.0f; uint32_t effectN = 0u;
         for (uint32_t o = 0u; o < a.observationCount; ++o){
             uint32_t p = g_source[d][o], t = g_xlat[p][o][g_symbol[p]];
             if (t < OAK_SYMBOLS) ahead += g_marginal[g_mem][o][t];
             if (g_symbol[o] < OAK_SYMBOLS){ Predict e = g_model[g_mem][d][o][g_symbol[o]];
-                reward += e.reward; effect *= e.effect; ++effectN; }
+                reward += e.reward; effect = effect < e.effect ? effect : e.effect; ++effectN; }
         }
-        effect = (float)effectN*powf(effect, 1.0f/(float)effectN);
-        q[d] = finiteOrZero(g_context*((reward + g_moveValue/(float)actionCount)*effect + ahead));
+        q[d] = finiteOrZero(g_context*((reward + g_moveValue*(float)effectN)*effect*(float)effectN + ahead));
         qm += q[d]/(float)actionCount;
     }
     float qs=0.0f;
