@@ -51,20 +51,37 @@ When a rule drifts from the cited research, fix the rule — never preserve folk
 16. **Never opt out of a recording.** `./run.py` is the only way to exercise a change: it builds at the declared geometry, records the `oak` candidate at the pinned schedule and horizon, reuses matching `ppo` and `random` baselines, and gates against that geometry's own reference — adopting one when the geometry has none yet. Never hand-roll a benchmark request to OaK to check whether something worked, never point a run root outside `.oak-benchmarks/`, and never let a scratch run, a decoded pose tape, a rebuilt older tree, or a reference simulator stand in for the recording. A scratch run is not a smaller gate; it is no gate. When the harness itself is broken, fix the harness and rerun the gate — never route around it. The single exception is the timing instruments under Performance, which are wall-clock probes and make no claim about behaviour or reward.
 17. **Never push without the user's explicit approval in that turn.** Benchmark recordings stay local and are ignored by Git. Nothing uploads them.
 
+18. **Never run the scent agent for diagnostics, under any circumstances.** It is a fixed yardstick, not an instrument. Do not build it or run it to see what it does, to sanity-check a change, to profile, or to compare against anything — quote the canonical record below instead. It costs ten times an OaK run and answers nothing an OaK run cannot. The only reason to run it again is a change to the scent agent's own behaviour, and such a run replaces the record rather than adding a second set of figures beside it.
+
 ## Measuring in the simulator
 
-`Simulator/./oak` runs the whole fleet itself — seeds 101-108 forked from one process, sharing the response table copy-on-write — and prints mean and worst at every rung `1M · 4^k` that fits in `STEPS`. A short run is bitwise identical to that prefix of a long one, so a single run yields the entire ladder; never build one horizon at a time. `./oak` is the agent, `./oak 0` random, `./oak 1` the hand reactive ceiling.
+`Simulator/build.sh` links exactly one agent per binary, chosen by `AGENT`: `oak`, `random`, or `scent`. Each binary runs the whole fleet itself — seeds 101-108 forked from one process — and prints mean and worst per rung window at every `1M · 4^k` that fits in `STEPS`. A short run is bitwise identical to that prefix of a long one, so a single run yields the entire ladder; never build one horizon at a time.
 
 ```
-STEPS=16000000 ./build.sh && ./oak      # screen: 1M, 4M, 16M
-STEPS=256000000 ./build.sh && ./oak     # confirm: adds 64M and 256M
+AGENT=oak STEPS=16000000 ./build.sh && ./oak      # screen: 1M, 4M, 16M
+AGENT=oak STEPS=256000000 ./build.sh && ./oak     # confirm: adds 64M and 256M
+AGENT=random STEPS=16000000 ./build.sh && ./random # environment integrity oracle
 ```
+
+`random` ignores its observations, so its reward depends only on world dynamics: it is the exact regression check for any change to `jbw.c` or the environment loop.
+
+### The scent agent: canonical record, never re-run (rule 18)
+
+Ported from `Simulator/oak_scent_release`. Seeds 101-108, recorded 2026-09-18 on an M4 Max.
+
+| rung | mean | worst |
+|---|---:|---:|
+| 1M | +0.025640750 | +0.025167000 |
+| 4M | +0.027487708 | +0.027108667 |
+| 16M | +0.027256396 | +0.026855917 |
+
+3,482,798 positive and 1,353 negative reward events (100.0% positive), moves/step 0.9229, action shares 0.9230 / 0.0481 / 0.0289, action entropy 0.2935, 0.70M SPS per lane. That is **2.72x OaK** at the 16M rung, and it rises with depth. Quote these figures; do not reproduce them.
 
 **Screen at 16M, never at 1M.** Measured over seven candidates, 16M reproduces the 256M ranking to within adjacent swaps while 1M inverts it — at 1M the agent is still on its learning curve, so the mean measures convergence speed, not skill, and mechanisms trade one against the other. Confirm survivors at 256M before believing them; the simulator screens hypotheses and decides nothing (rule 16).
 
-Every run reports throughput, so the speed gate costs nothing extra — currently **2.88M SPS per lane, 23.0M SPS across the eight**. A single run's wall time varies 1-2%, so gate anything under ~3% with interleaved repetitions instead. The environment is 47% of the step and the agent 53% (compare `./oak 0`, which skips the agent), so agent-side speed work caps out near 2x however much is deleted.
+Every run reports throughput, so the speed gate costs nothing extra — OaK is currently **7.34M SPS per lane, 58.7M SPS across the eight**. A single run's wall time varies 1-2%, so gate anything under ~3% with interleaved repetitions instead. The environment is 47% of the step and the agent 53% (compare `./oak 0`, which skips the agent), so agent-side speed work caps out near 2x however much is deleted.
 
-Snapshot candidates with `git show HEAD:Simulator/agent.c`, never by copying the working tree — a dirty tree silently yields a mislabelled baseline.
+Snapshot candidates with `git show HEAD:Simulator/agent_oak.c`, never by copying the working tree — a dirty tree silently yields a mislabelled baseline.
 
 ## Performance: profiling (HEADLESS — verified 2026-07-04)
 

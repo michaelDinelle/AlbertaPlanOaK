@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
+#include <math.h>
 #include <unistd.h>
 #include <sys/mman.h>
 #include <sys/wait.h>
@@ -10,84 +11,206 @@
 #ifndef STEPS
 #define STEPS 1000000
 #endif
+
 #define SEEDS 8
+#define FIRST_SEED 101u
 #define RUNGS 5
 
-static const int FW[4][2]={{0,-1},{1,0},{0,1},{-1,0}};
-static const int D8[8][2]={{0,-1},{1,-1},{1,0},{1,1},{0,1},{-1,1},{-1,0},{-1,-1}};
-static const long RUNG[RUNGS]={1000000L,4000000L,16000000L,64000000L,256000000L};
-typedef struct { double rung[RUNGS]; long good,bad,fwd,mv; } Result;
+#define RING_CELLS 8
+#ifdef WITH_SCENT
+#define SCENT_CHANNELS 3
+#else
+#define SCENT_CHANNELS 0
+#endif
+#define OBSERVATION_COUNT (RING_CELLS + SCENT_CHANNELS + 1)
+#define ACTION_COUNT 3u
+#define ACTION_MOVE 0u
+#define ACTION_TURN_LEFT 1u
+#define ACTION_TURN_RIGHT 2u
 
-static void runSeed(uint32_t seed, int policy, Result *out){
-    size_t cap=(size_t)STEPS*JBW_BLOCK_ITEMS*2u/((size_t)JBW_BLOCK*JBW_BLOCK)+2u, slots=2u; while(slots<cap) slots<<=1;
-    uint32_t hmask=(uint32_t)(slots-1u); uint32_t *hist=calloc(slots,3u*sizeof(uint32_t));
-    AgentMemory *M = calloc(1,sizeof(AgentMemory));
-    Agent a; a.observationCount=9u; a.envActionCount=3u; a.memory=M;
-    int px=0,py=0,hd=0,moved=0,rk=0; long drought=0,record=0; double total=0.0;
-    for (long t=0;t<STEPS;t++){
-        uint32_t view[8], fwdItem=JBW_EMPTY, fwdDel=0u;
-        for (int i=0;i<8;i++){
-            int k=(2*hd+i)&7, qx=px+D8[k][0], qy=py+D8[k][1];
-            uint32_t it=jbw_itemAt(seed,qx,qy), del=jbw_collectible(it)?jbw_destroyedAt(hist,hmask,qx,qy):0u;
-            if(!i){ fwdItem=it; fwdDel=del; }
-            view[i] = del!=0u ? JBW_EMPTY : it;
+#define HEADINGS 4
+#define REWARD_POLARITY_PERIOD 100000L
+#define REWARDING_CELL_DENSITY 0.0077064
+
+static const int FORWARD[HEADINGS][2] = {
+    { 0, -1 }, { 1, 0 }, { 0, 1 }, { -1, 0 }
+};
+
+static const int NEIGHBOUR[RING_CELLS][2] = {
+    { 0, -1 }, { 1, -1 }, { 1, 0 }, { 1, 1 },
+    { 0, 1 }, { -1, 1 }, { -1, 0 }, { -1, -1 }
+};
+
+static const long RUNG[RUNGS] = {
+    1000000L, 4000000L, 16000000L, 64000000L, 256000000L
+};
+
+typedef struct {
+    double rate[RUNGS], coverage[RUNGS];
+    long drought[RUNGS];
+    long positive, negative, chose[ACTION_COUNT], moves;
+} Result;
+
+static uint32_t *allocateDestructionTable(uint32_t *mask){
+    size_t needed = (size_t)STEPS * JBW_BLOCK_ITEMS * 2u
+                  / ((size_t)JBW_BLOCK * JBW_BLOCK) + 2u;
+    size_t slots = 2u;
+    while (slots < needed) slots <<= 1;
+    *mask = (uint32_t)(slots - 1u);
+    return calloc(slots, 3u * sizeof(uint32_t));
+}
+
+static void runSeed(uint32_t seed, Result *out){
+#ifdef WITH_SCENT
+    float *scentResponse = malloc(sizeof(float) * (size_t)JBW_SCENT_CELLS * JBW_DESTRUCTION_LIFETIME);
+    jbw_buildScentResponse(scentResponse);
+#endif
+    uint32_t mask;
+    uint32_t *destroyed = allocateDestructionTable(&mask);
+    void *agent = agentCreate((AgentShape){ OBSERVATION_COUNT, ACTION_COUNT }, seed);
+
+    float buffer[2][OBSERVATION_COUNT];
+    int x = 0;
+    int y = 0;
+    int heading = 0;
+    int moved = 0;
+    int rung = 0;
+    int spanLowX = 0, spanHighX = 0, spanLowY = 0, spanHighY = 0;
+    long drought = 0, windowDrought = 0, windowEvents = 0;
+    float reward = 0.0f;
+    double total = 0.0, windowStart = 0.0;
+    long windowFirstStep = 0;
+
+    for (long step = 0; step < STEPS; ++step){
+        uint32_t aheadItem = jbw_itemAt(seed, x + FORWARD[heading][0], y + FORWARD[heading][1]);
+        uint32_t aheadDestroyed = jbw_collectible(aheadItem)
+                                ? jbw_destroyedAt(destroyed, mask,
+                                                  x + FORWARD[heading][0], y + FORWARD[heading][1])
+                                : 0u;
+
+        float *observation = buffer[step & 1];
+        for (int cell = 0; cell < RING_CELLS; ++cell){
+            int direction = (2 * heading + cell) & (RING_CELLS - 1);
+            int cellX = x + NEIGHBOUR[direction][0];
+            int cellY = y + NEIGHBOUR[direction][1];
+            uint32_t item = jbw_itemAt(seed, cellX, cellY);
+            if (jbw_collectible(item) && jbw_destroyedAt(destroyed, mask, cellX, cellY) != 0u)
+                item = JBW_EMPTY;
+            observation[cell] = JBW_ENERGY[item];
         }
-        float sign = ((t/100000L)&1)==0 ? 1.0f : -1.0f;
-        uint32_t action;
-        if (policy < 0){
-            for (int i=0;i<8;i++) M->observation[i] = JBW_ENERGY[view[i]];
-            M->observation[8]=(float)moved;
-            constructFeatures(a);
-            oakActionModelBiasScaleFree(a);
-            u4 r0=philox4x32(seed,2u,(u4){(uint32_t)t,0,0,0});
-            uint32_t w[3]={r0.x,r0.y,r0.z};
-            action = oakSampleDiscrete(a, 3u, w);
-            oakActionModelRemember(a, action);
+#ifdef WITH_SCENT
+        jbw_scentAt(seed, x, y, (uint32_t)step, destroyed, mask, scentResponse,
+                    observation + RING_CELLS);
+#endif
+        observation[OBSERVATION_COUNT - 1] = (float)moved;
+
+        uint32_t action = agentStep(agent, observation, reward);
+
+        reward = 0.0f;
+        moved = 0;
+
+        if (action == ACTION_TURN_LEFT){
+            heading = (heading + HEADINGS - 1) & (HEADINGS - 1);
+        } else if (action == ACTION_TURN_RIGHT){
+            heading = (heading + 1) & (HEADINGS - 1);
+        } else if (!jbw_blocks(aheadItem)){
+            x += FORWARD[heading][0];
+            y += FORWARD[heading][1];
+            moved = 1;
+            if (x < spanLowX) spanLowX = x;
+            if (x > spanHighX) spanHighX = x;
+            if (y < spanLowY) spanLowY = y;
+            if (y > spanHighY) spanHighY = y;
+
+            if (jbw_collectible(aheadItem) && aheadDestroyed == 0u){
+                jbw_destroy(destroyed, mask, x, y, (uint32_t)step);
+                float polarity = ((step / REWARD_POLARITY_PERIOD) & 1) == 0 ? 1.0f : -1.0f;
+                if (aheadItem == JBW_JELLY) reward = polarity;
+                else if (aheadItem == JBW_ONION) reward = -polarity;
+            }
+        }
+
+        out->chose[action]++;
+        out->moves += moved;
+        total += reward;
+        if (reward != 0.0f){
+            windowEvents++;
+            if (drought > windowDrought) windowDrought = drought;
+            drought = 0;
         } else {
-            uint32_t good = sign>0?JBW_JELLY:JBW_ONION, bad = sign>0?JBW_ONION:JBW_JELLY;
-            u4 rr = philox4x32(seed,2u,(u4){(uint32_t)t,7,0,0});
-            uint32_t ahead = view[0];
-            if (policy == 0 || drought > record) action = rr.x%3u;
-            else if (ahead == good) action = 0u;
-            else if (ahead == bad || ahead == JBW_WALL || ahead == JBW_TREE) action = 1u+(rr.x&1u);
-            else {
-                int seen = -1;
-                for (int i=1;i<8;i++) if (view[i]==good){ seen=i; break; }
-                action = (seen==2) ? 2u : (seen==6) ? 1u
-                       : (seen>=3 && seen<=5) ? ((seen<5)?2u:1u) : 0u;
-            }
+            drought++;
         }
-        int tx=px+FW[hd][0], ty=py+FW[hd][1]; uint32_t it=fwdItem;
-        float reward=0.0f; moved=0;
-        if (action==1u) hd=(hd+3)&3;
-        else if (action==2u) hd=(hd+1)&3;
-        else if (!jbw_blocks(it)){
-            px=tx; py=ty; moved=1;
-            if (jbw_collectible(it) && fwdDel==0u){
-                jbw_destroy(hist,hmask,tx,ty,(uint32_t)t);
-                if (it==JBW_JELLY) reward=sign; else if (it==JBW_ONION) reward=-sign;
-            }
+        if (reward > 0.0f) out->positive++;
+        else if (reward < 0.0f) out->negative++;
+
+        if (rung < RUNGS && step + 1 == RUNG[rung]){
+            double span = (double)(spanHighX - spanLowX + 1) * (double)(spanHighY - spanLowY + 1);
+            out->rate[rung] = (total - windowStart) / (double)(RUNG[rung] - windowFirstStep);
+            out->coverage[rung] = (double)windowEvents / (span * REWARDING_CELL_DENSITY);
+            out->drought[rung] = windowDrought > drought ? windowDrought : drought;
+            windowStart = total;
+            windowFirstStep = RUNG[rung];
+            windowDrought = 0;
+            windowEvents = 0;
+            rung++;
         }
-        if (reward!=0.0f){ if(drought>record) record=drought; drought=0; } else drought++;
-        if (policy < 0) oakActionModelLearn(a, reward);
-        if (action==0u) out->fwd++;
-        out->mv += moved; total += reward;
-        if (reward>0) out->good++; else if (reward<0) out->bad++;
-        if (rk<RUNGS && t+1==RUNG[rk]){ out->rung[rk]=total/(double)RUNG[rk]; rk++; }
     }
 }
 
-int main(int argc, char **argv){
-    int policy = argc>1 ? atoi(argv[1]) : -1; struct timespec c0,c1;
-    Result *res = mmap(NULL, SEEDS*sizeof(Result), PROT_READ|PROT_WRITE, MAP_SHARED|MAP_ANON, -1, 0); clock_gettime(CLOCK_MONOTONIC,&c0);
-    for (int i=0;i<SEEDS;i++) if (fork()==0){ runSeed(101u+(uint32_t)i, policy, &res[i]); _exit(0); }
-    while (wait(NULL) > 0) {} clock_gettime(CLOCK_MONOTONIC,&c1);
-    long g=0,b=0,f=0,m=0; for(int i=0;i<SEEDS;i++){ g+=res[i].good; b+=res[i].bad; f+=res[i].fwd; m+=res[i].mv; }
-    for (int k=0;k<RUNGS && RUNG[k]<=(long)STEPS;k++){
-        double s=0,w=res[0].rung[k]; for(int i=0;i<SEEDS;i++){ s+=res[i].rung[k]; if(res[i].rung[k]<w) w=res[i].rung[k]; }
-        printf("  %4ldM  mean %+.9f  worst %+.9f\n", RUNG[k]/1000000L, s/SEEDS, w);
+int main(void){
+    struct timespec start, finish;
+    Result *results = mmap(NULL, SEEDS * sizeof(Result), PROT_READ | PROT_WRITE,
+                           MAP_SHARED | MAP_ANON, -1, 0);
+
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    for (int lane = 0; lane < SEEDS; ++lane)
+        if (fork() == 0){
+            runSeed(FIRST_SEED + (uint32_t)lane, &results[lane]);
+            _exit(0);
+        }
+    while (wait(NULL) > 0){ }
+    clock_gettime(CLOCK_MONOTONIC, &finish);
+
+    for (int level = 0; level < RUNGS && RUNG[level] <= (long)STEPS; ++level){
+        double sum = 0.0, coverage = 0.0;
+        double worst = results[0].rate[level];
+        long drought = 0;
+        for (int lane = 0; lane < SEEDS; ++lane){
+            sum += results[lane].rate[level];
+            coverage += results[lane].coverage[level];
+            if (results[lane].rate[level] < worst) worst = results[lane].rate[level];
+            if (results[lane].drought[level] > drought) drought = results[lane].drought[level];
+        }
+        printf("  %4ldM  mean %+.9f  worst %+.9f   harvest %.3f   drought %ld\n",
+               RUNG[level] / 1000000L, sum / SEEDS, worst, coverage / SEEDS, drought);
     }
-    double sec=(c1.tv_sec-c0.tv_sec)+1e-9*(c1.tv_nsec-c0.tv_nsec);
-    printf("  eaten %ld good / %ld bad (%.1f%% correct)   %%forward %.1f%%   moves/step %.4f   %.2fM SPS/lane   %.1fM SPS\n", g,b,(g+b)?100.0*g/(g+b):0.0, 100.0*f/((double)STEPS*SEEDS), (double)m/((double)STEPS*SEEDS), STEPS/sec/1e6, (double)STEPS*SEEDS/sec/1e6);
+
+    long positive = 0, negative = 0, moves = 0, chose[ACTION_COUNT] = { 0 };
+    for (int lane = 0; lane < SEEDS; ++lane){
+        positive += results[lane].positive;
+        negative += results[lane].negative;
+        moves += results[lane].moves;
+        for (uint32_t action = 0u; action < ACTION_COUNT; ++action)
+            chose[action] += results[lane].chose[action];
+    }
+
+    double elapsed = (finish.tv_sec - start.tv_sec)
+                   + 1e-9 * (finish.tv_nsec - start.tv_nsec);
+    double lifetime = (double)STEPS * SEEDS;
+    double correct = (positive + negative) ? 100.0 * positive / (positive + negative) : 0.0;
+
+    double entropy = 0.0;
+    for (uint32_t action = 0u; action < ACTION_COUNT; ++action){
+        double share = (double)chose[action] / lifetime;
+        if (share > 0.0) entropy -= share * log(share) / log((double)ACTION_COUNT);
+    }
+
+    printf("  reward events %ld positive / %ld negative (%.1f%% positive)   moves/step %.4f\n",
+           positive, negative, correct, (double)moves / lifetime);
+    printf("  actions");
+    for (uint32_t action = 0u; action < ACTION_COUNT; ++action)
+        printf(" %.4f", (double)chose[action] / lifetime);
+    printf("   entropy %.4f   %.2fM SPS/lane   %.1fM SPS\n",
+           entropy, STEPS / elapsed / 1e6, lifetime / elapsed / 1e6);
     return 0;
 }

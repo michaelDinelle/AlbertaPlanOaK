@@ -1,31 +1,10 @@
-
-#ifndef OAKAGENT_H
-#define OAKAGENT_H
+#ifndef AGENT_H
+#define AGENT_H
 #include <stdint.h>
-#include <string.h>
-#include <math.h>
-#include <stdlib.h>
 
-#define OAK_OBSERVATION_CAPACITY 9u
-#define OAK_POLICY_MAX 3u
-#define OAK_SYMBOLS 16u
-#define OAK_FEATURE_TIMESCALE 2048u
-#define OAK_TRACKING_RATE (1.0f / (float)OAK_FEATURE_TIMESCALE)
+typedef struct { uint32_t observationCount, actionCount; } AgentShape;
 
-typedef struct {
-    float observation[OAK_OBSERVATION_CAPACITY];
-    float policyMeanRaw[OAK_POLICY_MAX];
-    float reward;
-} AgentMemory;
+void    *agentCreate(AgentShape shape, uint32_t seed);
+uint32_t agentStep(void *agent, const float *observation, float reward);
 
-typedef struct {
-    uint32_t observationCount, envActionCount;
-    AgentMemory *memory;
-} Agent;
-
-void constructFeatures(Agent);
-uint32_t oakSampleDiscrete(Agent, uint32_t, const uint32_t*);
-void oakActionModelLearn(Agent, float);
-void oakActionModelRemember(Agent, uint32_t);
-void oakActionModelBiasScaleFree(Agent);
 #endif
