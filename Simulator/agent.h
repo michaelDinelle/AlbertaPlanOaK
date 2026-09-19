@@ -6,7 +6,7 @@
 #include <math.h>
 #include <stdlib.h>
 
-#define OAK_OBSERVATION_CAPACITY 12u
+#define OAK_OBSERVATION_CAPACITY 9u
 #define OAK_POLICY_MAX 3u
 #define OAK_SYMBOLS 16u
 #define OAK_FEATURE_TIMESCALE 2048u
@@ -24,7 +24,6 @@ typedef struct {
 } Agent;
 
 void constructFeatures(Agent);
-void oakInit(Agent);
 uint32_t oakSampleDiscrete(Agent, uint32_t, const uint32_t*);
 void oakActionModelLearn(Agent, float);
 void oakActionModelRemember(Agent, uint32_t);

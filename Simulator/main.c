@@ -18,11 +18,11 @@ static const int D8[8][2]={{0,-1},{1,-1},{1,0},{1,1},{0,1},{-1,1},{-1,0},{-1,-1}
 static const long RUNG[RUNGS]={1000000L,4000000L,16000000L,64000000L,256000000L};
 typedef struct { double rung[RUNGS]; long good,bad,fwd,mv; } Result;
 
-static void runSeed(uint32_t seed, int policy, const float *resp, Result *out){
+static void runSeed(uint32_t seed, int policy, Result *out){
     size_t cap=(size_t)STEPS*JBW_BLOCK_ITEMS*2u/((size_t)JBW_BLOCK*JBW_BLOCK)+2u, slots=2u; while(slots<cap) slots<<=1;
     uint32_t hmask=(uint32_t)(slots-1u); uint32_t *hist=calloc(slots,3u*sizeof(uint32_t));
     AgentMemory *M = calloc(1,sizeof(AgentMemory));
-    Agent a; a.observationCount=12u; a.envActionCount=3u; a.memory=M; oakInit(a);
+    Agent a; a.observationCount=9u; a.envActionCount=3u; a.memory=M;
     int px=0,py=0,hd=0,moved=0,rk=0; long drought=0,record=0; double total=0.0;
     for (long t=0;t<STEPS;t++){
         uint32_t view[8], fwdItem=JBW_EMPTY, fwdDel=0u;
@@ -32,13 +32,11 @@ static void runSeed(uint32_t seed, int policy, const float *resp, Result *out){
             if(!i){ fwdItem=it; fwdDel=del; }
             view[i] = del!=0u ? JBW_EMPTY : it;
         }
-        float sc[3]; jbw_scentAt(seed,px,py,(uint32_t)t,hist,hmask,resp,sc);
         float sign = ((t/100000L)&1)==0 ? 1.0f : -1.0f;
         uint32_t action;
         if (policy < 0){
             for (int i=0;i<8;i++) M->observation[i] = JBW_ENERGY[view[i]];
-            M->observation[8]=sc[0]; M->observation[9]=sc[1]; M->observation[10]=sc[2];
-            M->observation[11]=(float)moved;
+            M->observation[8]=(float)moved;
             constructFeatures(a);
             oakActionModelBiasScaleFree(a);
             u4 r0=philox4x32(seed,2u,(u4){(uint32_t)t,0,0,0});
@@ -81,10 +79,8 @@ static void runSeed(uint32_t seed, int policy, const float *resp, Result *out){
 
 int main(int argc, char **argv){
     int policy = argc>1 ? atoi(argv[1]) : -1; struct timespec c0,c1;
-    float *resp = malloc(sizeof(float)*(size_t)JBW_RESPONSE_CELLS*JBW_DESTRUCTION_LIFETIME);
-    jbw_buildResponse(resp);
     Result *res = mmap(NULL, SEEDS*sizeof(Result), PROT_READ|PROT_WRITE, MAP_SHARED|MAP_ANON, -1, 0); clock_gettime(CLOCK_MONOTONIC,&c0);
-    for (int i=0;i<SEEDS;i++) if (fork()==0){ runSeed(101u+(uint32_t)i, policy, resp, &res[i]); _exit(0); }
+    for (int i=0;i<SEEDS;i++) if (fork()==0){ runSeed(101u+(uint32_t)i, policy, &res[i]); _exit(0); }
     while (wait(NULL) > 0) {} clock_gettime(CLOCK_MONOTONIC,&c1);
     long g=0,b=0,f=0,m=0; for(int i=0;i<SEEDS;i++){ g+=res[i].good; b+=res[i].bad; f+=res[i].fwd; m+=res[i].mv; }
     for (int k=0;k<RUNGS && RUNG[k]<=(long)STEPS;k++){
