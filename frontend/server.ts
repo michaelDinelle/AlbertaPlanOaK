@@ -1,22 +1,11 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import index from './index.html';
+import { ENGINE_FILES, JUDGE_FILE, packRecording, type Baselines, type Meta, type RunIndexEntry } from './src/data/layout';
 
 const BENCH = resolve(import.meta.dir, '../.oak-benchmarks');
 const PUBLIC = resolve(import.meta.dir, 'public');
 const BEST = resolve(import.meta.dir, '../best');
-
-interface Meta {
-  seeds: number[];
-  steps: number;
-  batch: number;
-  policy: string;
-  preset: string;
-  startedAt: string;
-  finishedAt?: string;
-  envSchedule: { envId: string; seedStart: number; seedEnd: number }[];
-  envCatalog: unknown;
-}
 
 class HttpError extends Error {
   constructor(readonly status: number, message: string) { super(message); }
@@ -27,31 +16,28 @@ const bytes = (path: string): ArrayBuffer => {
   return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength) as ArrayBuffer;
 };
 
-const META_FIELDS = ['seeds', 'steps', 'batch', 'policy', 'preset', 'startedAt', 'envSchedule', 'envCatalog'];
+const META_FIELDS = ['seeds', 'steps', 'batch', 'window', 'policy', 'preset', 'startedAt', 'envSchedule', 'envCatalog'] as const;
 
 function meta(root: string): Meta {
-  const m = JSON.parse(readFileSync(join(root, 'meta.json'), 'utf8')) as Meta;
-  for (const field of META_FIELDS) if (!(field in m)) throw new HttpError(500, `${root}/meta.json lacks ${field}`);
+  const m = JSON.parse(readFileSync(join(root, ENGINE_FILES.meta), 'utf8')) as Meta;
+  for (const field of META_FIELDS) if (!(field in m)) throw new HttpError(500, `${root}/${ENGINE_FILES.meta} lacks ${field}`);
   return m;
 }
 
-const ends = (root: string): Uint32Array => existsSync(join(root, 'ends.u32')) ? new Uint32Array(bytes(join(root, 'ends.u32'))) : new Uint32Array(0);
+const recorded = (root: string): boolean => Object.values(ENGINE_FILES).every((file) => existsSync(join(root, file)));
 
 function runRoot(id: string): string {
-  const [name, policy, ...rest] = id.split(':');
-  if (!name || rest.length > 0 || name.includes('/') || name.startsWith('.') || (policy !== undefined && policy !== 'ppo' && policy !== 'random')) {
-    throw new HttpError(400, `bad run id ${id}`);
-  }
-  const root = policy === undefined ? join(BENCH, name) : join(BENCH, name, 'baselines', policy);
-  if (!existsSync(join(root, 'meta.json'))) throw new HttpError(404, `unknown run ${id}`);
+  if (id === '' || id.includes('/') || id.startsWith('.')) throw new HttpError(400, `bad run id ${id}`);
+  const root = join(BENCH, id);
+  if (!recorded(root)) throw new HttpError(404, `unknown run ${id}`);
   return root;
 }
 
-function runs(): unknown[] {
+function runs(): RunIndexEntry[] {
   const best = existsSync(BEST) ? readFileSync(BEST, 'utf8').trim() : '';
-  const ids = readdirSync(BENCH).filter((n) => n !== 'baselines' && !n.startsWith('.') && existsSync(join(BENCH, n, 'meta.json')));
-  return ids
-    .map((id) => {
+  return readdirSync(BENCH)
+    .filter((id) => !id.startsWith('.') && recorded(join(BENCH, id)))
+    .map((id): RunIndexEntry => {
       const m = meta(join(BENCH, id));
       return {
         id,
@@ -62,36 +48,19 @@ function runs(): unknown[] {
         policy: m.policy,
         preset: m.preset,
         role: id === best ? 'best' : null,
-        windows: ends(join(BENCH, id)).length,
       };
     })
-    .filter((x) => x.windows > 0)
-    .sort((a, b) => a.startedAt !== b.startedAt ? (a.startedAt > b.startedAt ? -1 : 1) : a.id > b.id ? -1 : 1)
-    .map(({ windows: _, ...entry }) => entry);
+    .sort((a, b) => a.startedAt !== b.startedAt ? (a.startedAt > b.startedAt ? -1 : 1) : a.id > b.id ? -1 : 1);
 }
 
-function detail(id: string): unknown {
-  const root = runRoot(id);
+function snapshot(root: string): ArrayBuffer {
   const m = meta(root);
-  const baselines: Record<string, string> = {};
-  if (m.policy === 'oak') {
-    for (const policy of ['ppo', 'random']) {
-      const b = join(root, 'baselines', policy);
-      if (existsSync(join(b, 'meta.json')) && meta(b).finishedAt !== undefined) baselines[policy] = `${id}:${policy}`;
-    }
-  }
-  return { id, meta: m, baselines };
-}
-
-function series(root: string, col: string): Blob {
-  if (!readdirSync(join(root, 'series')).includes(`${col}.f32`)) throw new HttpError(404, `no column ${col}`);
-  const e = bytes(join(root, 'ends.u32'));
-  const w = bytes(join(root, 'wall.f32'));
-  const v = bytes(join(root, `series/${col}.f32`));
-  const W = e.byteLength / 4;
-  const L = meta(root).seeds.length;
-  if (w.byteLength !== W * 4 || v.byteLength !== W * L * 4) throw new HttpError(500, `${col}: ${W} windows, wall ${w.byteLength} B, values ${v.byteLength} B`);
-  return new Blob([new Uint32Array([W, L]), e, w, v]);
+  const baselines = existsSync(join(root, JUDGE_FILE)) ? (JSON.parse(readFileSync(join(root, JUDGE_FILE), 'utf8')) as Baselines) : {};
+  const ends = new Uint32Array(bytes(join(root, ENGINE_FILES.ends)));
+  const rewardSum = new Float32Array(bytes(join(root, ENGINE_FILES.rewardSum)));
+  const hash = new BigUint64Array(bytes(join(root, ENGINE_FILES.hash)));
+  const health = new Uint32Array(bytes(join(root, ENGINE_FILES.health)));
+  return packRecording(m, baselines, ends, rewardSum, hash, health);
 }
 
 async function slice(req: Request, path: string, what: string): Promise<Response> {
@@ -108,7 +77,6 @@ function poses(req: Request, id: string, lane: string): Promise<Response> {
   if (!/^\d+$/.test(lane)) throw new HttpError(400, `bad lane ${lane}`);
   return slice(req, join(runRoot(id), 'poses', lane), `lane ${lane}`);
 }
-
 
 const workerBuild = await Bun.build({
   entrypoints: [resolve(import.meta.dir, 'src/scenes/jelly-bean-world/scentfield.worker.ts'), resolve(import.meta.dir, 'src/theater/tape.worker.ts')],
@@ -136,8 +104,7 @@ const server = Bun.serve({
   routes: {
     '/': index,
     '/api/runs': () => Response.json(runs()),
-    '/api/runs/:id': (req) => Response.json(detail(req.params.id)),
-    '/api/runs/:id/series/:col': (req) => new Response(series(runRoot(req.params.id), req.params.col)),
+    '/api/runs/:id': (req) => new Response(snapshot(runRoot(req.params.id))),
     '/api/runs/:id/poses/:lane': (req) => poses(req, req.params.id, req.params.lane),
     '/scentfield.worker.js': () => new Response(scentfieldWorker),
     '/tape.worker.js': () => new Response(tapeWorker),

@@ -1,7 +1,7 @@
 import { isEnvId, type EnvId } from './data/envs';
-import type { RunMeta, Tape } from './data/oak';
+import { HEALTH_ALIVE, type Meta, type Recording } from './data/layout';
 
-export function runEnvs(meta: RunMeta): EnvId[] {
+export function runEnvs(meta: Meta): EnvId[] {
   const out: EnvId[] = [];
   for (const entry of meta.envSchedule) {
     if (!isEnvId(entry.envId)) throw new Error(`run schedule names unknown env ${entry.envId}`);
@@ -10,7 +10,7 @@ export function runEnvs(meta: RunMeta): EnvId[] {
   return out;
 }
 
-export function envLanes(meta: RunMeta, envId: string): { lanes: number[]; seeds: number[] } {
+export function envLanes(meta: Meta, envId: string): { lanes: number[]; seeds: number[] } {
   const laneOfSeed = new Map(meta.seeds.map((seed, lane) => [seed, lane]));
   const lanes: number[] = [];
   const seeds: number[] = [];
@@ -27,22 +27,22 @@ export function envLanes(meta: RunMeta, envId: string): { lanes: number[]; seeds
   return { lanes, seeds };
 }
 
-const at = (tape: Tape, column: Float32Array, row: number, lane: number): number => column[row * tape.laneCount + lane] ?? NaN;
+const at = (rec: Recording, row: number, lane: number): number => rec.rewardSum[row * rec.lanes + lane] ?? NaN;
 
-const derived = new WeakMap<Tape, Map<string, unknown>>();
+const derived = new WeakMap<Recording, Map<string, unknown>>();
 
-export function cached<T>(tape: Tape, key: string, make: () => T): T {
-  let byKey = derived.get(tape);
-  if (byKey === undefined) derived.set(tape, (byKey = new Map()));
+export function cached<T>(rec: Recording, key: string, make: () => T): T {
+  let byKey = derived.get(rec);
+  if (byKey === undefined) derived.set(rec, (byKey = new Map()));
   if (!byKey.has(key)) byKey.set(key, make());
   return byKey.get(key) as T;
 }
 
-export function leaderSeed(tape: Tape, lanes: { lanes: number[]; seeds: number[] }): number | null {
+export function leaderSeed(rec: Recording, lanes: { lanes: number[]; seeds: number[] }): number | null {
   let top = lanes.seeds[0] ?? null;
   let topRate = -Infinity;
   lanes.lanes.forEach((lane, i) => {
-    const rate = deliveredRate(tape, lane);
+    const rate = deliveredRate(rec, lane);
     if (rate !== null && rate > topRate) {
       topRate = rate;
       top = lanes.seeds[i] ?? null;
@@ -73,9 +73,9 @@ export interface Rates {
   p90: (number | null)[];
 }
 
-function binned(tape: Tape, lanes: readonly number[], value: (row: number, lane: number) => number): Rates {
+function binned(rec: Recording, lanes: readonly number[], value: (row: number, lane: number) => number): Rates {
   const out: Rates = { x: [], perLane: lanes.map(() => []), iqm: [], p10: [], p90: [] };
-  for (let r = 0; r < tape.rows; r++) {
+  for (let r = 0; r < rec.windows; r++) {
     const finite: number[] = [];
     lanes.forEach((lane, i) => {
       const v = value(r, lane);
@@ -83,7 +83,7 @@ function binned(tape: Tape, lanes: readonly number[], value: (row: number, lane:
       if (Number.isFinite(v)) finite.push(v);
     });
     finite.sort((a, b) => a - b);
-    out.x.push(tape.stepEnd[r] ?? 0);
+    out.x.push(rec.ends[r] ?? 0);
     out.iqm.push(finite.length > 0 ? iqmSorted(finite) : null);
     out.p10.push(finite.length > 0 ? percentileSorted(finite, 10) : null);
     out.p90.push(finite.length > 0 ? percentileSorted(finite, 90) : null);
@@ -93,57 +93,54 @@ function binned(tape: Tape, lanes: readonly number[], value: (row: number, lane:
 
 export const rateWindow = (steps: number): number => Math.max(Math.floor(steps / 5), 1);
 
-export function windowedRates(tape: Tape, lanes: readonly number[], win: number): Rates {
-  const priorRow = new Int32Array(tape.rows);
-  const spans = new Float64Array(tape.rows);
+export function windowedRates(rec: Recording, lanes: readonly number[], win: number): Rates {
+  const priorRow = new Int32Array(rec.windows);
+  const spans = new Float64Array(rec.windows);
   let j = 0;
-  for (let i = 0; i < tape.rows; i++) {
-    const endI = tape.stepEnd[i] ?? 0;
-    while (j < tape.rows && (tape.stepEnd[j] ?? 0) <= endI - win) j++;
+  for (let i = 0; i < rec.windows; i++) {
+    const endI = rec.ends[i] ?? 0;
+    while (j < rec.windows && (rec.ends[j] ?? 0) <= endI - win) j++;
     priorRow[i] = j - 1;
-    spans[i] = endI - (j < 1 ? 0 : tape.stepEnd[j - 1] ?? 0);
+    spans[i] = endI - (j < 1 ? 0 : rec.ends[j - 1] ?? 0);
   }
-  return binned(tape, lanes, (row, lane) => {
+  return binned(rec, lanes, (row, lane) => {
     const jj = priorRow[row] ?? -1;
     const span = spans[row] ?? 0;
-    const si = at(tape, tape.rewardSum, row, lane);
-    const sj = jj < 0 ? 0 : at(tape, tape.rewardSum, jj, lane);
+    const si = at(rec, row, lane);
+    const sj = jj < 0 ? 0 : at(rec, jj, lane);
     return span > 0 ? (si - sj) / span : NaN;
   });
 }
 
-export const rhoRates = (tape: Tape, lanes: readonly number[]): Rates => binned(tape, lanes, (row, lane) => at(tape, tape.rho, row, lane));
-
-export function deliveredRate(tape: Tape, lane: number): number | null {
-  for (let r = tape.rows - 1; r >= 0; r--) {
-    const v = at(tape, tape.rewardSum, r, lane);
-    const step = tape.stepEnd[r] ?? 0;
+export function deliveredRate(rec: Recording, lane: number): number | null {
+  for (let r = rec.windows - 1; r >= 0; r--) {
+    const v = at(rec, r, lane);
+    const step = rec.ends[r] ?? 0;
     if (Number.isFinite(v)) return step > 0 ? v / step : null;
   }
   return null;
 }
 
-export function deathStep(tape: Tape, lane: number): number | null {
-  if (tape.rows === 0) return null;
-  const step = at(tape, tape.deathStep, tape.rows - 1, lane);
-  return Number.isFinite(step) ? step : null;
+export function deathStep(rec: Recording, lane: number): number | null {
+  const step = rec.health[lane];
+  return step === undefined || step === HEALTH_ALIVE ? null : step;
 }
 
-export function survival(tape: Tape, lanes: readonly number[]): { x: number[]; surviving: number[]; positive: number[] } {
-  const deaths = lanes.map((lane) => deathStep(tape, lane) ?? Infinity);
+export function survival(rec: Recording, lanes: readonly number[]): { x: number[]; surviving: number[]; positive: number[] } {
+  const deaths = lanes.map((lane) => deathStep(rec, lane) ?? Infinity);
   const out = { x: [] as number[], surviving: [] as number[], positive: [] as number[] };
   const n = Math.max(1, lanes.length);
-  for (let r = 0; r < tape.rows; r++) {
-    const step = tape.stepEnd[r] ?? 0;
+  for (let r = 0; r < rec.windows; r++) {
+    const step = rec.ends[r] ?? 0;
     out.x.push(step);
     out.surviving.push(deaths.filter((d) => d > step).length / n);
-    out.positive.push(lanes.filter((lane) => at(tape, tape.rewardSum, r, lane) > 0).length / n);
+    out.positive.push(lanes.filter((lane) => at(rec, r, lane) > 0).length / n);
   }
   return out;
 }
 
-export function peakStep(tape: Tape, lane: number, win: number): number | null {
-  const rates = windowedRates(tape, [lane], win);
+export function peakStep(rec: Recording, lane: number, win: number): number | null {
+  const rates = windowedRates(rec, [lane], win);
   let peak = -Infinity;
   let step: number | null = null;
   rates.perLane[0]!.forEach((rate, row) => {

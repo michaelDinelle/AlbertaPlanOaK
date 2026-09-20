@@ -1,4 +1,4 @@
-import type { Policy } from '../data/oak';
+import type { Policy } from '../data/layout';
 
 export const POLICY_ORDER = ['oak', 'ppo', 'random'] as const;
 export const POLICY_NAMES: Record<Policy, string> = { oak: 'OaK', ppo: 'PPO', random: 'Random' };

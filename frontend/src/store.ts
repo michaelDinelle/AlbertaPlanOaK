@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from 'react';
 import type { EnvId } from './data/envs';
-import type { Policy, RunDetail, RunIndexEntry, Tape } from './data/oak';
+import type { Policy, Recording, RunIndexEntry } from './data/layout';
 import type { Tick } from './theater/recording';
 
 export type Panel = 'reward' | 'standings' | 'health';
@@ -17,8 +17,7 @@ export const EMPTY_STAGE: StageMeta = { status: 'empty', note: null, frameCount:
 
 export interface State {
   runs: RunIndexEntry[] | null;
-  details: Record<string, RunDetail>;
-  tapes: Record<string, Tape>;
+  recordings: Record<string, Recording>;
   runId: string | null;
   policy: Policy;
   envId: EnvId | null;
@@ -34,8 +33,7 @@ export interface State {
 
 let value: State = {
   runs: null,
-  details: {},
-  tapes: {},
+  recordings: {},
   runId: null,
   policy: 'oak',
   envId: null,
@@ -71,6 +69,4 @@ export const SPEEDS = [1, 4, 16, 64, 256, 1024];
 export const cycleSpeed = (): void => patch({ speed: SPEEDS[(SPEEDS.indexOf(value.speed) + 1) % SPEEDS.length] ?? 1 });
 export const setStage = (stage: Partial<StageMeta>): void => patch({ stage: { ...value.stage, ...stage } });
 export const fail = (error: unknown): void => patch({ error: error instanceof Error ? error.message : String(error) });
-export const addDetail = (detail: RunDetail, tape: Tape): void =>
-  patch({ details: { ...value.details, [detail.id]: detail }, tapes: { ...value.tapes, [detail.id]: tape } });
-export const addTape = (id: string, tape: Tape): void => patch({ tapes: { ...value.tapes, [id]: tape } });
+export const addRecording = (recording: Recording): void => patch({ recordings: { ...value.recordings, [recording.id]: recording } });

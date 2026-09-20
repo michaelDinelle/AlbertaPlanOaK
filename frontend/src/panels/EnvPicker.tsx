@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import type { EnvId } from '../data/envs';
-import type { RunDetail } from '../data/oak';
+import type { Recording } from '../data/layout';
 import { deliveredRate, envLanes } from '../derive';
 import { SCENES, nameOf } from '../scenes/table';
 import { selectEnv, store } from '../store';
@@ -29,24 +29,23 @@ function Tile({ env, seeds, current, onPick }: { env: EnvId; seeds: number; curr
   );
 }
 
-function Wall({ envs, detail, onClose }: { envs: EnvId[]; detail: RunDetail | null; onClose: () => void }) {
-  const { envId, tapes } = store.use();
+function Wall({ envs, run, onClose }: { envs: EnvId[]; run: Recording | null; onClose: () => void }) {
+  const { envId } = store.use();
   const [query, setQuery] = useState('');
   const [sort, setSort] = useState<Sort>('name');
-  const tape = detail === null ? null : tapes[detail.id] ?? null;
   const rows = useMemo(() => {
     const q = query.trim().toLowerCase();
-    const seeds = (env: EnvId): number => (detail === null ? 0 : envLanes(detail.meta, env).seeds.length);
+    const seeds = (env: EnvId): number => (run === null ? 0 : envLanes(run.meta, env).seeds.length);
     const reward = (env: EnvId): number => {
-      if (detail === null || tape === null) return -Infinity;
-      const lanes = envLanes(detail.meta, env).lanes;
-      return lanes.reduce((sum, lane) => sum + (deliveredRate(tape, lane) ?? NaN), 0) / lanes.length;
+      if (run === null) return -Infinity;
+      const lanes = envLanes(run.meta, env).lanes;
+      return lanes.reduce((sum, lane) => sum + (deliveredRate(run, lane) ?? NaN), 0) / lanes.length;
     };
     return envs
       .filter((env) => q === '' || nameOf(env).toLowerCase().includes(q))
       .sort((a, b) => (sort === 'name' ? nameOf(a).localeCompare(nameOf(b)) : sort === 'seeds' ? seeds(b) - seeds(a) : reward(b) - reward(a)))
       .map((env) => ({ env, seeds: seeds(env) }));
-  }, [envs, query, sort, detail, tape]);
+  }, [envs, query, sort, run]);
   const pick = (env: EnvId): void => { selectEnv(env); onClose(); };
   return (
     <div className="fixed inset-0 z-40 bg-black/50" onPointerDown={onClose}>
@@ -92,13 +91,13 @@ function Wall({ envs, detail, onClose }: { envs: EnvId[]; detail: RunDetail | nu
   );
 }
 
-export function EnvPicker({ envs, detail, seed }: { envs: EnvId[]; detail: RunDetail | null; seed: number | null }) {
+export function EnvPicker({ envs, run, seed }: { envs: EnvId[]; run: Recording | null; seed: number | null }) {
   const { envId, seed: picked } = store.use();
   const [open, setOpen] = useState(false);
   const current = envId === null ? null : SCENES[envId];
   return (
     <>
-      {open && <Wall envs={envs} detail={detail} onClose={() => setOpen(false)} />}
+      {open && <Wall envs={envs} run={run} onClose={() => setOpen(false)} />}
       <button type="button" onClick={() => setOpen(true)} title="Choose an environment" className="glass flex items-center gap-2.5 rounded-lg p-2 pr-3.5 hover:bg-white/10">
         <span className="relative h-10 w-[71px] shrink-0 overflow-hidden rounded-md ring-1 ring-white/10" style={{ background: current === null ? undefined : gradient(current.slug) }}>
           {current !== null && <img src={`/posters/${current.slug}.webp`} alt="" draggable={false} className="absolute inset-0 h-full w-full object-cover" />}

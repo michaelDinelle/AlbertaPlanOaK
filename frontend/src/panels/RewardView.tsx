@@ -1,6 +1,6 @@
 import { memo, useCallback, useMemo, type PointerEvent, type RefObject } from 'react';
 import type { EnvId } from '../data/envs';
-import type { RunDetail, Tape } from '../data/oak';
+import type { Recording } from '../data/layout';
 import { cached, deathStep, deliveredRate, envLanes, rateWindow, windowedRates } from '../derive';
 import { formatCount, formatRate, formatSigned, formatStep } from '../format';
 import { selectSeed, store } from '../store';
@@ -87,27 +87,25 @@ export interface Comparison {
   runId: string;
 }
 
-const seriesFor = (tape: Tape, detail: RunDetail, envId: EnvId) =>
-  cached(tape, `reward/${envId}`, () => {
-    const lanes = envLanes(detail.meta, envId);
-    const rates = windowedRates(tape, lanes.lanes, rateWindow(detail.meta.steps));
+const seriesFor = (rec: Recording, envId: EnvId) =>
+  cached(rec, `reward/${envId}`, () => {
+    const lanes = envLanes(rec.meta, envId);
+    const rates = windowedRates(rec, lanes.lanes, rateWindow(rec.meta.steps));
     const rows = lanes.seeds
-      .map((s, i) => ({ seed: s, rate: deliveredRate(tape, lanes.lanes[i]!), death: deathStep(tape, lanes.lanes[i]!), spark: sparkPath(rates.perLane[i] ?? [], rates.x) }))
+      .map((s, i) => ({ seed: s, rate: deliveredRate(rec, lanes.lanes[i]!), death: deathStep(rec, lanes.lanes[i]!), spark: sparkPath(rates.perLane[i] ?? [], rates.x) }))
       .sort((a, b) => (b.rate ?? -Infinity) - (a.rate ?? -Infinity) || a.seed - b.seed);
     return { lanes, rates, rows };
   });
 
 export function RewardView({ stage, runId, envId, seed, compare }: { stage: RefObject<Stage | null>; runId: string; envId: EnvId; seed: number; compare: Comparison[] }) {
   const picked = store.use((s) => s.seed);
-  const details = store.use((s) => s.details);
-  const tapes = store.use((s) => s.tapes);
-  const active = details[runId]!;
-  const tape = tapes[runId]!;
+  const recordings = store.use((s) => s.recordings);
+  const active = recordings[runId]!;
   const policy = active.meta.policy;
   const tone = POLICY_TOKENS[policy];
   const horizon = Math.max(1, active.meta.steps);
   const win = rateWindow(active.meta.steps);
-  const { lanes, rates, rows } = seriesFor(tape, active, envId);
+  const { lanes, rates, rows } = seriesFor(active, envId);
   const primary = `${POLICY_NAMES[policy]} average`;
   const spec = useMemo<PlotSpec>(() => ({
     xMax: horizon,
@@ -115,13 +113,13 @@ export function RewardView({ stage, runId, envId, seed, compare }: { stage: RefO
     band: { x: rates.x, lo: rates.p10, hi: rates.p90, tone },
     lines: [
       ...compare.map((c) => {
-        const other = seriesFor(tapes[c.runId]!, details[c.runId]!, envId).rates;
+        const other = seriesFor(recordings[c.runId]!, envId).rates;
         return { x: other.x, y: other.iqm, tone: c.tone, width: 1.2, label: `${c.label} average` };
       }),
       { x: rates.x, y: rates.iqm, tone, width: 1.6, label: primary },
       { x: rates.x, y: rates.perLane[lanes.seeds.indexOf(seed)] ?? [], tone: 'var(--color-seed)', width: 1.2, label: 'selected seed' },
     ],
-  }), [horizon, rates, tone, compare, tapes, details, envId, primary, lanes, seed]);
+  }), [horizon, rates, tone, compare, recordings, envId, primary, lanes, seed]);
   const seek = useCallback((step: number): void => stage.current?.seekStep(step), [stage]);
   const last = rates.x[rates.x.length - 1] ?? 0;
 

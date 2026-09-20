@@ -1,5 +1,5 @@
 import { useEffect, useRef, type ReactNode, type RefObject } from 'react';
-import type { RunDetail } from '../data/oak';
+import type { Policy } from '../data/layout';
 import { formatClock, formatCount, formatStep } from '../format';
 import { cycleSpeed, patch, selectPolicy, store } from '../store';
 import { frameListeners, type Frame, type Stage } from '../theater/stage';
@@ -22,20 +22,20 @@ function BarButton({ on, disabled, title, onClick, children }: { on?: boolean; d
 
 const POLICY_ON = { oak: 'bg-oak/25 ring-oak/50', ppo: 'bg-ppo/25 ring-ppo/50', random: 'bg-random/25 ring-random/50' } as const;
 
-export function PolicySwitch({ detail }: { detail: RunDetail | null }) {
+export function PolicySwitch({ available }: { available: Record<Policy, boolean> }) {
   const { policy } = store.use();
   return (
     <div className="glass flex h-12 items-center gap-1 rounded-lg px-2">
       <span className="px-1.5 text-2xs uppercase tracking-label">policy</span>
       {POLICY_ORDER.map((p) => {
-        const absent = p === 'oak' ? detail === null : detail?.baselines[p] === undefined;
+        const absent = !available[p];
         return (
           <button
             key={p}
             type="button"
             aria-disabled={absent}
             aria-pressed={policy === p}
-            title={absent ? `No recorded ${POLICY_NAMES[p]} baseline for this run` : `Watch the ${POLICY_NAMES[p]} fleet (p cycles)`}
+            title={absent ? `No recorded ${POLICY_NAMES[p]} baseline for this environment` : `Watch the ${POLICY_NAMES[p]} fleet (p cycles)`}
             onClick={absent ? undefined : () => selectPolicy(p)}
             className={`flex h-8 items-center rounded-md px-3 text-xs font-medium ${absent ? 'cursor-default text-ink-faint' : policy === p ? `text-ink ring-1 ring-inset ${POLICY_ON[p]}` : 'text-ink-dim hover:bg-white/10 hover:text-ink'}`}
           >

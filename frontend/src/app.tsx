@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef } from 'react';
 import { entryFor, parseCatalog } from '@sim/catalog';
-import { fetchDetail, fetchRuns, loadTape, type RunIndexEntry } from './data/oak';
+import { POLICIES, type Policy, type Recording, type RunIndexEntry } from './data/layout';
+import { fetchRecording, fetchRuns } from './data/oak';
 import { envLanes, leaderSeed, peakStep, rateWindow, runEnvs } from './derive';
 import { formatDate, formatStep } from './format';
 import { BEST_TOKEN, POLICY_NAMES, POLICY_ORDER, POLICY_TOKENS } from './panels/charts';
@@ -11,24 +12,26 @@ import { AUTHOR_LINKS } from './panels/links';
 import { PlaybackBar, PolicySwitch } from './panels/PlaybackBar';
 import { RewardView, type Comparison } from './panels/RewardView';
 import { StandingsView } from './panels/StandingsView';
-import { addDetail, addTape, cycleSpeed, fail, patch, selectEnv, selectRun, store, type Panel } from './store';
+import { addRecording, cycleSpeed, fail, patch, selectEnv, selectRun, store, type Panel } from './store';
 import { mountStage, type Alternate, type Stage } from './theater/stage';
 
 const PANELS: Record<Panel, string> = { reward: 'Reward', standings: 'Standings', health: 'Health' };
 const loading = new Set<string>();
 
-async function ensure(id: string): Promise<void> {
-  if (loading.has(id) || store.get().details[id] !== undefined) return;
+async function ensure(id: string, refresh = false): Promise<void> {
+  if (loading.has(id) || (!refresh && store.get().recordings[id] !== undefined)) return;
   loading.add(id);
   try {
-    const [detail, tape] = await Promise.all([fetchDetail(id), loadTape(id)]);
-    addDetail(detail, tape);
+    addRecording(await fetchRecording(id));
   } catch (error) {
     fail(error);
   } finally {
     loading.delete(id);
   }
 }
+
+export const baselineId = (run: Recording | null, policy: Policy, envId: string | null): string | null =>
+  policy === 'oak' ? run?.id ?? null : envId === null ? null : run?.baselines[policy]?.[envId] ?? null;
 
 const runLabel = (run: RunIndexEntry): string =>
   [formatDate(run.startedAt), run.role === 'best' ? 'best' : null, run.inFlight ? 'live' : null, run.id.slice(0, 7), `${run.envIds.length} envs · ${formatStep(run.steps)} steps · ${run.preset}`]
@@ -40,45 +43,46 @@ export function App() {
   const host = useRef<HTMLDivElement | null>(null);
   const stage = useRef<Stage | null>(null);
   const entry = s.runs?.find((run) => run.id === s.runId) ?? null;
-  const detail = s.runId === null ? null : s.details[s.runId] ?? null;
-  const bestId = s.runs?.find((run) => run.role === 'best')?.id;
-  const baselineId = s.policy === 'oak' ? s.runId : detail?.baselines[s.policy] ?? null;
-  const active = baselineId === null ? null : s.details[baselineId] ?? null;
-  const tape = active === null ? undefined : s.tapes[active.id];
+  const run = s.runId === null ? null : s.recordings[s.runId] ?? null;
+  const bestId = s.runs?.find((candidate) => candidate.role === 'best')?.id;
+  const activeId = baselineId(run, s.policy, s.envId);
+  const active = activeId === null ? null : s.recordings[activeId] ?? null;
   const live = s.policy === 'oak' && entry?.inFlight === true;
-  const envs = useMemo(() => (detail === null ? [] : runEnvs(detail.meta)), [detail]);
+  const envs = useMemo(() => (run === null ? [] : runEnvs(run.meta)), [run]);
+  const referenced = useMemo(() => (run === null ? [] : [...new Set(Object.values(run.baselines).flatMap((byEnv) => Object.values(byEnv)))]), [run]);
+  const available = useMemo(() => Object.fromEntries(POLICIES.map((policy) => [policy, baselineId(run, policy, s.envId) !== null])) as Record<Policy, boolean>, [run, s.envId]);
   const lanes = useMemo(() => (active === null || s.envId === null ? null : envLanes(active.meta, s.envId)), [active, s.envId]);
   const seed = useMemo(() => {
-    if (lanes === null || tape === undefined || lanes.seeds.length === 0) return null;
+    if (lanes === null || active === null || lanes.seeds.length === 0) return null;
     if (s.seed !== null && lanes.seeds.includes(s.seed)) return s.seed;
-    return leaderSeed(tape, lanes);
-  }, [lanes, tape, s.seed]);
+    return leaderSeed(active, lanes);
+  }, [lanes, active, s.seed]);
   const startStep = useMemo(
-    () => (active === null || lanes === null || tape === undefined || seed === null ? null : peakStep(tape, lanes.lanes[lanes.seeds.indexOf(seed)]!, rateWindow(active.meta.steps))),
-    [active, lanes, tape, seed],
+    () => (active === null || lanes === null || seed === null ? null : peakStep(active, lanes.lanes[lanes.seeds.indexOf(seed)]!, rateWindow(active.meta.steps))),
+    [active, lanes, seed],
   );
   const alternates = useMemo<Alternate[]>(() => {
     const envId = s.envId;
     if (active === null || envId === null || seed === null) return [];
-    return [s.runId, detail?.baselines.ppo, detail?.baselines.random].flatMap((id) => {
-      const other = id === null || id === undefined || id === active.id ? undefined : s.details[id];
-      const otherTape = id === null || id === undefined ? undefined : s.tapes[id];
-      if (other === undefined || otherTape === undefined) return [];
+    return POLICY_ORDER.flatMap((policy) => {
+      const id = baselineId(run, policy, envId);
+      const other = id === null || id === active.id ? undefined : s.recordings[id];
+      if (other === undefined) return [];
       const laneSet = envLanes(other.meta, envId);
-      const otherSeed = s.seed === null ? leaderSeed(otherTape, laneSet) : seed;
+      const otherSeed = s.seed === null ? leaderSeed(other, laneSet) : seed;
       const lane = otherSeed === null ? undefined : laneSet.lanes[laneSet.seeds.indexOf(otherSeed)];
       return lane === undefined || otherSeed === null ? [] : [{ runId: other.id, lane, seed: otherSeed, entry: entryFor(parseCatalog(other.meta.envCatalog), envId), horizon: other.meta.steps }];
     });
-  }, [active, s.envId, seed, s.seed, s.runId, detail, s.details, s.tapes]);
+  }, [active, s.envId, seed, s.seed, run, s.recordings]);
   const compare = useMemo<Comparison[]>(() => {
     const out: Comparison[] = [];
     for (const policy of POLICY_ORDER) {
-      const id = policy === 'oak' ? s.runId : detail?.baselines[policy];
-      if (policy !== s.policy && id !== null && id !== undefined && s.tapes[id] !== undefined) out.push({ key: policy, label: POLICY_NAMES[policy], tone: POLICY_TOKENS[policy], runId: id });
+      const id = baselineId(run, policy, s.envId);
+      if (policy !== s.policy && id !== null && s.recordings[id] !== undefined) out.push({ key: policy, label: POLICY_NAMES[policy], tone: POLICY_TOKENS[policy], runId: id });
     }
-    if (bestId !== undefined && bestId !== s.runId && s.tapes[bestId] !== undefined) out.push({ key: 'best', label: 'Best', tone: BEST_TOKEN, runId: bestId });
+    if (bestId !== undefined && bestId !== s.runId && s.recordings[bestId] !== undefined) out.push({ key: 'best', label: 'Best', tone: BEST_TOKEN, runId: bestId });
     return out;
-  }, [s.runId, s.policy, s.tapes, detail, bestId]);
+  }, [run, s.runId, s.policy, s.envId, s.recordings, bestId]);
   const stride = active?.meta.batch ?? 1;
 
   useEffect(() => {
@@ -86,25 +90,24 @@ export function App() {
     void poll();
     const timer = setInterval(() => {
       const runs = store.get().runs;
-      if (runs === null || runs.some((run) => run.inFlight)) void poll();
+      if (runs === null || runs.some((candidate) => candidate.inFlight)) void poll();
     }, 5000);
     return () => clearInterval(timer);
   }, []);
 
   useEffect(() => {
     if (s.runId !== null || s.runs === null) return;
-    const pick = s.runs.find((run) => run.role === 'best') ?? s.runs.find((run) => run.policy === 'oak');
+    const pick = s.runs.find((candidate) => candidate.role === 'best') ?? s.runs.find((candidate) => candidate.policy === 'oak');
     if (pick !== undefined) selectRun(pick.id);
   }, [s.runs, s.runId]);
 
   useEffect(() => {
-    for (const id of [s.runId, bestId, detail?.baselines.ppo, detail?.baselines.random]) if (id !== null && id !== undefined) void ensure(id);
-  }, [s.runs, s.runId, bestId, detail]);
+    for (const id of [s.runId, bestId, ...referenced]) if (id !== null && id !== undefined) void ensure(id);
+  }, [s.runs, s.runId, bestId, referenced]);
 
   useEffect(() => {
-    if (s.runId === null || entry?.inFlight !== true || s.tapes[s.runId] === undefined) return;
-    const id = s.runId;
-    loadTape(id).then((next) => addTape(id, next), fail);
+    if (s.runId === null || entry?.inFlight !== true || s.recordings[s.runId] === undefined) return;
+    void ensure(s.runId, true);
     stage.current?.pull();
   }, [s.runs]);
 
@@ -158,7 +161,7 @@ export function App() {
         if (next !== undefined) selectEnv(next);
       };
       const cyclePolicy = (): void => {
-        const open = POLICY_ORDER.filter((p) => (p === 'oak' ? detail !== null : detail?.baselines[p] !== undefined));
+        const open = POLICY_ORDER.filter((p) => available[p]);
         const next = open[(open.indexOf(state.policy) + 1) % open.length];
         if (next !== undefined) patch({ policy: next });
       };
@@ -185,12 +188,12 @@ export function App() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [stride, envs, detail]);
+  }, [stride, envs, available]);
 
   const notice = s.error
     ?? s.stage.note
     ?? (s.runs !== null && s.runId === null ? 'No run to show yet' : null)
-    ?? (s.policy !== 'oak' && detail !== null && baselineId === null ? `No recorded ${POLICY_NAMES[s.policy]} baseline for this run` : null);
+    ?? (s.policy !== 'oak' && run !== null && activeId === null ? `No recorded ${POLICY_NAMES[s.policy]} baseline for this environment` : null);
 
   return (
     <div className="fixed inset-0 overflow-hidden bg-ground">
@@ -224,9 +227,9 @@ export function App() {
             ))}
             <button type="button" onClick={() => patch({ panelOpen: false })} aria-label="Hide the side panel" title="Hide the side panel (c)" className="ml-auto flex size-8 items-center justify-center rounded-md text-ink-dim hover:bg-white/10 hover:text-ink"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="size-4" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2" /><path d="M15 3v18" /></svg></button>
           </div>
-          {s.panel === 'reward' && active !== null && tape !== undefined && s.envId !== null && seed !== null && <RewardView stage={stage} runId={active.id} envId={s.envId} seed={seed} compare={compare} />}
+          {s.panel === 'reward' && active !== null && s.envId !== null && seed !== null && <RewardView stage={stage} runId={active.id} envId={s.envId} seed={seed} compare={compare} />}
           {s.panel === 'standings' && <StandingsView />}
-          {s.panel === 'health' && active !== null && tape !== undefined && s.envId !== null && <HealthView runId={active.id} envId={s.envId} />}
+          {s.panel === 'health' && active !== null && s.envId !== null && <HealthView runId={active.id} envId={s.envId} />}
         </aside>
       ) : (
         <button type="button" onClick={() => patch({ panelOpen: true })} aria-label="Show the side panel" title="Show the side panel (c)" className="glass absolute right-4 top-4 z-20 flex size-9 items-center justify-center rounded-lg text-ink-dim hover:bg-white/10 hover:text-ink"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="size-4" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2" /><path d="M15 3v18" /></svg></button>
@@ -234,10 +237,10 @@ export function App() {
       <div className="absolute inset-x-0 bottom-4 z-30 grid grid-cols-[1fr_minmax(0,760px)_1fr] items-end gap-3 px-4">
         <div className="flex flex-col items-start gap-3">
           {s.envId === 'JellyBeanWorld-cont-v0' && <JbwLegend />}
-          <EnvPicker envs={envs} detail={detail} seed={seed} />
+          <EnvPicker envs={envs} run={run} seed={seed} />
         </div>
         <PlaybackBar stage={stage} stride={stride} live={live} />
-        <div className="justify-self-end"><PolicySwitch detail={detail} /></div>
+        <div className="justify-self-end"><PolicySwitch available={available} /></div>
       </div>
     </div>
   );

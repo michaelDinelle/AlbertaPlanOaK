@@ -18,6 +18,7 @@ struct OakFleetLane {
     uint deathStep, deathDetector;
 
     uint envKind;
+    uint hashLo, hashHi;
 };
 
 inline device uint *laneEnvWords(device uint *envState, uint envK) {
@@ -42,7 +43,11 @@ struct OakLaneSnapshot {
     uint paramNonFinite;
     float rewardSum, rho;
     uint deathStep, deathDetector;
+    uint hashLo, hashHi;
 };
+
+constant ulong OAK_HASH_BASIS = 0xcbf29ce484222325ul;
+constant ulong OAK_HASH_PRIME = 0x100000001b3ul;
 
 inline float finiteOrZero(float x) {
     return isfinite(x) ? x : 0.0f;
@@ -60,6 +65,8 @@ inline void resetLane(device OakFleetLane *lane, device uint *envState, constant
                       uint seed) {
     lane->envKind = kind;
     lane->deathStep = OAK_DEATH_NONE;
+    lane->hashLo = uint(OAK_HASH_BASIS);
+    lane->hashHi = uint(OAK_HASH_BASIS >> 32u);
     uint elapsed = 0u, resets = 0u;
     device uint *words = laneEnvWords(envState, kind);
     if (laneIsMj(kind))
@@ -125,6 +132,10 @@ inline float advanceEnvironment(device OakFleetLane *lane, device uint *envState
 
 inline void accumulateReward(device OakFleetLane *lane, float reward, uint stepNum,
                              constant OakFleetEnvCfg &ecfg) {
+    ulong hash = (ulong(lane->hashHi) << 32u) | ulong(lane->hashLo);
+    hash = (hash ^ ulong(as_type<uint>(reward))) * OAK_HASH_PRIME;
+    lane->hashLo = uint(hash);
+    lane->hashHi = uint(hash >> 32u);
     if (isfinite(reward)) {
         float adjusted = reward - lane->rewardSumCompensation;
         float sum = lane->rewardSum + adjusted;
@@ -164,7 +175,8 @@ inline void recordPose(uint kind, constant uint *models, device uint *state, thr
 
 inline void writeLaneSnapshot(device OakLaneSnapshot *snapshot, device const OakFleetLane *lane,
                               uint nonFinite) {
-    *snapshot = {nonFinite, lane->rewardSum, lane->averageReward, lane->deathStep, lane->deathDetector};
+    *snapshot = {nonFinite, lane->rewardSum, lane->averageReward, lane->deathStep, lane->deathDetector,
+                 lane->hashLo, lane->hashHi};
 }
 
 inline uint baselineWord(uint seed, uint stream, uint stepIdx, uint i) {

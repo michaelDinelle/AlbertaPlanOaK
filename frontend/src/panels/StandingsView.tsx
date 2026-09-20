@@ -1,5 +1,6 @@
 import { useMemo } from 'react';
-import type { Policy } from '../data/oak';
+import { baselineId } from '../app';
+import type { Policy } from '../data/layout';
 import { deliveredRate, envLanes, runEnvs } from '../derive';
 import { formatPercent, formatRate } from '../format';
 import { nameOf } from '../scenes/table';
@@ -9,15 +10,14 @@ import { POLICY_NAMES, POLICY_ORDER, POLICY_TOKENS } from './charts';
 const WINS_HINT = 'mean reward per step over all seeds · wins paired per seed vs PPO, ties count half';
 
 export function StandingsView() {
-  const { runId, details, tapes, envId } = store.use();
-  const oak = runId === null ? null : details[runId] ?? null;
+  const { runId, recordings, envId } = store.use();
+  const oak = runId === null ? null : recordings[runId] ?? null;
   const rows = useMemo(() => {
     if (oak === null) return [];
     const perEnv = (policy: Policy, env: string): number[] | null => {
-      const id = policy === 'oak' ? oak.id : oak.baselines[policy];
-      const detail = id === undefined ? undefined : details[id];
-      const tape = id === undefined ? undefined : tapes[id];
-      return detail === undefined || tape === undefined ? null : envLanes(detail.meta, env).lanes.map((lane) => deliveredRate(tape, lane) ?? NaN);
+      const id = baselineId(oak, policy, env);
+      const rec = id === null ? undefined : recordings[id];
+      return rec === undefined ? null : envLanes(rec.meta, env).lanes.map((lane) => deliveredRate(rec, lane) ?? NaN);
     };
     return runEnvs(oak.meta)
       .map((env) => {
@@ -31,7 +31,7 @@ export function StandingsView() {
         return { env, means, wins };
       })
       .sort((x, y) => (y.means.oak ?? -Infinity) - (x.means.oak ?? -Infinity));
-  }, [oak, details, tapes]);
+  }, [oak, recordings]);
   const ahead = rows.filter((row) => row.wins !== null && row.wins > 0.5).length;
 
   return (

@@ -44,6 +44,8 @@ struct LaneSnapshot {
   var rho: Float
   var deathStep: UInt32
   var deathDetector: UInt32
+  var hashLo: UInt32
+  var hashHi: UInt32
 }
 
 struct FleetConfig {
@@ -56,7 +58,7 @@ struct FleetConfig {
 struct ShapeProbe {
   var featureCount, perceptCount, actionCount: UInt32
   var parameterStride, memoryStride, indexStride: UInt32
-  var simdWidth, threadgroupLanes, laneThreadgroupFloats, laneSimdgroups: UInt32
+  var simdWidth, threadgroupLanes: UInt32
 }
 
 struct EnvSpec {
@@ -296,7 +298,6 @@ struct RecordCodec {
 }
 
 let recordFloats = 2 + EnvSpec.poseLen
-let recordRewardField = 1 + EnvSpec.poseLen
 let quantizeLimit = 4.6e18
 
 func putVarint(_ out: inout [UInt8], _ value: Int64) {
@@ -400,7 +401,6 @@ struct Group {
   let count: Int
   let packed: Int
   let threads: Int
-  let sharedBytes: Int
   let initialize: MTLComputePipelineState
   let step: MTLComputePipelineState
 
@@ -415,8 +415,7 @@ struct Group {
       let shape = result.buffer.contents().load(as: ShapeProbe.self)
       self.shape = shape
       packed = Int(shape.threadgroupLanes)
-      threads = packed * Int(shape.simdWidth) * Int(shape.laneSimdgroups)
-      sharedBytes = packed * Int(shape.laneThreadgroupFloats) * 4
+      threads = packed * Int(shape.simdWidth)
       constants = gpu.constants(kind)
       var laneCount = shape.threadgroupLanes
       constants!.setConstantValue(&laneCount, type: .uint, index: 3)
@@ -430,7 +429,6 @@ struct Group {
       shape = nil
       packed = 1
       threads = 32
-      sharedBytes = 0
     }
     initialize = try gpu.pipeline("\(policy)_fleet_init", constants: constants)
     step = try gpu.pipeline("\(policy)_megastep", constants: constants, threads: threads)
@@ -467,7 +465,7 @@ final class Fleet {
       device, 2 * count,
       LaneSnapshot(
         paramNonFinite: 0,
-        rewardSum: 0, rho: 0, deathStep: 0, deathDetector: 0))
+        rewardSum: 0, rho: 0, deathStep: 0, deathDetector: 0, hashLo: 0, hashHi: 0))
     guard let modelURL = Bundle.module.url(forResource: "mjmodels", withExtension: "bin") else {
       throw err("mjmodels.bin is missing")
     }
@@ -481,7 +479,7 @@ final class Fleet {
     let constants = SharedBuffer<Float>(device, table.constantWords, 0)
     try gpu.probe("oak_env_constants_init", buffer: constants.buffer)
     common = [
-      (6, SharedBuffer<UInt8>(device, count * 36, 0).buffer),
+      (6, SharedBuffer<UInt8>(device, count * 44, 0).buffer),
       (7, SharedBuffer(device, seeds).buffer),
       (16, modelBuffer),
       (17, SharedBuffer<Float>(device, scratchSize, 0).buffer),
@@ -558,7 +556,6 @@ final class Fleet {
       var span = SIMD3<UInt32>(
         UInt32(end - start), UInt32(start), UInt32(group.first / group.packed))
       encoder.setBytes(&span, length: MemoryLayout<SIMD3<UInt32>>.stride, index: 11)
-      if group.sharedBytes > 0 { encoder.setThreadgroupMemoryLength(group.sharedBytes, index: 0) }
       encoder.dispatchThreadgroups(
         size(group.count / group.packed), threadsPerThreadgroup: size(group.threads))
     }
@@ -597,9 +594,7 @@ final class Recording: @unchecked Sendable {
   let encoders: [RecordWriter]
   let failure = Mutex<Error?>(nil)
   var gpuSeconds = 0.0
-  var deathSteps: [Float]
-  var deathDetectors: [Float]
-  let started = DispatchTime.now().uptimeNanoseconds
+  var health: [UInt32]
 
   init(root: URL, fleet: Fleet, codecs: [RecordCodec]) throws {
     self.root = root
@@ -607,9 +602,8 @@ final class Recording: @unchecked Sendable {
     encoders = codecs.flatMap { codec in
       (0..<seedsPerEnvironment).map { _ in RecordWriter(codec: codec) }
     }
-    deathSteps = Array(repeating: .nan, count: fleet.count)
-    deathDetectors = deathSteps
-    for directory in ["series", "rewards", "poses"] {
+    health = Array(repeating: UInt32.max, count: fleet.count)
+    for directory in ["series", "poses"] {
       try FileManager.default.createDirectory(
         at: root.appendingPathComponent(directory), withIntermediateDirectories: true)
     }
@@ -624,38 +618,26 @@ final class Recording: @unchecked Sendable {
     try appendFile(root.appendingPathComponent(name), data)
   }
 
+  func replace<T>(_ name: String, _ values: [T]) throws {
+    let data = values.withUnsafeBufferPointer { Data(buffer: $0) }
+    try data.write(to: root.appendingPathComponent(name), options: .atomic)
+  }
+
   func write(from start: Int, through end: Int, half: Int) throws {
     let count = fleet.count
     let snapshots = fleet.snapshots.values + half * count
-    for lane in 0..<count where deathSteps[lane].isNaN {
+    for lane in 0..<count where health[lane] == UInt32.max {
       let snapshot = snapshots[lane]
       if snapshot.deathStep != UInt32.max {
-        deathSteps[lane] = Float(snapshot.deathStep)
-        deathDetectors[lane] = Float(snapshot.deathDetector)
+        health[lane] = snapshot.deathStep
       } else if snapshot.paramNonFinite != 0 {
-        deathSteps[lane] = Float(end)
-        deathDetectors[lane] = 4
+        health[lane] = UInt32(end)
       }
     }
-    let elapsed = Float(Double(DispatchTime.now().uptimeNanoseconds - started) / 1e9)
     try append("ends.u32", [UInt32(end)])
-    try append("wall.f32", [elapsed])
     try append("series/rewardSum.f32", (0..<count).map { snapshots[$0].rewardSum })
-    try append("series/rho.f32", (0..<count).map { snapshots[$0].rho })
-    try append("series/deathStep.f32", deathSteps)
-    try append("series/deathDetector.f32", deathDetectors)
-    for (kind, entry) in schedule.enumerated() {
-      var rewards = [Float](repeating: 0, count: (end - start) * seedsPerEnvironment)
-      rewards.withUnsafeMutableBufferPointer { output in
-        for step in start..<end {
-          let offset = (step % recordCapacity * recordFloats + recordRewardField) * count
-          let source = fleet.records.values + offset + kind * seedsPerEnvironment
-          let destination = output.baseAddress! + (step - start) * seedsPerEnvironment
-          destination.update(from: source, count: seedsPerEnvironment)
-        }
-      }
-      try append("rewards/\(entry.0).f32", rewards)
-    }
+    try replace("hash.u64", (0..<count).map { UInt64(snapshots[$0].hashHi) << 32 | UInt64(snapshots[$0].hashLo) })
+    try replace("health.u32", health)
     DispatchQueue.concurrentPerform(iterations: count) { lane in
       do {
         if let chunk = try encoders[lane].encodeChunk(
@@ -752,7 +734,7 @@ func main() throws {
   let fleet = try Fleet(gpu, table: table, policy: policy, steps: steps)
   let recording = try Recording(root: root, fleet: fleet, codecs: codecs)
   var metadata: [String: Any] = [
-    "batch": fleet.count, "steps": steps, "policy": policy,
+    "batch": fleet.count, "steps": steps, "window": windowSteps, "policy": policy,
     "preset": String(presets[0].dropFirst("oak_preset_".count)),
     "startedAt": ISO8601DateFormatter().string(from: Date()),
     "seeds": schedule.flatMap { $0.1..<($0.1 + seedsPerEnvironment) },
