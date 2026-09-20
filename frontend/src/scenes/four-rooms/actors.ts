@@ -1,4 +1,4 @@
-import { sculptureMaterial, gradedGeometry } from '../key-corridor/world';
+import { gradedGeometry, sculptureMaterial } from '@kit/garden';
 import { GoalBeacon } from '@kit/grid';
 import {
   emissiveMaterial,

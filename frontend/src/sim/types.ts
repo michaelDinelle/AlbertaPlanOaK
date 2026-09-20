@@ -79,16 +79,6 @@ export interface GridGeometry {
   carvedPath?: GridCell[];
 }
 
-export const CHEETAH_FK_POINTS = [
-  'o1', 'bt', 'ft', 'head', 'bs', 'bf', 'toe_b', 'fs', 'ff', 'toe_f',
-] as const;
-
-export interface CheetahGeometry {
-  fk(qpos: ArrayLike<number>, out?: Float32Array): Float32Array;
-  radius: number;
-  headRadius: number;
-}
-
 export interface ClassicGeometry {
   heightAt?(x: number): number;
   anchors: Record<string, readonly [number, number, number]>;
@@ -96,7 +86,6 @@ export interface ClassicGeometry {
 
 export interface EnvGeometry {
   grid?: GridGeometry;
-  cheetah?: CheetahGeometry;
   classic?: ClassicGeometry;
 }
 

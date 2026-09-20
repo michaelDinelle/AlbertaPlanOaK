@@ -11,16 +11,17 @@ export interface StageMeta {
   frameCount: number;
   totalSteps: number;
   ticks: Tick[];
+  identical: boolean | null;
 }
 
-export const EMPTY_STAGE: StageMeta = { status: 'empty', note: null, frameCount: 1, totalSteps: 0, ticks: [] };
+export const EMPTY_STAGE: StageMeta = { status: 'empty', note: null, frameCount: 1, totalSteps: 0, ticks: [], identical: null };
 
 export interface State {
   runs: RunIndexEntry[] | null;
   recordings: Record<string, Recording>;
   runId: string | null;
   policy: Policy;
-  envId: EnvId | null;
+  envId: string | null;
   seed: number | null;
   panel: Panel;
   panelOpen: boolean;
@@ -62,7 +63,7 @@ export function patch(part: Partial<State>): void {
 export const store = { get, use: <T = State>(select: (state: State) => T = (state) => state as unknown as T): T => useSyncExternalStore(subscribe, () => select(value)) };
 
 export const selectRun = (runId: string): void => patch({ runId, seed: null });
-export const selectEnv = (envId: EnvId): void => patch({ envId, seed: null });
+export const selectEnv = (envId: string): void => patch({ envId, seed: null });
 export const selectSeed = (seed: number | null): void => patch({ seed });
 export const selectPolicy = (policy: Policy): void => patch({ policy });
 export const SPEEDS = [1, 4, 16, 64, 256, 1024];

@@ -15,7 +15,7 @@ function Head({ label, hint, keys }: { label: string; hint: string; keys: { tone
   );
 }
 
-const seriesFor = (rec: Recording, envId: EnvId) =>
+const seriesFor = (rec: Recording, envId: string) =>
   cached(rec, `health/${envId}`, () => {
     const lanes = envLanes(rec.meta, envId).lanes;
     const rates = windowedRates(rec, lanes, 1);
@@ -37,7 +37,7 @@ const seriesFor = (rec: Recording, envId: EnvId) =>
     };
   });
 
-export function HealthView({ runId, envId }: { runId: string; envId: EnvId }) {
+export function HealthView({ runId, envId }: { runId: string; envId: string }) {
   const recordings = store.use((s) => s.recordings);
   const { survival: alive, retention } = seriesFor(recordings[runId]!, envId);
   return (

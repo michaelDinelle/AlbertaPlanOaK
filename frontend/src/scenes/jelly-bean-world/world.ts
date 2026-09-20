@@ -4,7 +4,7 @@ import { buildAurora } from '@kit/aurora';
 import { valueNoise2 } from '@kit/textures';
 import type { SceneContext } from '@kit/types';
 import type { WorldCore } from '@kit/world';
-import { makeLandscape, makeSceneTerrain } from '../half-cheetah/world';
+import { makeLandscape, makeSceneTerrain } from '@kit/landscape';
 import { winterWeather } from './ambience';
 import { FIELD_TEXELS, TILE_CELLS } from './fieldmath';
 import { ItemField } from './items';

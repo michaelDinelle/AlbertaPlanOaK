@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import index from './index.html';
 import { ENGINE_FILES, JUDGE_FILE, packRecording, type Baselines, type Meta, type RunIndexEntry } from './src/data/layout';
@@ -6,6 +6,7 @@ import { ENGINE_FILES, JUDGE_FILE, packRecording, type Baselines, type Meta, typ
 const BENCH = resolve(import.meta.dir, '../.oak-benchmarks');
 const PUBLIC = resolve(import.meta.dir, 'public');
 const BEST = resolve(import.meta.dir, '../best');
+const ENGINE = resolve(import.meta.dir, '../.build/oak');
 
 class HttpError extends Error {
   constructor(readonly status: number, message: string) { super(message); }
@@ -16,7 +17,7 @@ const bytes = (path: string): ArrayBuffer => {
   return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength) as ArrayBuffer;
 };
 
-const META_FIELDS = ['seeds', 'steps', 'batch', 'window', 'policy', 'preset', 'startedAt', 'envSchedule', 'envCatalog'] as const;
+const META_FIELDS = ['seeds', 'steps', 'batch', 'window', 'policy', 'preset', 'startedAt', 'envSchedule'] as const;
 
 function meta(root: string): Meta {
   const m = JSON.parse(readFileSync(join(root, ENGINE_FILES.meta), 'utf8')) as Meta;
@@ -63,23 +64,23 @@ function snapshot(root: string): ArrayBuffer {
   return packRecording(m, baselines, ends, rewardSum, hash, health);
 }
 
-async function slice(req: Request, path: string, what: string): Promise<Response> {
-  const file = Bun.file(path);
-  if (!(await file.exists())) throw new HttpError(404, `no ${what}`);
-  const range = /^bytes=(\d+)-(\d*)$/.exec(req.headers.get('range') ?? 'bytes=0-');
-  if (range === null) throw new HttpError(400, 'range must be bytes=N-[M]');
-  const from = Number(range[1]);
-  const to = range[2] === '' ? file.size : Math.min(file.size, Number(range[2]) + 1);
-  return new Response(file.slice(from, to), { status: from > 0 || to < file.size ? 206 : 200 });
-}
-
-function poses(req: Request, id: string, lane: string): Promise<Response> {
+function replay(id: string, lane: string): Response {
   if (!/^\d+$/.test(lane)) throw new HttpError(400, `bad lane ${lane}`);
-  return slice(req, join(runRoot(id), 'poses', lane), `lane ${lane}`);
+  const root = runRoot(id);
+  const rows = join(root, 'replay', `${lane}.f32`);
+  const verdict = join(root, 'replay', `${lane}.json`);
+  if (!existsSync(rows) || !existsSync(verdict)) {
+    mkdirSync(join(root, 'replay'), { recursive: true });
+    const run = Bun.spawnSync([ENGINE, 'replay', root, lane], { cwd: resolve(import.meta.dir, '..') });
+    if (run.exitCode !== 0 && run.exitCode !== 2) throw new HttpError(500, `replay failed: ${run.stderr.toString()}`);
+    writeFileSync(verdict, JSON.stringify({ identical: run.exitCode === 0 }));
+  }
+  const identical = (JSON.parse(readFileSync(verdict, 'utf8')) as { identical: boolean }).identical;
+  return new Response(Bun.file(rows), { headers: { 'X-Oak-Identical': identical ? '1' : '0' } });
 }
 
 const workerBuild = await Bun.build({
-  entrypoints: [resolve(import.meta.dir, 'src/scenes/jelly-bean-world/scentfield.worker.ts'), resolve(import.meta.dir, 'src/theater/tape.worker.ts')],
+  entrypoints: [resolve(import.meta.dir, 'src/scenes/jelly-bean-world/scentfield.worker.ts')],
   target: 'browser',
   minify: true,
 });
@@ -90,7 +91,6 @@ const workerOf = (name: string): Blob => {
   return out;
 };
 const scentfieldWorker = workerOf('scentfield.worker');
-const tapeWorker = workerOf('tape.worker');
 
 async function publicFile(req: Request): Promise<Response> {
   const rel = decodeURIComponent(new URL(req.url).pathname).split('/').filter((s) => s !== '' && s !== '..').join('/');
@@ -105,9 +105,8 @@ const server = Bun.serve({
     '/': index,
     '/api/runs': () => Response.json(runs()),
     '/api/runs/:id': (req) => new Response(snapshot(runRoot(req.params.id))),
-    '/api/runs/:id/poses/:lane': (req) => poses(req, req.params.id, req.params.lane),
+    '/api/runs/:id/replay/:lane': (req) => replay(req.params.id, req.params.lane),
     '/scentfield.worker.js': () => new Response(scentfieldWorker),
-    '/tape.worker.js': () => new Response(tapeWorker),
     '/posters/*': publicFile,
     '/terrain/*': publicFile,
     '/textures/*': publicFile,

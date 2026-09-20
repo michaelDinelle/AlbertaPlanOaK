@@ -17,7 +17,7 @@ import {
 import { mergeColoredParts, type ColoredPart } from '@kit/parts';
 import { streamFor } from '@kit/rng';
 import type { SkyHandle } from '@kit/sky';
-import { makeLandscape, makeSceneTerrain, extendWater, extendVegetation, WORLD_NOISE } from '../half-cheetah/world';
+import { makeLandscape, makeSceneTerrain, extendWater, extendVegetation, WORLD_NOISE } from '@kit/landscape';
 import { plantInstances } from '@kit/vegetation';
 import type { ViewCoverage } from '@kit/view';
 import { radialSprite } from '@kit/textures';

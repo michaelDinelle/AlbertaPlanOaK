@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
-PRESET_FILE="$ROOT/.build/OakKernel.preset"
+PRESET_FILE="$ROOT/.build/preset"
 PRESET=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -17,8 +17,8 @@ case "$PRESET" in
 esac
 
 mkdir -p "$ROOT/.build"
-xcrun -sdk macosx metal -fno-fast-math "-DOAK_PRESET_$(printf '%s' "$PRESET" | tr a-z A-Z)" -c "$ROOT/Sources/Kernels.metal" -o "$ROOT/.build/OakKernel.air"
-xcrun -sdk macosx metallib "$ROOT/.build/OakKernel.air" -o "$ROOT/.build/OakKernel.metallib"
+clang -O3 -mcpu=apple-m4 -flto=full -fno-fast-math -ffp-contract=off -Werror=double-promotion -Wall -Wextra \
+  "-DOAK_PRESET_$(printf '%s' "$PRESET" | tr a-z A-Z)" -I"$ROOT/Sources" \
+  "$ROOT"/Sources/*.c "$ROOT"/Sources/envs/*.c -lm -lpthread -o "$ROOT/.build/oak"
 printf '%s\n' "$PRESET" > "$PRESET_FILE"
-swift build -c release
 echo "Setup complete: OaK $PRESET. Record with ./fleet.py; watch with: cd frontend && bun install && bun run dev"

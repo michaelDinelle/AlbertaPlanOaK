@@ -1,5 +1,4 @@
-import { sculptureMaterial } from '../key-corridor/world';
-import { makeLandscape } from '../key-corridor/world';
+import { makeLandscape, sculptureMaterial } from '@kit/garden';
 import type { ViewCoverage } from '@kit/view';
 import * as THREE from 'three';
 import {

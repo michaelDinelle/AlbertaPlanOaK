@@ -1,4 +1,4 @@
-export const POLICIES = ['oak', 'ppo', 'random'] as const;
+export const POLICIES = ['oak', 'ppo', 'random', 'oracle'] as const;
 export type Policy = (typeof POLICIES)[number];
 export type Baseline = Exclude<Policy, 'oak'>;
 
@@ -12,8 +12,7 @@ export interface Meta {
   startedAt: string;
   finishedAt?: string;
   stepsPerSecond?: number;
-  envSchedule: { envId: string; seedStart: number; seedEnd: number }[];
-  envCatalog: unknown;
+  envSchedule: { envId: string; seedStart: number; seedEnd: number; obs?: number; actions?: number; box?: number; pose?: number }[];
 }
 
 export type Baselines = Partial<Record<Baseline, Record<string, string>>>;

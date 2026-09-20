@@ -4,7 +4,6 @@ import { celebrationPulse } from '@kit/celebrate';
 import { buildComposer, GLASS_RECTS, type ComposerHandle, type GlassRect } from '@kit/post';
 import { TOKENS } from '@kit/tokens';
 import type { FrameState, FrameUpdate, SceneContext, SceneModule, SceneSize } from '@kit/types';
-import type { EnvEntry } from '@sim/catalog';
 import { decoders } from '@sim/registry';
 import { EMPTY_EVENT_STREAM, type SimEvent } from '@sim/types';
 import type { EnvId } from '../data/envs';
@@ -17,13 +16,13 @@ export interface Alternate {
   runId: string;
   lane: number;
   seed: number;
-  entry: EnvEntry;
+  poseLen: number;
+  obsDim: number;
   horizon: number;
 }
 
 export interface Target extends Alternate {
   envId: EnvId;
-  live: boolean;
   startStep: number | null;
   alternates: Alternate[];
 }
@@ -35,7 +34,6 @@ export interface Frame {
 
 export interface Stage {
   setTarget(target: Target | null): void;
-  pull(): void;
   play(): void;
   pause(): void;
   setSpeed(speed: number): void;
@@ -155,6 +153,7 @@ export function mountStage(container: HTMLElement): Stage {
       frameCount: recording.frameCount,
       totalSteps: target.horizon,
       ticks: ticksOf(recording.events, target.horizon),
+      identical: recording.identical,
     });
   };
   const failStage = (what: string, error: unknown): void => {
@@ -210,7 +209,7 @@ export function mountStage(container: HTMLElement): Stage {
     const duration = lastFrame() / source.controlHz;
     if (playing && duration > 0) {
       seconds += dt * speed;
-      if (seconds > duration) seconds = target.live ? duration : seconds % duration;
+      if (seconds > duration) seconds %= duration;
     }
     const position = seconds * source.controlHz;
     if (hasPrevious) {
@@ -249,6 +248,13 @@ export function mountStage(container: HTMLElement): Stage {
       if (next === null) {
         recording = null;
         target = null;
+        generation++;
+        scene?.dispose();
+        post?.dispose();
+        scene = null;
+        post = null;
+        renderer.clear();
+        keepTapes([]);
         setStage(EMPTY_STAGE);
         return;
       }
@@ -257,14 +263,14 @@ export function mountStage(container: HTMLElement): Stage {
       const rebuild = !sameEnv || (decoders[next.envId].seedGeometry && target?.seed !== next.seed);
       target = next;
       const gen = same ? generation : ++generation;
-      const opened = tapeFor(next.runId, next.lane, next.envId, next.seed, next.entry, next.horizon);
+      const opened = tapeFor(next.runId, next.lane, next.envId, next.seed, next.poseLen, next.obsDim, next.horizon);
       opened.onChange = (error) => {
         if (gen !== generation) return;
         if (error !== undefined) failStage(`Could not play seed ${next.seed}`, error);
         else publish();
       };
       recording = opened;
-      keepTapes([opened, ...next.alternates.map((a) => tapeFor(a.runId, a.lane, next.envId, a.seed, a.entry, a.horizon))]);
+      keepTapes([opened, ...next.alternates.map((a) => tapeFor(a.runId, a.lane, next.envId, a.seed, a.poseLen, a.obsDim, a.horizon))]);
       if (same) {
         publish();
         return;
@@ -276,7 +282,6 @@ export function mountStage(container: HTMLElement): Stage {
       publish();
       if (rebuild) buildScene(gen, next.envId, opened).catch((error: unknown) => { if (gen === generation) failStage(`Could not build ${next.envId}`, error); });
     },
-    pull: () => recording?.pull(),
     play() { playing = true; },
     pause() { playing = false; },
     setSpeed(next) { speed = next; },

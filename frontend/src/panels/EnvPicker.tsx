@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react';
 import type { EnvId } from '../data/envs';
 import type { Recording } from '../data/layout';
 import { deliveredRate, envLanes } from '../derive';
-import { SCENES, nameOf } from '../scenes/table';
+import { sceneOf, nameOf } from '../scenes/table';
 import { selectEnv, store } from '../store';
 
 const SORTS = ['name', 'seeds', 'reward'] as const;
@@ -10,17 +10,17 @@ type Sort = (typeof SORTS)[number];
 
 const gradient = (slug: string): string => `linear-gradient(140deg, color-mix(in oklab, var(--color-env-${slug}) 45%, var(--color-poster-base)) 0%, var(--color-poster-base) 85%)`;
 
-function Tile({ env, seeds, current, onPick }: { env: EnvId; seeds: number; current: boolean; onPick: (env: EnvId) => void }) {
-  const slug = SCENES[env].slug;
+function Tile({ env, seeds, current, onPick }: { env: string; seeds: number; current: boolean; onPick: (env: string) => void }) {
+  const scene = sceneOf(env);
   return (
     <button
       type="button"
       onClick={() => onPick(env)}
       title={`Watch ${nameOf(env)} — ${seeds > 0 ? `${seeds} seeds` : 'no seeds'}`}
       className={`group relative aspect-video overflow-hidden rounded-lg text-left transition-transform hover:scale-[1.02] ${current ? 'ring-2 ring-accent' : ''}`}
-      style={{ background: gradient(slug) }}
+      style={{ background: scene === null ? 'var(--color-poster-base)' : gradient(scene.slug) }}
     >
-      <img src={`/posters/${slug}.webp`} alt="" draggable={false} className={`absolute inset-0 h-full w-full object-cover ${seeds === 0 ? 'opacity-45' : ''}`} />
+      {scene !== null && <img src={`/posters/${scene.slug}.webp`} alt="" draggable={false} className={`absolute inset-0 h-full w-full object-cover ${seeds === 0 ? 'opacity-45' : ''}`} />}
       <span className="absolute inset-x-0 bottom-0 flex items-baseline gap-2 bg-gradient-to-t from-black/75 to-transparent px-2.5 pb-1.5 pt-5">
         <span className="text-xs font-medium text-ink">{nameOf(env)}</span>
         <span className="ml-auto font-mono text-2xs text-ink-dim">{seeds} seeds</span>
@@ -29,14 +29,14 @@ function Tile({ env, seeds, current, onPick }: { env: EnvId; seeds: number; curr
   );
 }
 
-function Wall({ envs, run, onClose }: { envs: EnvId[]; run: Recording | null; onClose: () => void }) {
+function Wall({ envs, run, onClose }: { envs: string[]; run: Recording | null; onClose: () => void }) {
   const { envId } = store.use();
   const [query, setQuery] = useState('');
   const [sort, setSort] = useState<Sort>('name');
   const rows = useMemo(() => {
     const q = query.trim().toLowerCase();
-    const seeds = (env: EnvId): number => (run === null ? 0 : envLanes(run.meta, env).seeds.length);
-    const reward = (env: EnvId): number => {
+    const seeds = (env: string): number => (run === null ? 0 : envLanes(run.meta, env).seeds.length);
+    const reward = (env: string): number => {
       if (run === null) return -Infinity;
       const lanes = envLanes(run.meta, env).lanes;
       return lanes.reduce((sum, lane) => sum + (deliveredRate(run, lane) ?? NaN), 0) / lanes.length;
@@ -46,7 +46,7 @@ function Wall({ envs, run, onClose }: { envs: EnvId[]; run: Recording | null; on
       .sort((a, b) => (sort === 'name' ? nameOf(a).localeCompare(nameOf(b)) : sort === 'seeds' ? seeds(b) - seeds(a) : reward(b) - reward(a)))
       .map((env) => ({ env, seeds: seeds(env) }));
   }, [envs, query, sort, run]);
-  const pick = (env: EnvId): void => { selectEnv(env); onClose(); };
+  const pick = (env: string): void => { selectEnv(env); onClose(); };
   return (
     <div className="fixed inset-0 z-40 bg-black/50" onPointerDown={onClose}>
       <div className="glass absolute inset-5 flex flex-col overflow-hidden rounded-xl" onPointerDown={(event) => event.stopPropagation()}>
@@ -91,10 +91,10 @@ function Wall({ envs, run, onClose }: { envs: EnvId[]; run: Recording | null; on
   );
 }
 
-export function EnvPicker({ envs, run, seed }: { envs: EnvId[]; run: Recording | null; seed: number | null }) {
+export function EnvPicker({ envs, run, seed }: { envs: string[]; run: Recording | null; seed: number | null }) {
   const { envId, seed: picked } = store.use();
   const [open, setOpen] = useState(false);
-  const current = envId === null ? null : SCENES[envId];
+  const current = envId === null ? null : sceneOf(envId);
   return (
     <>
       {open && <Wall envs={envs} run={run} onClose={() => setOpen(false)} />}

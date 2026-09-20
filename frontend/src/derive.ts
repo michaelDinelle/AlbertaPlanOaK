@@ -1,12 +1,8 @@
-import { isEnvId, type EnvId } from './data/envs';
 import { HEALTH_ALIVE, type Meta, type Recording } from './data/layout';
 
-export function runEnvs(meta: Meta): EnvId[] {
-  const out: EnvId[] = [];
-  for (const entry of meta.envSchedule) {
-    if (!isEnvId(entry.envId)) throw new Error(`run schedule names unknown env ${entry.envId}`);
-    if (!out.includes(entry.envId)) out.push(entry.envId);
-  }
+export function runEnvs(meta: Meta): string[] {
+  const out: string[] = [];
+  for (const entry of meta.envSchedule) if (!out.includes(entry.envId)) out.push(entry.envId);
   return out;
 }
 

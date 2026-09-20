@@ -1,5 +1,4 @@
 import * as THREE from 'three';
-import { CHEETAH_BONES, FK_FLOATS, FK_POINT_INDEX } from '@sim/fk/cheetah';
 import type { EnvGeometry, GridCell, GridGeometry } from '@sim/types';
 import { cellToWorld, type Vec3Tuple } from './grid';
 import { TOKENS } from './tokens';
@@ -29,7 +28,6 @@ export interface GroundTruthOptions {
   doorStates?(state: FrameState): readonly boolean[] | null;
   agentPos?(state: FrameState): readonly [number, number, number] | null;
   profileRange?: readonly [number, number];
-  fkToWorld?(x: number, z: number, out: Vec3Tuple): Vec3Tuple;
   maxKeys?: number;
   frame?(state: FrameState): DebugFrame | null;
   cellCapacity?: number;
@@ -207,12 +205,6 @@ export class GroundTruthOverlay {
   private doorMarkerAttr: THREE.BufferAttribute | null = null;
   private readonly maxKeys: number;
 
-  private skeletonPos: Float32Array | null = null;
-  private skeletonAttr: THREE.BufferAttribute | null = null;
-  private toesPos: Float32Array | null = null;
-  private toesAttr: THREE.BufferAttribute | null = null;
-  private readonly fkOut = new Float32Array(FK_FLOATS);
-
   private classicMarker: THREE.LineSegments | null = null;
   private classicMarkerPos: Float32Array | null = null;
   private classicMarkerAttr: THREE.BufferAttribute | null = null;
@@ -245,7 +237,6 @@ export class GroundTruthOverlay {
       this.buildMarkers(main, goal);
     }
     if (this.grid) this.buildGrid(this.grid, main, wall, goal);
-    if (geometry.cheetah) this.buildCheetah(main, goal);
     if (geometry.classic) this.buildClassic(main, goal);
 
     applyDebugLayer(this.group);
@@ -302,7 +293,6 @@ export class GroundTruthOverlay {
   setState(state: FrameState): void {
     if (this.anchored) this.updateFrame(state);
     if (this.grid) this.updateGrid(state, this.grid);
-    if (this.skeletonPos) this.updateCheetah(state);
     if (this.classicMarker) this.updateClassic(state);
   }
 
@@ -536,55 +526,6 @@ export class GroundTruthOverlay {
     }
   }
 
-  private buildCheetah(main: THREE.LineBasicMaterial, goalMat: THREE.LineBasicMaterial): void {
-    const bones = segments(CHEETAH_BONES.length, main, 'oakDebugSkeleton');
-    this.skeletonPos = bones.positions;
-    this.skeletonAttr = bones.attr;
-    this.add(bones.object);
-
-    const toe = segments(4, goalMat, 'oakDebugToes');
-    this.toesPos = toe.positions;
-    this.toesAttr = toe.attr;
-    this.add(toe.object);
-  }
-
-  private updateCheetah(state: FrameState): void {
-    const cheetah = this.geometry.cheetah;
-    const sp = this.skeletonPos;
-    if (!cheetah || !sp || !this.skeletonAttr) return;
-    cheetah.fk(state.pose, this.fkOut);
-    const toWorld = this.opts.fkToWorld ?? defaultFkToWorld;
-
-    let o = 0;
-    for (const bone of CHEETAH_BONES) {
-      const a = bone[0];
-      const b = bone[1];
-      toWorld(this.fkOut[a * 2] ?? 0, this.fkOut[a * 2 + 1] ?? 0, this.scratch);
-      toWorld(this.fkOut[b * 2] ?? 0, this.fkOut[b * 2 + 1] ?? 0, this.scratchB);
-      sp[o++] = this.scratch[0]; sp[o++] = this.scratch[1]; sp[o++] = this.scratch[2];
-      sp[o++] = this.scratchB[0]; sp[o++] = this.scratchB[1]; sp[o++] = this.scratchB[2];
-    }
-    this.skeletonAttr.needsUpdate = true;
-
-    const tp = this.toesPos;
-    if (tp && this.toesAttr) {
-      let t = 0;
-      const r = 0.06;
-      for (const name of ['toe_b', 'toe_f'] as const) {
-        const idx = FK_POINT_INDEX[name];
-        toWorld(this.fkOut[idx * 2] ?? 0, this.fkOut[idx * 2 + 1] ?? 0, this.scratch);
-        const x = this.scratch[0];
-        const yy = this.scratch[1];
-        const z = this.scratch[2];
-        tp[t++] = x - r; tp[t++] = yy; tp[t++] = z;
-        tp[t++] = x + r; tp[t++] = yy; tp[t++] = z;
-        tp[t++] = x; tp[t++] = yy - r; tp[t++] = z;
-        tp[t++] = x; tp[t++] = yy + r; tp[t++] = z;
-      }
-      this.toesAttr.needsUpdate = true;
-    }
-  }
-
   private buildClassic(main: THREE.LineBasicMaterial, goalMat: THREE.LineBasicMaterial): void {
     const classic = this.geometry.classic;
     if (!classic) return;
@@ -667,11 +608,4 @@ export class GroundTruthOverlay {
     this.geometries.push(object.geometry);
     this.group.add(object);
   }
-}
-
-export function defaultFkToWorld(x: number, z: number, out: Vec3Tuple): Vec3Tuple {
-  out[0] = x;
-  out[1] = z;
-  out[2] = 0;
-  return out;
 }

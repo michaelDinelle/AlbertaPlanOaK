@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef } from 'react';
-import { entryFor, parseCatalog } from '@sim/catalog';
 import { POLICIES, type Policy, type Recording, type RunIndexEntry } from './data/layout';
+import { isEnvId } from './data/envs';
 import { fetchRecording, fetchRuns } from './data/oak';
 import { envLanes, leaderSeed, peakStep, rateWindow, runEnvs } from './derive';
 import { formatDate, formatStep } from './format';
@@ -32,6 +32,11 @@ async function ensure(id: string, refresh = false): Promise<void> {
 
 export const baselineId = (run: Recording | null, policy: Policy, envId: string | null): string | null =>
   policy === 'oak' ? run?.id ?? null : envId === null ? null : run?.baselines[policy]?.[envId] ?? null;
+
+const rowDims = (rec: Recording, envId: string): { poseLen: number; obsDim: number } | null => {
+  const entry = rec.meta.envSchedule.find((x) => x.envId === envId);
+  return entry === undefined || entry.pose === undefined || entry.obs === undefined ? null : { poseLen: entry.pose, obsDim: entry.obs };
+};
 
 const runLabel = (run: RunIndexEntry): string =>
   [formatDate(run.startedAt), run.role === 'best' ? 'best' : null, run.inFlight ? 'live' : null, run.id.slice(0, 7), `${run.envIds.length} envs · ${formatStep(run.steps)} steps · ${run.preset}`]
@@ -71,7 +76,8 @@ export function App() {
       const laneSet = envLanes(other.meta, envId);
       const otherSeed = s.seed === null ? leaderSeed(other, laneSet) : seed;
       const lane = otherSeed === null ? undefined : laneSet.lanes[laneSet.seeds.indexOf(otherSeed)];
-      return lane === undefined || otherSeed === null ? [] : [{ runId: other.id, lane, seed: otherSeed, entry: entryFor(parseCatalog(other.meta.envCatalog), envId), horizon: other.meta.steps }];
+      const dims = rowDims(other, envId);
+      return lane === undefined || otherSeed === null || dims === null ? [] : [{ runId: other.id, lane, seed: otherSeed, ...dims, horizon: other.meta.steps }];
     });
   }, [active, s.envId, seed, s.seed, run, s.recordings]);
   const compare = useMemo<Comparison[]>(() => {
@@ -108,7 +114,6 @@ export function App() {
   useEffect(() => {
     if (s.runId === null || entry?.inFlight !== true || s.recordings[s.runId] === undefined) return;
     void ensure(s.runId, true);
-    stage.current?.pull();
   }, [s.runs]);
 
   useEffect(() => {
@@ -130,26 +135,22 @@ export function App() {
   useEffect(() => { stage.current?.setDebug(s.debug); }, [s.debug]);
 
   useEffect(() => {
-    if (active === null || s.envId === null || seed === null || lanes === null) {
+    const dims = active === null || s.envId === null ? null : rowDims(active, s.envId);
+    if (active === null || dims === null || s.envId === null || !isEnvId(s.envId) || seed === null || lanes === null) {
       stage.current?.setTarget(null);
       return;
     }
-    try {
-      stage.current?.setTarget({
-        runId: active.id,
-        envId: s.envId,
-        seed,
-        lane: lanes.lanes[lanes.seeds.indexOf(seed)]!,
-        entry: entryFor(parseCatalog(active.meta.envCatalog), s.envId),
-        horizon: active.meta.steps,
-        live,
-        startStep,
-        alternates,
-      });
-    } catch (error) {
-      fail(error);
-    }
-  }, [active, s.envId, seed, lanes, live, startStep, alternates]);
+    stage.current?.setTarget({
+      runId: active.id,
+      envId: s.envId,
+      seed,
+      lane: lanes.lanes[lanes.seeds.indexOf(seed)]!,
+      ...dims,
+      horizon: active.meta.steps,
+      startStep,
+      alternates,
+    });
+  }, [active, s.envId, seed, lanes, startStep, alternates]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {

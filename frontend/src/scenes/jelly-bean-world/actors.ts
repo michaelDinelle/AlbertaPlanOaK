@@ -3,7 +3,7 @@ import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { engravedPanel, modelParts, robotMaterials } from '@kit/robot';
 import { makeWorld, type WorldBuilder, type WorldCore } from '@kit/world';
 import { JBW_BANANA, JBW_ONION, JBW_JELLY, JBW_WALL, JBW_TREE, JBW_TRUFFLE, JBW_COLOR, jbwCollectible } from '@sim/envs/jellybeanworld';
-import { aspenTree, fieldstones } from '../half-cheetah/world';
+import { aspenTree, fieldstones } from '@kit/landscape';
 
 export interface ItemModel { geometry: THREE.BufferGeometry; material: THREE.Material; depth?: THREE.MeshDepthMaterial }
 

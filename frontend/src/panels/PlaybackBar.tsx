@@ -20,7 +20,7 @@ function BarButton({ on, disabled, title, onClick, children }: { on?: boolean; d
   );
 }
 
-const POLICY_ON = { oak: 'bg-oak/25 ring-oak/50', ppo: 'bg-ppo/25 ring-ppo/50', random: 'bg-random/25 ring-random/50' } as const;
+const POLICY_ON = { oak: 'bg-oak/25 ring-oak/50', ppo: 'bg-ppo/25 ring-ppo/50', random: 'bg-random/25 ring-random/50', oracle: 'bg-oracle/25 ring-oracle/50' } as const;
 
 export function PolicySwitch({ available }: { available: Record<Policy, boolean> }) {
   const { policy } = store.use();
@@ -127,6 +127,11 @@ export function PlaybackBar({ stage, stride, live }: { stage: RefObject<Stage | 
       <div className="mx-0.5 h-5 w-px bg-white/10" />
       <BarButton on={debug} title="Show what the world is really doing (g)" onClick={() => patch({ debug: !debug })}>◎</BarButton>
       {live && <span className="mx-1 size-1.5 motion-safe:animate-pulse rounded-full bg-good" title="Being recorded right now" />}
+      {meta.identical !== null && (
+        <span className={`mx-1 whitespace-nowrap rounded-sm border px-1 font-mono text-2xs leading-4 ${meta.identical ? 'border-good/40 bg-good/10 text-good' : 'border-crit/40 bg-crit/10 text-crit'}`} title={meta.identical ? 'The replayed lane reproduces the recorded reward stream bit for bit' : 'The replayed lane does not reproduce the recorded reward stream: the engine has changed since this recording'}>
+          {meta.identical ? 'replay exact' : 'replay differs'}
+        </span>
+      )}
     </div>
   );
 }

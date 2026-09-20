@@ -7,7 +7,7 @@ import { simulateWater } from '@kit/fluid';
 import { makeAmbientParticles } from '@kit/particles';
 import type { SceneContext } from '@kit/types';
 import type { WorldCore } from '@kit/world';
-import { fieldstones, makeLandscape, prairieGrass } from '../half-cheetah/world';
+import { fieldstones, makeLandscape, prairieGrass } from '@kit/landscape';
 import type { ViewCoverage } from '@kit/view';
 
 export const WATER_LEVEL = -1.85;

@@ -49,7 +49,7 @@ export function fourRoomsWalls(): Uint8Array {
 }
 
 export const fourRoomsDecoder: EnvDecoder<FourRoomsStatic> = {
-  envId: 'FourRooms-cont-v0',
+  envId: 'FourRoomsHall-cont-v0',
   seedGeometry: false,
 
   initStatic(seed: number): FourRoomsStatic {

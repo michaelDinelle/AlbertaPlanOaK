@@ -3,6 +3,7 @@ import hashlib
 import json
 import math
 import random
+import re
 import subprocess
 import sys
 from array import array
@@ -11,7 +12,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent
 BENCH = REPO / ".oak-benchmarks"
 BEST = REPO / "best"
-ENGINE = REPO / ".build/release/OaK"
+ENGINE = REPO / ".build/oak"
 STEPS = 1_000_000
 TERMINAL = 100_000
 MARGIN = 0.01
@@ -20,27 +21,9 @@ BOOTSTRAP = 10_000
 SEED_POWER = 7.85
 SEED_EFFECT = 0.10
 SEED_FLOOR, SEED_CAP = 16, 64
-POLICIES = ("random", "ppo")
-ENV_LAYER = ("Sources/EnvCore.metal", "Sources/Env.metal", "Sources/Fleet.metal")
-ENV_SOURCES = {
-    "HalfCheetah-v4": ("Sources/envs/MuJoCo.metal", "Sources/OaK/Resources/mjmodels.bin"),
-    "FourRooms-cont-v0": ("Sources/envs/FourRooms.metal",),
-    "DeepSea-cont-v0": ("Sources/envs/DeepSea.metal",),
-    "KeyCorridor-cont-v0": ("Sources/envs/KeyCorridor.metal",),
-    "Acrobot-cont-v0": ("Sources/envs/Acrobot.metal",),
-    "MountainCar-cont-v0": ("Sources/envs/MountainCar.metal",),
-    "Pendulum-cont-v0": ("Sources/envs/Pendulum.metal",),
-    "Chain-cont-v0": ("Sources/envs/Chain.metal",),
-    "LargeDeepSea-cont-v0": ("Sources/envs/DeepSea.metal", "Sources/envs/LargeDeepSea.metal"),
-    "MultiKeyCorridor-cont-v0": ("Sources/envs/MultiKeyCorridor.metal",),
-    "MemoryChain-cont-v0": ("Sources/envs/Chain.metal", "Sources/envs/MemoryChain.metal"),
-    "ProceduralMaze-cont-v0": ("Sources/envs/ProceduralMaze.metal",),
-    "HighDimMaze-cont-v0": ("Sources/envs/HighDimMaze.metal",),
-    "POMaze-cont-v0": ("Sources/envs/POMaze.metal",),
-    "DelayedChain-cont-v0": ("Sources/envs/Chain.metal", "Sources/envs/DelayedChain.metal"),
-    "JellyBeanWorld-cont-v0": ("Sources/envs/JellyBeanWorld.metal",),
-}
-POLICY_SOURCES = {"random": ("Sources/Random.metal",), "ppo": ("Sources/PPO.metal",)}
+POLICIES = ("random", "ppo", "oracle")
+ENV_LAYER = ("Sources/env.h", "Sources/rng.h", "Sources/portable.h")
+ENV_ROW = re.compile(r'\s*X\(\s*\w+\s*,\s*(\w+)\s*,.*?"([^"]+)"')
 
 
 def digest(entries):
@@ -54,7 +37,23 @@ def digest(entries):
 
 
 def env_digests():
-    return {env: digest(ENV_LAYER + files) for env, files in ENV_SOURCES.items()}
+    table = subprocess.run([ENGINE, "envs"], capture_output=True, text=True, check=True).stdout.split()
+    rows = {}
+    for line in (REPO / "Sources/env.c").read_text().splitlines():
+        row = ENV_ROW.match(line)
+        if row:
+            rows[row.group(2)] = (row.group(1), line.strip())
+    digests = {}
+    for name in table[0::7]:
+        if name not in rows:
+            raise SystemExit(f"{name} has no row in the environment table")
+        family, row = rows[name]
+        hook = re.compile(rf"\b{family}_step\(")
+        owners = [p for p in sorted((REPO / "Sources/envs").glob("*.c")) if hook.search(p.read_text())]
+        if len(owners) != 1:
+            raise SystemExit(f"{name} draws its behaviour from {len(owners)} environment files")
+        digests[name] = hashlib.sha256((digest(ENV_LAYER + (str(owners[0].relative_to(REPO)),)) + row).encode()).hexdigest()
+    return digests
 
 
 class Recording:
@@ -94,38 +93,35 @@ class Recording:
         return json.loads((self.root / "sources.json").read_text())
 
 
-def recordings():
-    for meta in sorted(BENCH.glob("*/meta.json")):
-        if (meta.parent / "sources.json").exists() and "finishedAt" in json.loads(meta.read_text()):
-            yield Recording(meta.parent)
-
-
 def record(policy, root, sources):
     print(f"Recording {policy} into {root.name}", flush=True)
-    subprocess.run(["caffeinate", "-i", ENGINE, policy, str(STEPS), root], check=True, cwd=REPO)
+    subprocess.run(["caffeinate", "-i", ENGINE, "record", policy, str(STEPS), root], check=True, cwd=REPO)
     (root / "sources.json").write_text(json.dumps(sources, indent=1, sort_keys=True) + "\n")
     return Recording(root)
 
 
-def baseline(policy, policy_digest, digests, template):
-    wanted = {env: (digests[env], template.seeds[env]) for env in template.envs}
-    found = {}
-    for rec in recordings():
+def baseline(policy, reference):
+    path = reference.root / "baselines.json"
+    if not path.exists():
+        raise SystemExit(f"Recorded reference lacks baseline links: {reference.root.name}")
+    links = json.loads(path.read_text()).get(policy, {})
+    expected = {entry["envId"]: entry for entry in reference.meta["envSchedule"]}
+    found, loaded = {}, {}
+    for env in reference.envs:
+        if env not in links:
+            raise SystemExit(f"Recorded reference lacks {policy} baseline for {env}")
+        root = BENCH / links[env]
+        if root not in loaded:
+            loaded[root] = Recording(root)
+        rec = loaded[root]
         src = rec.sources()
-        if src["policy"] != policy or src["policyDigest"] != policy_digest or rec.steps != STEPS:
-            continue
-        for env in template.envs:
-            if env in found or env not in rec.envs:
-                continue
-            if src["envs"].get(env) == wanted[env][0] and rec.seeds[env] == wanted[env][1]:
-                found[env] = rec
-    missing = [env for env in template.envs if env not in found]
-    if missing:
-        print(f"No {policy} baseline for {missing}", flush=True)
-        root = BENCH / f"{policy}-{policy_digest[:12]}-{hashlib.sha256(json.dumps(digests, sort_keys=True).encode()).hexdigest()[:12]}"
-        rec = record(policy, root, {"policy": policy, "policyDigest": policy_digest, "envs": digests})
-        for env in missing:
-            found[env] = rec
+        entry = next((entry for entry in rec.meta["envSchedule"] if entry["envId"] == env), None)
+        if (rec.meta["policy"] != policy or src["policy"] != policy or rec.steps != reference.steps
+                or rec.seeds.get(env) != reference.seeds[env] or env not in src["envs"]
+                or entry is None or any(entry[key] != expected[env][key] for key in ("obs", "actions", "box"))):
+            raise SystemExit(f"Recorded {policy} baseline does not match the reference for {env}: {root.name}")
+        found[env] = rec
+    print(f"Reusing {policy}: {len(loaded)} recording(s), {len(found)} environments", flush=True)
     return found
 
 
@@ -230,17 +226,26 @@ def seeds_needed(cv, rho):
     return max(SEED_FLOOR, min(SEED_CAP, math.ceil(n)))
 
 
+def cv_of(xs):
+    m = mean(xs)
+    spread = (sum((x - m) ** 2 for x in xs) / len(xs)) ** 0.5
+    return spread / abs(m) if m != 0 else float("inf")
+
+
 def report(candidate, baselines, best):
-    cols = ["env", "oak", "random", "ppo", "win>ppo"]
+    cols = ["env", "oak", "random", "oracle", "score", "ppo", "win>ppo"]
     if best is not None:
         cols += ["best", "d", "win>best", "guard p", "cv", "rho", "seeds"]
+    else:
+        cols += ["cv", "seeds"]
     rows = []
     d_groups, diff_groups, pvalues, win_best = [], [], [], []
     for env in candidate.envs:
         oak = candidate.scores(env)
         rnd = baselines["random"][env].scores(env)
         ppo = baselines["ppo"][env].scores(env)
-        row = [env, mean(oak), mean(rnd), mean(ppo), wins(oak, ppo)]
+        oracle = baselines["oracle"][env].scores(env)
+        row = [env, mean(oak), mean(rnd), mean(oracle), (mean(oak) - mean(rnd)) / (mean(oracle) - mean(rnd)), mean(ppo), wins(oak, ppo)]
         if best is not None:
             ref = best.scores(env)
             s = scale(ref)
@@ -253,6 +258,8 @@ def report(candidate, baselines, best):
             diff_groups.append(diffs)
             pvalues.append(p)
             win_best.append(wins(oak, ref))
+        else:
+            row += [cv_of(oak), seeds_needed(cv_of(oak), 0.0)]
         rows.append(row)
     widths = [max(len(c), max(len(fmt(r[i])) for r in rows)) for i, c in enumerate(cols)]
     print(" | ".join(c.ljust(w) for c, w in zip(cols, widths)))
@@ -288,14 +295,28 @@ def main():
     best_id = BEST.read_text().strip() if BEST.exists() else ""
     if best_id:
         preset = json.loads((BENCH / best_id / "meta.json").read_text())["preset"]
-    elif (REPO / ".build/OakKernel.preset").exists() and (REPO / ".build/OakKernel.preset").read_text().strip() in ("base", "pro", "max", "ultra"):
-        preset = (REPO / ".build/OakKernel.preset").read_text().strip()
+    elif (REPO / ".build/preset").exists() and (REPO / ".build/preset").read_text().strip() in ("base", "pro", "max", "ultra"):
+        preset = (REPO / ".build/preset").read_text().strip()
     else:
         raise SystemExit("No best and no built preset: ./setup.sh --preset base|pro|max|ultra first")
     subprocess.run([REPO / "setup.sh", "--preset", preset], cwd=REPO, check=True)
     tree = hashlib.sha256((digest(("Sources", "setup.sh")) + preset).encode()).hexdigest()[:40]
     digests = env_digests()
-    policy_digests = {policy: digest(POLICY_SOURCES[policy]) for policy in POLICIES}
+    if not best_id:
+        raise SystemExit("No recorded reference with baseline links; nothing will be recorded")
+    reference = Recording(BENCH / best_id)
+    best = reference if verb == "judge" else None
+    if best is not None:
+        table = subprocess.run([ENGINE, "envs"], capture_output=True, text=True, check=True).stdout.splitlines()
+        schedule = {row[0]: (int(row[4]), int(row[4]) + int(row[5]) - 1) for row in map(str.split, table)}
+        expected = {entry["envId"]: (entry["seedStart"], entry["seedEnd"]) for entry in best.meta["envSchedule"]}
+        if schedule != expected or best.steps != STEPS:
+            raise SystemExit("Schedule differs from the recorded best; environments, seeds, and horizon must match before recording")
+        reference_sources = best.sources()["envs"]
+        changed = sorted(env for env in reference_sources.keys() | digests.keys() if reference_sources.get(env) != digests.get(env))
+        if changed:
+            print(f"Environment sources changed since the recorded best ({len(changed)} environments); comparing on the same seeds and horizon: {', '.join(changed)}", flush=True)
+    baselines = {policy: baseline(policy, reference) for policy in POLICIES}
     BENCH.mkdir(exist_ok=True)
     candidate_root = BENCH / tree
     sources = {"policy": "oak", "preset": preset, "envs": digests, "policyDigest": digest(("Sources",))}
@@ -304,18 +325,15 @@ def main():
         candidate = Recording(candidate_root)
     else:
         candidate = record("oak", candidate_root, sources)
-    baselines = {policy: baseline(policy, policy_digests[policy], digests, candidate) for policy in POLICIES}
+    for policy, found in baselines.items():
+        if set(found) != set(candidate.envs) or any(found[env].steps != candidate.steps or found[env].seeds[env] != candidate.seeds[env] for env in candidate.envs):
+            raise SystemExit(f"Recorded {policy} baselines do not match the candidate schedule")
     (candidate_root / "baselines.json").write_text(json.dumps(
         {policy: {env: rec.root.name for env, rec in found.items()} for policy, found in baselines.items()},
         indent=1, sort_keys=True) + "\n")
-    best = Recording(BENCH / best_id) if best_id and verb == "judge" else None
-    if best is not None and (best.envs != candidate.envs or best.seeds != candidate.seeds or best.steps != candidate.steps):
+    if best is not None and (set(best.envs) != set(candidate.envs) or best.seeds != candidate.seeds or best.steps != candidate.steps):
         print(f"best envs: {best.envs}\ncandidate envs: {candidate.envs}")
         raise SystemExit("Schedule differs from the best: ./fleet.py adopt if this change is intended")
-    if best is not None:
-        changed = [env for env in candidate.envs if best.sources()["envs"].get(env) != digests[env]]
-        if changed:
-            print(f"environment sources changed since the best: {changed}")
     verdict = report(candidate, baselines, best)
     sps = candidate.meta["stepsPerSecond"]
     if best is None:
@@ -341,4 +359,5 @@ def main():
         raise SystemExit(f"REJECT: best stays {best_id}")
 
 
-main()
+if __name__ == "__main__":
+    main()

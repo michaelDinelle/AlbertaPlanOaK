@@ -10,7 +10,7 @@ import { makeWorld, type WorldCore } from '@kit/world';
 import { MEMORYCHAIN_CUE, MEMORYCHAIN_END, MEMORYCHAIN_POS } from '@sim/envs/memorychain';
 import type { EnvGeometry, GridGeometry } from '@sim/types';
 import { makeContinuousSurface, makeSceneryBank, type ViewCoverage } from '@kit/view';
-import { extendWater } from '../half-cheetah/world';
+import { extendWater } from '@kit/landscape';
 
 export const CUE_CELL = 0;
 export const CHOICE_CELL = MEMORYCHAIN_END;
