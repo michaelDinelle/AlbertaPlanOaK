@@ -3,6 +3,7 @@ import math, statistics, html, re
 out=Path(__file__).resolve().parent
 source=(out/'README.md').read_text()
 count=int(re.search(r'all ([\d,]+) environments',source).group(1).replace(',',''))
+window,horizon=re.search(r'Reward per step over the final ([\d,]+) steps of the ([\d,]+)-step best recording',source).groups()
 axes=['Basic','Credit assignment','Exploration','Generalization','Memory','Noise','Scale']
 groups={k:[] for k in axes}
 for line in source.splitlines():
@@ -13,7 +14,7 @@ for line in source.splitlines():
     elif '-slip' in n or '-noise' in n: g='Noise'
     elif n.startswith(('MemoryChain','TMaze','Repeat','CountRecall','Recite','Tiger','AliasedRing','HiddenMode','CoinSwap','Nexting')) or '-position' in n: g='Memory'
     elif n.startswith(('DeepSea','LargeDeepSea','JellyBeanWorld','RiverSwim','BlockingMaze','ShortcutMaze','Sokoban','FourRoomsHall','Taxi','Forager','ScentPuck')): g='Exploration'
-    elif n.startswith(('Chain','Operant','Umbrella','Discount','TwoLoop','KeyDoor','Password')): g='Credit assignment'
+    elif n.startswith(('Chain','Operant','Umbrella','Discount','TwoLoop','KeyDoor','Password','Patience')): g='Credit assignment'
     elif n.startswith(('Regression','Parity','SubsetParity','Permuted','Covariate','Garnet','HashedMDP','RockPaperScissors','WalkBet')) or '-drift' in n: g='Generalization'
     else: g='Basic'
     groups[g].append({'axis':g,'environment':p[1],'OaK':(oak-random)/(oracle-random),'Oracle':1.,'PPO':(ppo-random)/(oracle-random),'Random':0.})
@@ -22,7 +23,7 @@ assert len(rows)==count and len({r['environment'] for r in rows})==count
 agents=['OaK','Oracle','PPO','Random']
 values={a:[statistics.mean(r[a] for r in groups[g]) for g in axes] for a in agents}
 assert min(min(v) for v in values.values())>=-.25 and max(max(v) for v in values.values())<=1
-s=['<svg xmlns="http://www.w3.org/2000/svg" width="1250" height="930" viewBox="0 0 1250 930" role="img" aria-labelledby="title desc">','<title id="title">OaK performance across seven capability axes</title>',f'<desc id="desc">Exploratory grouping of all {count} README environments. Mean normalized scores for OaK, Oracle, PPO and Random. The radial scale runs from minus 0.25 to 1. Random is zero, Oracle is one. The overall ranking is the equal-weight mean over all {count} environments, independent of the interpretive axis grouping. The source is the final 100,000 steps of the README million-step recording.</desc>','<rect width="1250" height="930" fill="#ffffff"/>','<g font-family="Arial, Helvetica, sans-serif" fill="#243044">']
+s=['<svg xmlns="http://www.w3.org/2000/svg" width="1250" height="930" viewBox="0 0 1250 930" role="img" aria-labelledby="title desc">','<title id="title">OaK performance across seven capability axes</title>',f'<desc id="desc">Exploratory grouping of all {count} README environments. Mean normalized scores for OaK, Oracle, PPO and Random. The radial scale runs from minus 0.25 to 1. Random is zero, Oracle is one. The overall ranking is the equal-weight mean over all {count} environments, independent of the interpretive axis grouping. The source is the final {window} steps of the README {horizon}-step recording.</desc>','<rect width="1250" height="930" fill="#ffffff"/>','<g font-family="Arial, Helvetica, sans-serif" fill="#243044">']
 def text(x,y,t,size=18,fill='#243044',anchor='start',weight='400'):
     s.append(f'<text x="{x}" y="{y}" font-size="{size}" fill="{fill}" text-anchor="{anchor}" font-weight="{weight}">{html.escape(t)}</text>')
 text(54,55,'Policy comparison',30,weight='600')
@@ -84,7 +85,7 @@ for j,a in enumerate(ranking):
     text(54,y,a,17,fill=colors[a],weight='600')
     for i,v in enumerate(values[a]):
         text(columns[i],y,f'{v:.3f}',16,anchor='middle')
-text(54,904,'Equal weight per environment · Random = 0 · Oracle = 1 · README: final 100,000 / 1,000,000 steps',15,fill='#637084')
+text(54,904,f'Equal weight per environment · Random = 0 · Oracle = 1 · README: final {window} / {horizon} steps',15,fill='#637084')
 s.append('</g></svg>')
 (out/'oak-performance-radar.svg').write_text('\n'.join(s))
 print(out/'oak-performance-radar.svg')
