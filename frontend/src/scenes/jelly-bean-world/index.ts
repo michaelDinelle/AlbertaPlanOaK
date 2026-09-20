@@ -3,10 +3,9 @@ import type { GroundTruthOptions } from '@kit/debug';
 import type { OrbitRigOptions } from '@kit/rigs';
 import { StageScene, type Stage } from '@kit/stage';
 import type { FrameUpdate, SceneContext, SceneFactory } from '@kit/types';
-import { jbwCollectible, jbwItemAt, JBW_ENERGY, JBW_HEADING, JBW_X, JBW_Y } from '@sim/envs/jellybeanworld';
+import { JBW_HEADING, JBW_X, JBW_Y } from '@sim/envs/jellybeanworld';
 import { buildForager } from './actors';
 import { CollectionLog } from './collectionlog';
-import { scentAtCell } from './fieldmath';
 import { buildWorld, type ParklandWorld } from './world';
 import { makeSceneView, trackPose, type SceneView } from '@kit/view';
 
@@ -51,14 +50,15 @@ class WinterCandyScene extends StageScene<ParklandWorld> {
     this.robot.group.rotation.set(0, this.heading, 0);
     this.groundNormal.set(world.heightAt(this.position.x - 0.25, this.position.z) - world.heightAt(this.position.x + 0.25, this.position.z), 0.5, world.heightAt(this.position.x, this.position.z - 0.25) - world.heightAt(this.position.x, this.position.z + 0.25)).normalize();
     this.robot.group.quaternion.premultiply(this.groundTilt.setFromUnitVectors(THREE.Object3D.DEFAULT_UP, this.groundNormal));
-    if (step !== this.sensorStep) {
+    if (frame.scrubbed || step !== this.sensorStep) {
       this.sensorStep = step;
-      const signals = scentAtCell(ctx.seed, this.collections.collected, step, x, y, world.scent.kernel);
+      const observations = frame.state.observations;
+      const signals = Array.from(observations.subarray(8, 11));
       world.agent.value.set(x, y); world.vision.value.fill(0);
       const directions = [[0, -1], [1, -1], [1, 0], [1, 1], [0, 1], [-1, 1], [-1, 0], [-1, -1]];
       for (let i = 0; i < 8; i++) {
-        const direction = directions[(2 * heading + i) & 7]!, sx = x + direction[0]!, sy = y + direction[1]!, item = jbwItemAt(ctx.seed, sx, sy);
-        const energy = jbwCollectible(item) && this.collections.depleted(sx, sy, step) ? 0 : JBW_ENERGY[item]!;
+        const direction = directions[(2 * heading + i) & 7]!;
+        const energy = observations[i]!;
         signals.push(energy); world.vision.value[(direction[1]! + 1) * 3 + direction[0]! + 1] = energy;
       }
       this.robot.sense(signals);

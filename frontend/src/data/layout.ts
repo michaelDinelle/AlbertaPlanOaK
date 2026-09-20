@@ -11,6 +11,7 @@ export interface Meta {
   preset: string;
   startedAt: string;
   finishedAt?: string;
+  timingOnly?: boolean;
   stepsPerSecond?: number;
   envSchedule: { envId: string; seedStart: number; seedEnd: number; obs?: number; actions?: number; box?: number; pose?: number }[];
 }

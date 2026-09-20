@@ -1,4 +1,4 @@
-import type { EventStream } from '@sim/types';
+import { SIM_EVENT_TYPES, type EventStream } from '@sim/types';
 import { cellKey, type FieldLog } from './fieldmath';
 
 export class CollectionLog {
@@ -35,32 +35,19 @@ export class CollectionLog {
       this.version += 1;
       changed = true;
     }
-    const collection = stream.types.indexOf('collection');
-    while (this.taken < stream.count) {
-      const at = this.taken;
-      this.taken += 1;
-      if (collection < 0 || (stream.kinds[at] ?? 0) !== collection) continue;
-      if (this.count === this.steps.length) {
-        const grown = this.count * 2;
-        const steps = new Int32Array(grown);
-        const xs = new Int32Array(grown);
-        const ys = new Int32Array(grown);
-        steps.set(this.steps);
-        xs.set(this.xs);
-        ys.set(this.ys);
-        this.steps = steps;
-        this.xs = xs;
-        this.ys = ys;
+    const collection = SIM_EVENT_TYPES.indexOf('collection');
+    while (stream.blocks[this.taken] !== undefined) {
+      const block = stream.blocks[this.taken++]!;
+      for (let at = 0; at < block.steps.length; at++) {
+        if (block.kinds[at] !== collection) continue;
+        if (this.count === this.steps.length) {
+          const grow = (data: Int32Array): Int32Array<ArrayBuffer> => { const next = new Int32Array(data.length * 2); next.set(data); return next; };
+          this.steps = grow(this.steps); this.xs = grow(this.xs); this.ys = grow(this.ys);
+        }
+        const x = block.cellX[at]!, y = block.cellY[at]!, step = block.steps[at]!;
+        this.steps[this.count] = step; this.xs[this.count] = x; this.ys[this.count] = y;
+        this.count++; this.cells.set(cellKey(x, y), step); changed = true;
       }
-      const x = stream.cellX[at] ?? 0;
-      const y = stream.cellY[at] ?? 0;
-      const step = stream.steps[at] ?? 0;
-      this.steps[this.count] = step;
-      this.xs[this.count] = x;
-      this.ys[this.count] = y;
-      this.count += 1;
-      this.cells.set(cellKey(x, y), step);
-      changed = true;
     }
     if (changed) {
       this.view.steps = this.steps;

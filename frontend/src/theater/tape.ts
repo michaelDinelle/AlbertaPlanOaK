@@ -1,101 +1,96 @@
-import { deriveStream, frameOf } from '@sim/events';
-import { decoders, PLAYBACK } from '@sim/registry';
-import { emptyStream, NO_EVENTS, type EnvFrame, type EnvGeometry, type EventStream, type SimEvent } from '@sim/types';
-import type { EnvId } from '../data/envs';
-import { FRAME_FLOATS, OFF_DONE, OFF_POSE } from '../data/oak';
+import { frameOf } from '@sim/events';
+import { emptyStream, NO_EVENTS, SIM_EVENT_TYPES, type EnvFrame, type EnvGeometry, type EventStream, type SimEvent } from '@sim/types';
+import type { EnvDescriptor } from '../data/envs';
+import type { TapeHeader } from '../data/replay';
+import { SCENES } from '../scenes/table';
+import type { Tick } from './recording';
+import type { TapeMessage, TapeRequest } from './tape.worker';
 
 export interface Tape {
-  envId: EnvId;
+  environment: EnvDescriptor;
   seed: number;
   controlHz: number;
   discretePose: boolean;
   wrapMask: number;
-  geometry: EnvGeometry;
+  geometry: EnvGeometry | null;
   readonly frameCount: number;
   readonly events: EventStream;
+  readonly ticks: Tick[];
   readonly identical: boolean | null;
+  readonly error: Error | null;
+  hasFrame(i: number): boolean;
   frameAt(i: number): EnvFrame;
   eventsAt(i: number): readonly SimEvent[];
-  onChange: (error?: Error) => void;
+  seek(i: number): void;
+  onChange: () => void;
+  drop(): void;
 }
 
-type Slot = Tape & { drop(): void };
-
-const cache = new Map<string, Slot>();
-
-function open(runId: string, lane: number, envId: EnvId, seed: number, poseLen: number, obsDim: number, horizon: number): Slot {
-  const decoder = decoders[envId];
-  const st = decoder.initStatic(seed);
-  const init = decoder.initFrame(seed, st);
-  const playback = PLAYBACK[envId];
-  const abort = new AbortController();
-  const stream = emptyStream();
-  let frames: Float32Array | null = null;
-  let steps = 0;
-  let identical: boolean | null = null;
-
+export function openTape(runId: string, lane: number, environment: EnvDescriptor, seed: number, horizon: number, hash: bigint): Tape {
+  const family = SCENES[environment.family];
+  if (!family) throw new Error('Visualization unavailable');
+  const worker = new Worker('/workers/tape.worker.js', { type: 'module' });
+  const blocks = new Map<number, Float32Array>();
+  const events = emptyStream();
+  let header: TapeHeader | null = null, initial: EnvFrame | null = null, through = -1;
+  let identical: boolean | null = null, error: Error | null = null, ticks: Tick[] = [];
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const post = (message: TapeRequest) => worker.postMessage(message);
+  const notify = () => { if (timer === null) timer = setTimeout(() => { timer = null; tape.onChange(); }, 50); };
+  const hasFrame = (i: number): boolean => {
+    const step = Math.floor(i);
+    return header !== null && step >= 0 && step < header.frames && (step === 0 && initial !== null || blocks.has(Math.floor(step / header.blockFrames))) && (environment.family !== 'jbw' || step <= through);
+  };
   const frameAt = (i: number): EnvFrame => {
-    const c = Math.max(0, Math.min(steps, Math.floor(i)));
-    if (c === 0 || frames === null) return init;
-    return frameOf(frames, c - 1, c - 1);
+    const step = Math.floor(i);
+    if (!hasFrame(step)) throw new Error(`Replay frame ${step} is not available`);
+    if (step === 0) return initial!;
+    return frameOf(blocks.get(Math.floor(step / header!.blockFrames))!, step % header!.blockFrames, step, header!);
   };
-
-  const load = async (): Promise<void> => {
-    try {
-      const response = await fetch(`/api/runs/${encodeURIComponent(runId)}/replay/${lane}`, { signal: abort.signal });
-      if (!response.ok) throw new Error(`${response.status} replay/${lane}: ${await response.text()}`);
-      const rows = new Float32Array(await response.arrayBuffer());
-      const width = poseLen + obsDim + 2;
-      const count = Math.floor(rows.length / width);
-      if (count > horizon) throw new Error(`lane ${lane} holds ${count} steps, past the horizon ${horizon}`);
-      const next = new Float32Array(count * FRAME_FLOATS);
-      for (let r = 0; r < count; r++) {
-        const at = r * width;
-        next[r * FRAME_FLOATS + OFF_DONE] = rows[at + poseLen + obsDim + 1] ?? 0;
-        for (let k = 0; k < poseLen; k++) next[r * FRAME_FLOATS + OFF_POSE + k] = rows[at + k] ?? 0;
-      }
-      frames = next;
-      steps = count;
-      identical = response.headers.get('X-Oak-Identical') === '1';
-      deriveStream(frames, 0, steps, decoder, init, st, stream);
-      slot.onChange();
-    } catch (error) {
-      if (!abort.signal.aborted) slot.onChange(error instanceof Error ? error : new Error(String(error)));
-    }
-  };
-
-  const slot: Slot = {
-    envId,
-    seed,
-    controlHz: playback.controlHz,
-    discretePose: playback.discretePose,
-    wrapMask: playback.wrapMask,
-    geometry: decoder.geometry(st, seed),
-    get frameCount() { return steps + 1; },
-    get events() { return stream; },
-    get identical() { return identical; },
-    frameAt,
+  const tape: Tape = {
+    environment, seed, controlHz: family.controlHz, discretePose: family.discretePose, wrapMask: family.wrapMask, geometry: null,
+    get frameCount() { return Math.max(initial ? 1 : 0, through + 1); },
+    get events() { return events; }, get ticks() { return ticks; }, get identical() { return identical; }, get error() { return error; },
+    hasFrame, frameAt,
     eventsAt(i) {
-      const c = Math.floor(i);
-      return c <= 0 || c > steps ? NO_EVENTS : decoder.deriveEvents(frameAt(c - 1), frameAt(c), st);
+      if (!header || !hasFrame(i)) return NO_EVENTS;
+      const step = Math.floor(i), block = events.blocks[Math.floor(step / header.blockFrames)];
+      if (!block) return NO_EVENTS;
+      let lo = 0, hi = block.steps.length;
+      while (lo < hi) { const mid = (lo + hi) >>> 1; if (block.steps[mid]! < step) lo = mid + 1; else hi = mid; }
+      const out: SimEvent[] = [];
+      for (let at = lo; at < block.steps.length && block.steps[at] === step; at++) {
+        const type = SIM_EVENT_TYPES[block.kinds[at]!]!;
+        if (type === 'collection') out.push({ type, item: (['banana', 'onion', 'jellyBean', 'truffle'] as const)[block.values[at]!]!, reward: frameAt(step).reward as -1 | 0 | 1, x: block.cellX[at]!, y: block.cellY[at]! });
+        else if (type === 'cue') out.push({ type, value: block.values[at]! });
+        else if (type === 'key' || type === 'door') throw new Error('Unexpected replay event');
+        else out.push({ type });
+      }
+      return out;
     },
+    seek: step => post({ type: 'seek', step: Math.floor(step) }),
     onChange: () => {},
-    drop() { abort.abort(); },
+    drop() { worker.terminate(); if (timer !== null) clearTimeout(timer); blocks.clear(); events.blocks.length = 0; },
   };
-  void load();
-  return slot;
-}
-
-export function tapeFor(runId: string, lane: number, envId: EnvId, seed: number, poseLen: number, obsDim: number, horizon: number): Tape {
-  const key = `${runId}/${lane}`;
-  if (!cache.has(key)) cache.set(key, open(runId, lane, envId, seed, poseLen, obsDim, horizon));
-  return cache.get(key)!;
-}
-
-export function keepTapes(keep: Tape[]): void {
-  for (const [key, slot] of cache) {
-    if (keep.includes(slot)) continue;
-    cache.delete(key);
-    slot.drop();
-  }
+  worker.onmessage = (event: MessageEvent<TapeMessage>) => {
+    const message = event.data;
+    try {
+      if (message.type === 'header') {
+        header = message.header; events.blockFrames = header.blockFrames;
+        initial = frameOf(new Float32Array(message.initial), 0, 0, header); through = 0;
+        tape.geometry = family.decoder.geometry(header.descriptor, initial);
+        tape.onChange();
+      } else if (message.type === 'block') {
+        blocks.set(message.index, new Float32Array(message.data));
+        events.blocks[message.index] = message.events; events.count += message.events.steps.length;
+        through = Math.max(through, message.through);
+      } else if (message.type === 'progress') { ticks = message.ticks; through = Math.max(through, message.through); }
+      else if (message.type === 'verdict') identical = message.identical;
+      else error = new Error(message.message);
+    } catch (caught) { error = caught instanceof Error ? caught : new Error(String(caught)); worker.terminate(); }
+    notify();
+  };
+  worker.onerror = event => { error = new Error(event.message || 'Replay worker failed to load'); notify(); };
+  post({ type: 'open', url: `/api/runs/${encodeURIComponent(runId)}/replay/${lane}`, envId: environment.envId, seed, horizon, hash: hash.toString() });
+  return tape;
 }

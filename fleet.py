@@ -37,14 +37,15 @@ def digest(entries):
 
 
 def env_digests():
-    table = subprocess.run([ENGINE, "envs"], capture_output=True, text=True, check=True).stdout.split()
+    table = json.loads(subprocess.run([ENGINE, "envs"], capture_output=True, text=True, check=True).stdout)
     rows = {}
     for line in (REPO / "Sources/env.c").read_text().splitlines():
         row = ENV_ROW.match(line)
         if row:
             rows[row.group(2)] = (row.group(1), line.strip())
     digests = {}
-    for name in table[0::7]:
+    for entry in table:
+        name = entry["envId"]
         if name not in rows:
             raise SystemExit(f"{name} has no row in the environment table")
         family, row = rows[name]
@@ -307,8 +308,8 @@ def main():
     reference = Recording(BENCH / best_id)
     best = reference if verb == "judge" else None
     if best is not None:
-        table = subprocess.run([ENGINE, "envs"], capture_output=True, text=True, check=True).stdout.splitlines()
-        schedule = {row[0]: (int(row[4]), int(row[4]) + int(row[5]) - 1) for row in map(str.split, table)}
+        table = json.loads(subprocess.run([ENGINE, "envs"], capture_output=True, text=True, check=True).stdout)
+        schedule = {row["envId"]: (row["seedStart"], row["seedEnd"]) for row in table}
         expected = {entry["envId"]: (entry["seedStart"], entry["seedEnd"]) for entry in best.meta["envSchedule"]}
         if schedule != expected or best.steps != STEPS:
             raise SystemExit("Schedule differs from the recorded best; environments, seeds, and horizon must match before recording")

@@ -1,4 +1,3 @@
-import { POSE_LEN } from '../../data/oak';
 import { philox4x32_10 } from '../philox';
 import { NO_EVENTS, type EnvDecoder, type EnvFrame, type SimEvent } from '../types';
 
@@ -17,23 +16,8 @@ export const JBW_ONIONS = 4;
 export const JBW_JELLIES = 5;
 export const JBW_TRUFFLES = 6;
 
-export const JBW_SCENT_DECAY = 0.4;
-export const JBW_SCENT_DIFFUSION = 0.14;
-export const JBW_SCENT_RADIUS = 17;
-export const JBW_SCENT_CELLS = 153;
-export const JBW_DESTRUCTION_LIFETIME = 2000;
 export const JBW_BLOCK = 16;
 export const JBW_BLOCK_ITEMS = 4;
-
-export const JBW_SCENT: readonly (readonly [number, number, number])[] = [
-  [0, 0, 0],
-  [1.92, 1.76, 0.4],
-  [0.68, 0.01, 0.99],
-  [1.64, 0.54, 0.4],
-  [0, 0, 0],
-  [0, 0.47, 0.06],
-  [8.4, 4.8, 2.6],
-];
 
 export const JBW_COLOR: readonly (readonly [number, number, number])[] = [
   [0, 0, 0],
@@ -45,21 +29,12 @@ export const JBW_COLOR: readonly (readonly [number, number, number])[] = [
   [0.42, 0.24, 0.13],
 ];
 
-export const JBW_ENERGY: readonly number[] = [0, 2.04, 1.68, 1.29, 1.34, 0.53, 0.79];
-
 export function jbwBlocks(item: number): boolean {
   return item === JBW_WALL || item === JBW_TREE;
 }
 
 export function jbwCollectible(item: number): boolean {
   return item === JBW_BANANA || item === JBW_ONION || item === JBW_JELLY || item === JBW_TRUFFLE;
-}
-
-export const JBW_POLARITY_PERIOD = 100000;
-
-export function jbwPolarity(step: number): 1 | -1 {
-  const envStep = step + 1;
-  return (Math.floor(envStep / JBW_POLARITY_PERIOD) & 1) === 0 ? 1 : -1;
 }
 
 export function jbwWallLine(seed: number, bx: number, by: number): readonly [boolean, number] | null {
@@ -139,21 +114,14 @@ export function jbwItemAt(seed: number, x: number, y: number): number {
 const inventories = [JBW_BANANAS, JBW_ONIONS, JBW_JELLIES, JBW_TRUFFLES] as const;
 const items = ['banana', 'onion', 'jellyBean', 'truffle'] as const;
 
-export const jellyBeanWorldDecoder: EnvDecoder<number> = {
-  envId: 'JellyBeanWorld-cont-v0',
-  seedGeometry: true,
-  initStatic: (seed) => seed,
+export const jellyBeanWorldDecoder: EnvDecoder = {
   geometry: () => ({}),
-  initFrame(): EnvFrame {
-    return { step: -1, done: 0, pose: new Float32Array(POSE_LEN) };
-  },
   deriveEvents(prev: EnvFrame, next: EnvFrame): SimEvent[] {
     for (let i = 0; i < inventories.length; i++) {
       const slot = inventories[i] ?? 0;
       if ((next.pose[slot] ?? 0) > (prev.pose[slot] ?? 0)) {
         const item = items[i] ?? 'banana';
-        const sign = jbwPolarity(next.step);
-        const reward: -1 | 0 | 1 = item === 'jellyBean' ? sign : item === 'onion' ? (sign === 1 ? -1 : 1) : 0;
+        const reward = next.reward as -1 | 0 | 1;
         const x = Math.round(next.pose[JBW_X] ?? 0);
         const y = Math.round(next.pose[JBW_Y] ?? 0);
         return [{ type: 'collection', item, reward, x, y }];

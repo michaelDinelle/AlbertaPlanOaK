@@ -1,13 +1,15 @@
+import type { EnvDescriptor } from '../../data/envs';
 import * as THREE from 'three';
-import { bundleKernel, buildScentKernel, cellKey, FIELD_TEXELS, FIELD_TILES, TILE_CELLS, TILE_VALUES, type FieldLog } from './fieldmath';
+import { scentConfig, cellKey, FIELD_TEXELS, FIELD_TILES, TILE_CELLS, TILE_VALUES, type FieldLog } from './fieldmath';
 import type { FieldJob, FieldRequest, FieldTile } from './scentfield.worker';
 
 export class ScentField {
   readonly origin = new THREE.Vector2(-FIELD_TEXELS / 2, -FIELD_TEXELS / 2);
-  readonly kernel = bundleKernel(buildScentKernel());
+  private readonly reach: number;
+  private settleAge: number;
   readonly texture = new THREE.DataTexture(new Uint16Array(FIELD_TEXELS * FIELD_TEXELS * 4), FIELD_TEXELS, FIELD_TEXELS, THREE.RGBAFormat, THREE.HalfFloatType);
   private readonly scratch = new THREE.DataTexture(new Uint16Array(TILE_VALUES), TILE_CELLS, TILE_CELLS, THREE.RGBAFormat, THREE.HalfFloatType);
-  private readonly worker = new Worker('/scentfield.worker.js', { type: 'module' });
+  private readonly worker = new Worker('/workers/scentfield.worker.js', { type: 'module' });
   private readonly cached = new Map<number, string>();
   private readonly pending = new Map<number, FieldJob>();
   private readonly posting = new Map<number, number[]>();
@@ -17,13 +19,15 @@ export class ScentField {
   private sent = 0;
   private sequence = 0;
 
-  constructor(private readonly renderer: THREE.WebGLRenderer, seed: number) {
+  constructor(private readonly renderer: THREE.WebGLRenderer, seed: number, environment: EnvDescriptor) {
+    const config = scentConfig(environment);
+    this.reach = config.radius - 1; this.settleAge = config.lifetime;
     this.texture.name = 'threeChannelScent';
     this.texture.minFilter = this.texture.magFilter = THREE.LinearFilter;
     this.texture.needsUpdate = true;
-    this.worker.onmessage = (event: MessageEvent<FieldTile>) => this.received.push(event.data);
+    this.worker.onmessage = (event: MessageEvent<FieldTile | { op: 'ready'; settleAge: number }>) => { if ('op' in event.data) this.settleAge = event.data.settleAge; else this.received.push(event.data); };
     this.worker.onerror = event => { throw new Error(`Scent field worker failed: ${event.message}`); };
-    this.post({ op: 'init', seed });
+    this.post({ op: 'init', seed, environment });
   }
 
   private post(message: FieldRequest, transfer: Transferable[] = []): void { this.worker.postMessage(message, transfer); }
@@ -36,7 +40,7 @@ export class ScentField {
     }
     if (!reset && this.sent === log.count) return;
     const from = this.sent, steps = log.steps.slice(from, log.count), xs = log.xs.slice(from, log.count), ys = log.ys.slice(from, log.count);
-    const reach = this.kernel.reach;
+    const reach = this.reach;
     for (let i = 0; i < steps.length; i++) {
       for (let ty = Math.floor((ys[i]! - reach) / TILE_CELLS); ty <= Math.floor((ys[i]! + reach) / TILE_CELLS); ty++) {
         for (let tx = Math.floor((xs[i]! - reach) / TILE_CELLS); tx <= Math.floor((xs[i]! + reach) / TILE_CELLS); tx++) {
@@ -63,8 +67,8 @@ export class ScentField {
       const mid = (lo + hi) >>> 1;
       if (steps[mid]! <= step) lo = mid + 1; else hi = mid;
     }
-    const age = lo ? step - steps[lo - 1]! : this.kernel.settleAge;
-    return `${this.version}:${lo}:${age < this.kernel.settleAge ? age : -1}`;
+    const age = lo ? step - steps[lo - 1]! : this.settleAge;
+    return `${this.version}:${lo}:${age < this.settleAge ? age : -1}`;
   }
 
   frame(step: number, x: number, y: number): void {

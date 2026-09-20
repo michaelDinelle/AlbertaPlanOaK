@@ -1,3 +1,4 @@
+import { parameter, type EnvDescriptor, type ScentParameters } from '../../data/envs';
 import { toHalfFloat } from 'three/src/extras/DataUtils.js';
 import {
   jbwBlockField,
@@ -8,12 +9,6 @@ import {
   jbwWallLine,
   JBW_BLOCK,
   JBW_BLOCK_ITEMS,
-  JBW_DESTRUCTION_LIFETIME,
-  JBW_SCENT,
-  JBW_SCENT_CELLS,
-  JBW_SCENT_RADIUS,
-  JBW_SCENT_DECAY,
-  JBW_SCENT_DIFFUSION,
   JBW_WALL,
 } from '@sim/envs/jellybeanworld';
 
@@ -30,12 +25,16 @@ export function cellKey(x: number, y: number): number {
   return (x + CELL_KEY_BIAS) * CELL_KEY_SPAN + (y + CELL_KEY_BIAS);
 }
 
-export function buildScentKernel(): Float32Array {
-  const radius = JBW_SCENT_RADIUS;
-  const cells = JBW_SCENT_CELLS;
-  const lifetime = JBW_DESTRUCTION_LIFETIME;
-  const decay = JBW_SCENT_DECAY;
-  const diffusion = JBW_SCENT_DIFFUSION;
+export type ScentConfig = ScentParameters & { radius: number; cells: number };
+
+export function scentConfig(env: EnvDescriptor): ScentConfig {
+  if (!env.scent) throw new Error('JellyBeanWorld scent parameters are missing');
+  const radius = parameter(env, 'radius'), cells = parameter(env, 'cells');
+  if (cells !== radius * (radius + 1) / 2) throw new Error('Invalid scent geometry');
+  return { ...env.scent, radius, cells };
+}
+
+export function buildScentKernel({ radius, cells, lifetime, decay, diffusion }: ScentConfig): Float32Array {
   const response = new Float32Array(cells * lifetime);
   response[0] = 1;
   for (let t = 1; t < lifetime; t++) {
@@ -71,6 +70,7 @@ export function buildScentKernel(): Float32Array {
 }
 
 export interface KernelBundle {
+  config: ScentConfig;
   response: Float32Array;
   steady: number;
   knee: number;
@@ -78,16 +78,17 @@ export interface KernelBundle {
   settleAge: number;
 }
 
-export function bundleKernel(response: Float32Array): KernelBundle {
-  const steady = (JBW_DESTRUCTION_LIFETIME - 1) * JBW_SCENT_CELLS;
+export function bundleKernel(response: Float32Array, config: ScentConfig): KernelBundle {
+  const { radius, cells, lifetime } = config;
+  const steady = (lifetime - 1) * cells;
   const knee = Math.max(1e-6, response[steady] ?? 1);
   const floor = knee / 65536;
-  const reach = JBW_SCENT_RADIUS - 1;
-  let settle = JBW_DESTRUCTION_LIFETIME;
-  for (let t = 0; t < JBW_DESTRUCTION_LIFETIME; t++) {
+  const reach = radius - 1;
+  let settle = lifetime;
+  for (let t = 0; t < lifetime; t++) {
     let residual = 0;
-    const at = t * JBW_SCENT_CELLS;
-    for (let i = 0; i < JBW_SCENT_CELLS; i++) {
+    const at = t * cells;
+    for (let i = 0; i < cells; i++) {
       const gap = (response[steady + i] ?? 0) - (response[at + i] ?? 0);
       if (gap > residual) residual = gap;
     }
@@ -96,7 +97,7 @@ export function bundleKernel(response: Float32Array): KernelBundle {
       break;
     }
   }
-  return { response, steady, knee, reach, settleAge: settle };
+  return { config, response, steady, knee, reach, settleAge: settle };
 }
 
 export interface FieldLog {
@@ -124,12 +125,13 @@ export function visitBlock(seed: number, bx: number, by: number, emit: (x: numbe
 
 function sources(seed: number, x0: number, y0: number, x1: number, y1: number, playhead: number, collected: ReadonlyMap<number, number>, kernel: KernelBundle, emit: (x: number, y: number, scent: readonly number[], offset: number) => void): void {
   const reach = kernel.reach;
+  const { lifetime, cells, values } = kernel.config;
   for (let by = Math.floor((y0 - reach) / JBW_BLOCK); by <= Math.floor((y1 + reach) / JBW_BLOCK); by++) {
     for (let bx = Math.floor((x0 - reach) / JBW_BLOCK); bx <= Math.floor((x1 + reach) / JBW_BLOCK); bx++) visitBlock(seed, bx, by, (x, y, item) => {
       if (x < x0 - reach || x > x1 + reach || y < y0 - reach || y > y1 + reach) return;
       const removed = collected.get(cellKey(x, y));
       const age = removed !== undefined && removed <= playhead ? playhead - removed : -1;
-      if (age < JBW_DESTRUCTION_LIFETIME) emit(x, y, JBW_SCENT[item]!, age < 0 ? -1 : age * JBW_SCENT_CELLS);
+      if (age < lifetime) emit(x, y, values[item]!, age < 0 ? -1 : age * cells);
     }, false);
   }
 }
@@ -154,14 +156,5 @@ export function renderTile(seed: number, tileX: number, tileY: number, playhead:
     for (let c = 0; c < 3; c++) out[i * 4 + c] = toHalfFloat(accum[i * 3 + c]!);
     out[i * 4 + 3] = toHalfFloat(1);
   }
-  return out;
-}
-
-export function scentAtCell(seed: number, collected: ReadonlyMap<number, number>, playhead: number, x: number, y: number, kernel: KernelBundle): [number, number, number] {
-  const out: [number, number, number] = [0, 0, 0];
-  sources(seed, x, y, x, y, playhead, collected, kernel, (sx, sy, scent, offset) => {
-    const value = concentration(kernel, sx - x, sy - y, offset);
-    for (let c = 0; c < 3; c++) out[c] = out[c]! + scent[c]! * value;
-  });
   return out;
 }

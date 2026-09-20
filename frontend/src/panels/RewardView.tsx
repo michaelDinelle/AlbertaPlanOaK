@@ -1,5 +1,4 @@
 import { memo, useCallback, useMemo, type PointerEvent, type RefObject } from 'react';
-import type { EnvId } from '../data/envs';
 import type { Recording } from '../data/layout';
 import { cached, deathStep, deliveredRate, envLanes, rateWindow, windowedRates } from '../derive';
 import { formatCount, formatRate, formatSigned, formatStep } from '../format';

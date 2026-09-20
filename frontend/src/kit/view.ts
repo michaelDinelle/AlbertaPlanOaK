@@ -94,8 +94,8 @@ export function trackPose(frame: FrameUpdate, slot: number): number {
   const half = Math.ceil(TRACK_SECONDS * frame.controlHz);
   const centre = Math.floor(frame.position);
   let lo = centre - half, hi = centre + half + 1;
-  for (let i = centre + 1; i <= hi; i++) if (frame.frameAt(i).done !== 0) { hi = i - 1; break; }
-  for (let i = centre; i > lo; i--) if (frame.frameAt(i).done !== 0) { lo = i; break; }
+  for (let i = centre + 1; i <= hi; i++) if (frame.frameAt(i).reset) { hi = i - 1; break; }
+  for (let i = centre; i > lo; i--) if (frame.frameAt(i).reset) { lo = i; break; }
   let sum = 0, weight = 0;
   for (let i = centre - half; i <= centre + half + 1; i++) {
     const w = 1 + Math.cos(Math.PI * Math.min(1, Math.abs(i - frame.position) / (half + 1)));

@@ -1,5 +1,5 @@
 import type * as THREE from 'three';
-import type { EnvId } from '../data/envs';
+import type { EnvDescriptor } from '../data/envs';
 import type { EnvFrame, EnvGeometry, EventStream, SimEvent } from '@sim/types';
 import type { DesignTokens } from './tokens';
 
@@ -7,6 +7,9 @@ export type SceneEvent = SimEvent;
 
 export interface FrameState {
   pose: Float32Array;
+  observations: Float32Array;
+  reward: number;
+  reset: boolean;
   done: boolean;
   step: number;
   simTime: number;
@@ -29,7 +32,8 @@ export interface SceneSize { width: number; height: number; dpr: number }
 export interface SceneContext {
   renderer: THREE.WebGLRenderer;
   canvas: HTMLCanvasElement;
-  envId: EnvId;
+  envId: string;
+  environment: EnvDescriptor;
   size: SceneSize;
   tokens: DesignTokens;
   geometry: EnvGeometry;
@@ -49,4 +53,3 @@ export interface SceneModule {
 }
 
 export type SceneFactory = () => SceneModule;
-export type SceneRegistry = Record<EnvId, () => Promise<{ default: SceneFactory }>>;

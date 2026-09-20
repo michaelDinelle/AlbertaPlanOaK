@@ -162,12 +162,12 @@ class FourSeasonsCourtyardScene extends StageScene<WorldHandle> {
       wisp.snap();
     }
 
-    let teleported = false;
+    let teleported = state.reset;
     for (let i = 0; i < frame.events.length; i++) {
       const ev = frame.events[i];
       if (!ev) continue;
       if (ev.type === 'goal') {
-        cellToWorldVec(agent.x, agent.y, grid, this.bloomPos);
+        cellToWorldVec(goal.x, goal.y, grid, this.bloomPos);
         this.groundPos.copy(this.bloomPos);
         this.bloomPos.y = BLOOM_Y;
         pool.burst(this.bloomPos, this.blossom, BURST_SCALE, time);

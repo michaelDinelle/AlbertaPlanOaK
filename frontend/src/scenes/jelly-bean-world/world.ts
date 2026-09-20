@@ -26,7 +26,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene) {
   fog.color.set(0x775970);
   const weather = winterWeather(world, ctx.seed), vision = { value: new Float32Array(9) }, agent = { value: new THREE.Vector2() };
   const heightAt = (x: number, z: number) => 0.45 + (valueNoise2(x / 44, z / 44, 8192, ctx.seed) - 0.5) * 3.6 + (valueNoise2(x / 140, z / 140, 8192, ctx.seed ^ 0x51ed) - 0.5) * 12 + valueNoise2((x + z * 0.4) / 9, z / 22, 8192, ctx.seed ^ 0xa817) ** 3 * 1.4;
-  const scent = world.own(new ScentField(ctx.renderer, ctx.seed)), debug = { value: 0 };
+  const scent = world.own(new ScentField(ctx.renderer, ctx.seed, ctx.environment)), debug = { value: 0 };
   const terrain = world.own(world.time(makeSceneTerrain({
     name: 'sculptedSnow', seed: ctx.seed, segments: 256, radius: 8192,
     colorA: 0xffffff, colorB: 0xeff3ff,

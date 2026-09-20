@@ -44,7 +44,7 @@ export abstract class StageScene<W extends WorldCore> implements SceneModule {
   }
 
   protected accentOf(ctx: SceneContext): number {
-    return ctx.tokens.accents[SCENES[ctx.envId].slug] ?? ctx.tokens.celebrationGold;
+    return ctx.tokens.accents[SCENES[ctx.environment.family]!.slug] ?? ctx.tokens.celebrationGold;
   }
 
   async init(ctx: SceneContext): Promise<void> {
@@ -67,7 +67,7 @@ export abstract class StageScene<W extends WorldCore> implements SceneModule {
     const pool = new CelebrationPool({
       seed: ctx.seed,
       name: `${this.stageName}Celebrations`,
-      burstSize: SCENES[ctx.envId].burst,
+      burstSize: SCENES[ctx.environment.family]!.burst,
       ...this.poolOptions(ctx),
     });
     attachCelebrations(this.scene, pool);

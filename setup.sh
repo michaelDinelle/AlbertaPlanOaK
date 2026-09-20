@@ -17,6 +17,7 @@ case "$PRESET" in
 esac
 
 mkdir -p "$ROOT/.build"
+python3 "$ROOT/catalog.py"
 clang -O3 -mcpu=apple-m4 -flto=full -fno-fast-math -ffp-contract=off -Werror=double-promotion -Wall -Wextra \
   "-DOAK_PRESET_$(printf '%s' "$PRESET" | tr a-z A-Z)" -I"$ROOT/Sources" \
   "$ROOT"/Sources/*.c "$ROOT"/Sources/envs/*.c -lm -lpthread -o "$ROOT/.build/oak"

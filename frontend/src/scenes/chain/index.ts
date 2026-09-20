@@ -1,3 +1,4 @@
+import { lastEvent } from '@sim/events';
 import * as THREE from 'three';
 import { PULSE_SECONDS } from '@kit/celebrate';
 import type { GroundTruthOptions } from '@kit/debug';
@@ -5,7 +6,7 @@ import type { OrbitRigOptions } from '@kit/rigs';
 import { StageScene, type Stage } from '@kit/stage';
 import type { FrameUpdate, SceneContext, SceneFactory } from '@kit/types';
 import type { GridGeometry } from '@sim/types';
-import { CHAIN_L, CHAIN_POS } from '@sim/envs/chain';
+import { CHAIN_POS } from '@sim/envs/chain';
 import { makeSceneView, trackPose, type SceneView } from '@kit/view';
 import { buildCrossing, buildRover, chainX, deckHeight } from './actors';
 import { buildWorld, type WorldHandle } from './world';
@@ -22,7 +23,7 @@ class RiverCrossingScene extends StageScene<WorldHandle> {
 
   protected buildWorld(ctx: SceneContext): Promise<WorldHandle> {
     const grid = ctx.geometry.grid;
-    if (!grid || grid.w !== CHAIN_L || grid.h !== 1 || !grid.goal) throw new Error('Chain grid is missing or invalid');
+    if (!grid || grid.w < 2 || grid.h !== 1 || !grid.goal) throw new Error('Chain grid is missing or invalid');
     this.grid = grid;
     const end = chainX(grid.goal.x, grid);
     this.goal.set(end, deckHeight(end) + 0.8, 0);
@@ -53,20 +54,11 @@ class RiverCrossingScene extends StageScene<WorldHandle> {
     const rover = this.rover!, position = trackPose(frame, CHAIN_POS);
     let achievedAt: number | null = null;
     pool.update(frame.dtReal, time);
-    rover.setPosition(chainX(position, this.grid), frame.scrubbed);
+    rover.setPosition(chainX(position, this.grid), frame.scrubbed || frame.state.reset);
     if (frame.scrubbed) {
       pool.clear(); this.goalAt = -Infinity;
-      const log = frame.eventLog;
-      let low = 0, high = log.count;
-      while (low < high) {
-        const mid = (low + high) >>> 1;
-        if (log.steps[mid]! <= frame.state.step) low = mid + 1;
-        else high = mid;
-      }
-      for (let i = low - 1; i >= 0; i--) if (log.types[log.kinds[i]!] === 'goal') {
-        achievedAt = (log.steps[i]! + 1) * frame.state.simTime / frame.state.step;
-        break;
-      }
+      const step = lastEvent(frame.eventLog, 'goal', frame.state.step);
+      if (step !== undefined) achievedAt = step / frame.controlHz;
     }
     for (const event of frame.events) if (event.type === 'goal') achievedAt = time;
     if (achievedAt !== null) {

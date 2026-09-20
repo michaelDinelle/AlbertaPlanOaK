@@ -1,93 +1,29 @@
-import { POSE_LEN } from '../../data/oak';
-import { NO_EVENTS, type EnvDecoder, type EnvFrame, type EnvGeometry, type GridCell, type SimEvent } from '../types';
-
-export const FOURROOMS_W = 11;
-export const FOURROOMS_H = 11;
-export const FOURROOMS_HALLWAYS: readonly GridCell[] = Object.freeze([
-  { x: 5, y: 2 },
-  { x: 5, y: 8 },
-  { x: 2, y: 5 },
-  { x: 8, y: 5 },
-]);
+import { NO_EVENTS, type EnvDecoder } from '../types';
 
 export const FOURROOMS_X = 0;
 export const FOURROOMS_Y = 1;
 export const FOURROOMS_GX = 2;
 export const FOURROOMS_GY = 3;
 
-export const FOURROOMS_START: GridCell = Object.freeze({ x: 1, y: 1 });
-export const FOURROOMS_GOAL: GridCell = Object.freeze({ x: 9, y: 9 });
-
-export interface FourRoomsStatic {
-  seed: number;
-  walls: Uint8Array;
+export function fourRoomsRoom(x: number, y: number, w: number, h: number): number {
+  const cx = Math.floor(w / 2), cy = Math.floor(h / 2);
+  if (x === cx || y === cy) return -1;
+  return (x > cx ? 1 : 0) + (y > cy ? 2 : 0);
 }
 
-export function fourRoomsIsWall(x: number, y: number): boolean {
-  if (x <= 0 || x >= 10 || y <= 0 || y >= 10) return true;
-  if (x === 5 && y !== 2 && y !== 8) return true;
-  if (y === 5 && x !== 2 && x !== 8) return true;
-  return false;
-}
-
-export function fourRoomsRoom(x: number, y: number): number {
-  if (x < 5 && y < 5) return 0;
-  if (x > 5 && y < 5) return 1;
-  if (x < 5 && y > 5) return 2;
-  if (x > 5 && y > 5) return 3;
-  return -1;
-}
-
-export function fourRoomsWalls(): Uint8Array {
-  const walls = new Uint8Array(FOURROOMS_W * FOURROOMS_H);
-  for (let y = 0; y < FOURROOMS_H; y++) {
-    for (let x = 0; x < FOURROOMS_W; x++) {
-      walls[y * FOURROOMS_W + x] = fourRoomsIsWall(x, y) ? 1 : 0;
+export const fourRoomsDecoder: EnvDecoder = {
+  geometry({ environment }, initial) {
+    const grid = environment.grid;
+    if (!grid || grid.walls.length !== grid.w * grid.h) throw new Error('FourRooms walls are missing');
+    const hallways = [];
+    for (let y = 0; y < grid.h; y++) for (let x = 0; x < grid.w; x++) {
+      if (!grid.walls[y * grid.w + x] && (x === Math.floor(grid.w / 2) || y === Math.floor(grid.h / 2))) hallways.push({ x, y });
     }
-  }
-  return walls;
-}
-
-export const fourRoomsDecoder: EnvDecoder<FourRoomsStatic> = {
-  envId: 'FourRoomsHall-cont-v0',
-  seedGeometry: false,
-
-  initStatic(seed: number): FourRoomsStatic {
-    return { seed, walls: fourRoomsWalls() };
+    return { grid: { ...grid, walls: Uint8Array.from(grid.walls), goal: { x: initial.pose[2]!, y: initial.pose[3]! }, hallways } };
   },
-
-  geometry(st: FourRoomsStatic): EnvGeometry {
-    return {
-      grid: {
-        w: FOURROOMS_W,
-        h: FOURROOMS_H,
-        walls: st.walls,
-        goal: { ...FOURROOMS_GOAL },
-        hallways: FOURROOMS_HALLWAYS.map((c) => ({ ...c })),
-      },
-    };
-  },
-
-  initFrame(): EnvFrame {
-    const pose = new Float32Array(POSE_LEN);
-    pose[0] = FOURROOMS_START.x;
-    pose[1] = FOURROOMS_START.y;
-    pose[2] = FOURROOMS_GOAL.x;
-    pose[3] = FOURROOMS_GOAL.y;
-    return {
-      step: -1,
-      done: 0,
-      pose,
-    };
-  },
-
-  deriveEvents(prev: EnvFrame, next: EnvFrame): SimEvent[] {
-    if (
-      next.pose[FOURROOMS_X] === prev.pose[FOURROOMS_GX]
-      && next.pose[FOURROOMS_Y] === prev.pose[FOURROOMS_GY]
-    ) {
-      return [{ type: 'goal' }];
-    }
-    return NO_EVENTS;
+  deriveEvents(_prev, next) {
+    if (!next.done) return NO_EVENTS;
+    if (next.reward !== 1) throw new Error('FourRooms reset has no goal reward');
+    return [{ type: 'goal' }, { type: 'teleport' }, { type: 'done' }];
   },
 };

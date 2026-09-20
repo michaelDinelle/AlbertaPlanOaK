@@ -1,3 +1,4 @@
+import { lastEvent } from '@sim/events';
 import { PULSE_SECONDS } from '@kit/celebrate';
 import { CELL } from '@kit/grid';
 import { makeSceneView, type SceneView } from '@kit/view';
@@ -69,7 +70,7 @@ class SunlitDescentScene extends StageScene<WorldHandle> {
     const grid = resolveGrid(ctx.geometry);
     this.grid = grid;
     const half = Math.max(grid.w, grid.h) * CELL * 0.5 + 0.8;
-    this.view = makeSceneView(ctx, { min: [-half, -4.8, -half], max: [half, 2, half] }, [0.05, -2, 1.65], { distance: 19.4, azimuth: 0.78, polar: 0.82 });
+    this.view = makeSceneView(ctx, { min: [-half, -4.8, -half], max: [half, 2, half] }, [0.05, -2, 1.65], { distance: half * 3, azimuth: 0.78, polar: 0.82 });
     this.reach = reefReachable(grid);
     const goal = treasureCell(grid);
     this.treasure = { x: goal.c, y: goal.r };
@@ -190,29 +191,17 @@ class SunlitDescentScene extends StageScene<WorldHandle> {
       this.stir = dive.lastA;
       wisp.setCell(dive.c, dive.r, grid);
       wisp.snap();
-      const log = frame.eventLog;
-      let low = 0;
-      let high = log.count;
-      while (low < high) {
-        const mid = (low + high) >>> 1;
-        if ((log.steps[mid] ?? Infinity) <= state.step) low = mid + 1;
-        else high = mid;
-      }
-      const seconds = state.step > 0 ? state.simTime / state.step : 0;
-      for (let i = low - 1; i >= 0; i--) {
-        const at = ((log.steps[i] ?? -1) + 1) * seconds;
-        if (time - at > GAPE_SECONDS) break;
-        if (log.types[log.kinds[i] ?? 0] === 'goal') {
+      const step = lastEvent(frame.eventLog, 'goal', state.step);
+      if (step !== undefined) {
+        const at = step / frame.controlHz;
+        if (time - at <= GAPE_SECONDS) {
           this.goalAt = at;
           cellToReefVec(this.treasure.x, this.treasure.y, grid, this.bloomPos);
-          this.groundPos.copy(this.bloomPos);
-          this.bloomPos.y += clam.pearlHeight;
+          this.groundPos.copy(this.bloomPos); this.bloomPos.y += clam.pearlHeight;
           pool.burst(this.bloomPos, this.pearlHue, BURST_SCALE, at);
           pool.ripple(this.groundPos, this.gold, RIPPLE_SCALE, at);
-          pool.pulse.reset();
-          pool.pulse.fire(Math.max(0, PULSE_STRENGTH - (time - at) / PULSE_SECONDS));
+          pool.pulse.reset(); pool.pulse.fire(Math.max(0, PULSE_STRENGTH - (time - at) / PULSE_SECONDS));
           pool.update(0, time);
-          break;
         }
       }
     }

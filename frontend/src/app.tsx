@@ -1,8 +1,8 @@
+import { recordedFamilies } from './data/envs';
 import { useEffect, useMemo, useRef } from 'react';
 import { POLICIES, type Policy, type Recording, type RunIndexEntry } from './data/layout';
-import { isEnvId } from './data/envs';
-import { fetchRecording, fetchRuns } from './data/oak';
-import { envLanes, leaderSeed, peakStep, rateWindow, runEnvs } from './derive';
+import { fetchCatalog, fetchRecording, fetchRuns } from './data/oak';
+import { envLanes, runEnvs } from './derive';
 import { formatDate, formatStep } from './format';
 import { BEST_TOKEN, POLICY_NAMES, POLICY_ORDER, POLICY_TOKENS } from './panels/charts';
 import { EnvPicker } from './panels/EnvPicker';
@@ -12,8 +12,8 @@ import { AUTHOR_LINKS } from './panels/links';
 import { PlaybackBar, PolicySwitch } from './panels/PlaybackBar';
 import { RewardView, type Comparison } from './panels/RewardView';
 import { StandingsView } from './panels/StandingsView';
-import { addRecording, cycleSpeed, fail, patch, selectEnv, selectRun, store, type Panel } from './store';
-import { mountStage, type Alternate, type Stage } from './theater/stage';
+import { addRecording, cycleSpeed, fail, patch, selectEnv, selectRun, setStage, store, type Panel } from './store';
+import { mountStage, type Stage } from './theater/stage';
 
 const PANELS: Record<Panel, string> = { reward: 'Reward', standings: 'Standings', health: 'Health' };
 const loading = new Set<string>();
@@ -33,13 +33,8 @@ async function ensure(id: string, refresh = false): Promise<void> {
 export const baselineId = (run: Recording | null, policy: Policy, envId: string | null): string | null =>
   policy === 'oak' ? run?.id ?? null : envId === null ? null : run?.baselines[policy]?.[envId] ?? null;
 
-const rowDims = (rec: Recording, envId: string): { poseLen: number; obsDim: number } | null => {
-  const entry = rec.meta.envSchedule.find((x) => x.envId === envId);
-  return entry === undefined || entry.pose === undefined || entry.obs === undefined ? null : { poseLen: entry.pose, obsDim: entry.obs };
-};
-
 const runLabel = (run: RunIndexEntry): string =>
-  [formatDate(run.startedAt), run.role === 'best' ? 'best' : null, run.inFlight ? 'live' : null, run.id.slice(0, 7), `${run.envIds.length} envs · ${formatStep(run.steps)} steps · ${run.preset}`]
+  [formatDate(run.startedAt), run.role === 'best' ? 'best' : null, run.inFlight ? 'live' : null, run.id.slice(0, 7), `${run.envIds.length} configurations · ${formatStep(run.steps)} steps · ${run.preset}`]
     .filter((part) => part !== null)
     .join(' · ');
 
@@ -54,32 +49,21 @@ export function App() {
   const active = activeId === null ? null : s.recordings[activeId] ?? null;
   const live = s.policy === 'oak' && entry?.inFlight === true;
   const envs = useMemo(() => (run === null ? [] : runEnvs(run.meta)), [run]);
-  const referenced = useMemo(() => (run === null ? [] : [...new Set(Object.values(run.baselines).flatMap((byEnv) => Object.values(byEnv)))]), [run]);
+  const families = useMemo(() => s.catalog.length ? recordedFamilies(s.catalog, envs) : [], [s.catalog, envs]);
+  const environment = s.catalog.find(env => env.envId === s.envId);
+  const referenced = useMemo(() => {
+    if (run === null || !s.panelOpen) return [];
+    if (s.panel === 'standings') return [...new Set(Object.values(run.baselines).flatMap(byEnv => Object.values(byEnv)))];
+    if (s.panel !== 'reward' || s.envId === null) return [];
+    return POLICIES.map(policy => baselineId(run, policy, s.envId)).filter((id): id is string => id !== null);
+  }, [run, s.panelOpen, s.panel, s.envId]);
   const available = useMemo(() => Object.fromEntries(POLICIES.map((policy) => [policy, baselineId(run, policy, s.envId) !== null])) as Record<Policy, boolean>, [run, s.envId]);
   const lanes = useMemo(() => (active === null || s.envId === null ? null : envLanes(active.meta, s.envId)), [active, s.envId]);
   const seed = useMemo(() => {
     if (lanes === null || active === null || lanes.seeds.length === 0) return null;
     if (s.seed !== null && lanes.seeds.includes(s.seed)) return s.seed;
-    return leaderSeed(active, lanes);
+    return lanes.seeds[0]!;
   }, [lanes, active, s.seed]);
-  const startStep = useMemo(
-    () => (active === null || lanes === null || seed === null ? null : peakStep(active, lanes.lanes[lanes.seeds.indexOf(seed)]!, rateWindow(active.meta.steps))),
-    [active, lanes, seed],
-  );
-  const alternates = useMemo<Alternate[]>(() => {
-    const envId = s.envId;
-    if (active === null || envId === null || seed === null) return [];
-    return POLICY_ORDER.flatMap((policy) => {
-      const id = baselineId(run, policy, envId);
-      const other = id === null || id === active.id ? undefined : s.recordings[id];
-      if (other === undefined) return [];
-      const laneSet = envLanes(other.meta, envId);
-      const otherSeed = s.seed === null ? leaderSeed(other, laneSet) : seed;
-      const lane = otherSeed === null ? undefined : laneSet.lanes[laneSet.seeds.indexOf(otherSeed)];
-      const dims = rowDims(other, envId);
-      return lane === undefined || otherSeed === null || dims === null ? [] : [{ runId: other.id, lane, seed: otherSeed, ...dims, horizon: other.meta.steps }];
-    });
-  }, [active, s.envId, seed, s.seed, run, s.recordings]);
   const compare = useMemo<Comparison[]>(() => {
     const out: Comparison[] = [];
     for (const policy of POLICY_ORDER) {
@@ -89,15 +73,12 @@ export function App() {
     if (bestId !== undefined && bestId !== s.runId && s.recordings[bestId] !== undefined) out.push({ key: 'best', label: 'Best', tone: BEST_TOKEN, runId: bestId });
     return out;
   }, [run, s.runId, s.policy, s.envId, s.recordings, bestId]);
-  const stride = active?.meta.batch ?? 1;
 
   useEffect(() => {
     const poll = (): Promise<void> => fetchRuns().then((runs) => patch({ runs, error: null }), fail);
     void poll();
-    const timer = setInterval(() => {
-      const runs = store.get().runs;
-      if (runs === null || runs.some((candidate) => candidate.inFlight)) void poll();
-    }, 5000);
+    void fetchCatalog().then(catalog => patch({ catalog }), fail);
+    const timer = setInterval(() => { void poll(); }, 5000);
     return () => clearInterval(timer);
   }, []);
 
@@ -108,8 +89,8 @@ export function App() {
   }, [s.runs, s.runId]);
 
   useEffect(() => {
-    for (const id of [s.runId, bestId, ...referenced]) if (id !== null && id !== undefined) void ensure(id);
-  }, [s.runs, s.runId, bestId, referenced]);
+    for (const id of [s.runId, activeId, s.panelOpen && s.panel === 'reward' ? bestId : null, ...referenced]) if (id !== null && id !== undefined) void ensure(id);
+  }, [s.runId, activeId, bestId, referenced, s.panelOpen, s.panel]);
 
   useEffect(() => {
     if (s.runId === null || entry?.inFlight !== true || s.recordings[s.runId] === undefined) return;
@@ -135,31 +116,24 @@ export function App() {
   useEffect(() => { stage.current?.setDebug(s.debug); }, [s.debug]);
 
   useEffect(() => {
-    const dims = active === null || s.envId === null ? null : rowDims(active, s.envId);
-    if (active === null || dims === null || s.envId === null || !isEnvId(s.envId) || seed === null || lanes === null) {
-      stage.current?.setTarget(null);
+    if (active === null || environment === undefined || seed === null || lanes === null) {
+      stage.current?.pause();
+      setStage({ status: 'loading', note: null });
       return;
     }
-    stage.current?.setTarget({
-      runId: active.id,
-      envId: s.envId,
-      seed,
-      lane: lanes.lanes[lanes.seeds.indexOf(seed)]!,
-      ...dims,
-      horizon: active.meta.steps,
-      startStep,
-      alternates,
-    });
-  }, [active, s.envId, seed, lanes, startStep, alternates]);
+    const lane = lanes.lanes[lanes.seeds.indexOf(seed)]!;
+    stage.current?.setTarget({ runId: active.id, environment, seed, lane, horizon: active.meta.steps, hash: active.hash[lane]! });
+    if (s.playing) stage.current?.play();
+  }, [active, environment, seed, lanes]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
       if (event.metaKey || event.ctrlKey || event.altKey || event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement) return;
       const state = store.get();
       const cycleEnv = (direction: 1 | -1): void => {
-        const at = state.envId === null ? -1 : envs.indexOf(state.envId);
-        const next = envs[(at + direction + envs.length) % envs.length];
-        if (next !== undefined) selectEnv(next);
+        const at = families.findIndex(family => family.configurations.some(config => config.envId === state.envId));
+        const next = families[(at + direction + families.length) % families.length]?.configurations[0];
+        if (next !== undefined) selectEnv(next.envId);
       };
       const cyclePolicy = (): void => {
         const open = POLICY_ORDER.filter((p) => available[p]);
@@ -169,8 +143,8 @@ export function App() {
       const actions: Record<string, () => void> = {
         ' ': () => patch({ playing: !state.playing }),
         k: () => patch({ playing: !state.playing }),
-        ArrowLeft: () => { patch({ playing: false }); stage.current?.stepBy(-20 * stride * (event.shiftKey ? 10 : 1)); },
-        ArrowRight: () => { patch({ playing: false }); stage.current?.stepBy(20 * stride * (event.shiftKey ? 10 : 1)); },
+        ArrowLeft: () => { patch({ playing: false }); stage.current?.stepBy(-20 * (event.shiftKey ? 10 : 1)); },
+        ArrowRight: () => { patch({ playing: false }); stage.current?.stepBy(20 * (event.shiftKey ? 10 : 1)); },
         '[': () => cycleEnv(-1),
         ']': () => cycleEnv(1),
         g: () => patch({ debug: !state.debug }),
@@ -189,7 +163,7 @@ export function App() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [stride, envs, available]);
+  }, [families, available]);
 
   const notice = s.error
     ?? s.stage.note
@@ -201,12 +175,12 @@ export function App() {
       <div ref={host} className="absolute inset-0" />
       {notice !== null && (
         <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center p-6">
-          <div className="glass max-w-md rounded-lg px-5 py-4 font-mono text-sm text-ink">{notice}</div>
+          <div className="glass max-w-md rounded-lg px-5 py-4 font-mono text-sm text-ink">{notice}{s.stage.status === 'error' && <button type="button" className="pointer-events-auto ml-3 text-accent" onClick={() => { if (active && environment && seed !== null && lanes) { const lane = lanes.lanes[lanes.seeds.indexOf(seed)]!; stage.current?.setTarget({ runId: active.id, environment, seed, lane, horizon: active.meta.steps, hash: active.hash[lane]! }); } }}>Retry</button>}</div>
         </div>
       )}
       <div className="absolute left-4 top-4 z-20 flex items-center gap-2">
         <select value={s.runId ?? ''} onChange={(event) => selectRun(event.target.value)} className="glass h-9 rounded-lg px-3 font-mono text-xs text-ink">
-          {s.runs?.map((run) => <option key={run.id} value={run.id}>{runLabel(run)}</option>)}
+          {s.runs?.filter(run => run.policy === 'oak').map((run) => <option key={run.id} value={run.id}>{runLabel(run)}</option>)}
         </select>
         <button type="button" onClick={() => stage.current?.resetCamera()} title="Reset camera" className="glass flex h-9 items-center gap-2 rounded-lg px-3 text-xs text-ink-dim hover:bg-white/10 hover:text-ink">⟲<span className="hidden sm:inline">Reset camera</span></button>
       </div>
@@ -237,10 +211,10 @@ export function App() {
       )}
       <div className="absolute inset-x-0 bottom-4 z-30 grid grid-cols-[1fr_minmax(0,760px)_1fr] items-end gap-3 px-4">
         <div className="flex flex-col items-start gap-3">
-          {s.envId === 'JellyBeanWorld-cont-v0' && <JbwLegend />}
-          <EnvPicker envs={envs} run={run} seed={seed} />
+          {environment?.family === 'jbw' && <JbwLegend environment={environment} />}
+          <EnvPicker families={families} run={run} seed={seed} />
         </div>
-        <PlaybackBar stage={stage} stride={stride} live={live} />
+        <PlaybackBar stage={stage} live={live} />
         <div className="justify-self-end"><PolicySwitch available={available} /></div>
       </div>
     </div>

@@ -29,13 +29,10 @@ import {
 } from '@kit/vegetation';
 import { makeWorld, type WorldCore } from '@kit/world';
 import {
-  FOURROOMS_H,
-  FOURROOMS_W,
   fourRoomsRoom,
 } from '@sim/envs/fourrooms';
 import type { EnvGeometry, GridCell, GridGeometry } from '@sim/types';
 
-export const COURT_HALF = (FOURROOMS_W * CELL) / 2;
 export const TERRAIN_SIZE = 40;
 export const TERRAIN_SEGMENTS = 128;
 export const HEDGE_HEIGHT = 0.86;
@@ -48,7 +45,7 @@ export const CAMERA_STANDOFF = 12.5;
 
 export function resolveGrid(geometry: EnvGeometry): GridGeometry {
   const grid = geometry.grid;
-  if (!grid || grid.w !== FOURROOMS_W || grid.h !== FOURROOMS_H || grid.walls.length !== grid.w * grid.h) {
+  if (!grid || grid.walls.length !== grid.w * grid.h) {
     throw new Error('Four Rooms requires complete recorded grid geometry');
   }
   return grid;
@@ -84,7 +81,7 @@ export function roomBounds(grid: GridGeometry, room: number): RoomBounds {
   for (let y = 0; y < grid.h; y++) {
     for (let x = 0; x < grid.w; x++) {
       if (isWall(grid, x, y)) continue;
-      if (fourRoomsRoom(x, y) !== room) continue;
+      if (fourRoomsRoom(x, y, grid.w, grid.h) !== room) continue;
       cellToWorld(x, y, grid, w);
       if (w[0] < minX) minX = w[0];
       if (w[0] > maxX) maxX = w[0];
@@ -213,8 +210,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
 
   const landscape = makeLandscape(w, ctx, {
     name: 'fourSeasons',
-    halfX: COURT_HALF,
-    halfZ: COURT_HALF,
+    halfX: grid.w * CELL / 2,
+    halfZ: grid.h * CELL / 2,
     ground: blendTokens(palette.groundA, skin.soil, 0.2),
     grass: palette.groundB,
     trees: skin.seasons.map((season) => season.tree),
@@ -233,11 +230,11 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
       floorUnderWalls: true,
       floorTint: (x, y) => {
         if (isWall(grid, x, y)) return skin.soil;
-        const room = fourRoomsRoom(x, y);
+        const room = fourRoomsRoom(x, y, grid.w, grid.h);
         return room < 0 ? skin.threshold : (skin.seasons[room]?.floor ?? skin.threshold);
       },
       wallTint: (x, y) => {
-        const room = fourRoomsRoom(x, y);
+        const room = fourRoomsRoom(x, y, grid.w, grid.h);
         return room < 0 ? skin.evergreen : (skin.seasons[room]?.hedge ?? skin.evergreen);
       },
       wallShape: 'hedge',

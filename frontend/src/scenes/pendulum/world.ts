@@ -373,7 +373,7 @@ return mix(ground, ${WATER_LEVEL - 0.65}, inlet);
   }));
   for (const mesh of [...meadow.meshes, ...stones.meshes]) w.add(mesh);
 
-  const fireflyColor = blendTokens(accent, TOKENS.accents['memory-chain'] ?? accent, 0.42);
+  const fireflyColor = blendTokens(accent, TOKENS.accents['t-maze'] ?? accent, 0.42);
   const fireflies: AmbientParticlesHandle = makeAmbientParticles({
     preset: 'fireflies',
     count: 260,

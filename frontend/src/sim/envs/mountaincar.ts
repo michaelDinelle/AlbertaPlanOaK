@@ -1,4 +1,3 @@
-import { POSE_LEN } from '../../data/oak';
 import { NO_EVENTS, type EnvDecoder, type EnvFrame, type EnvGeometry, type SimEvent } from '../types';
 
 export const MC_MIN_POS = -1.2;
@@ -18,13 +17,6 @@ export function mountainCarForce(action: number): number {
 export const MC_TROUGH_X = -Math.PI / 6;
 export const MC_CREST_X = Math.PI / 6;
 
-export interface MountainCarStatic {
-  minPos: number;
-  maxPos: number;
-  goalPos: number;
-  maxSpeed: number;
-  startPos: number;
-}
 
 export function mountainCarHeight(x: number): number {
   return Math.sin(3 * x) * 0.45 + 0.55;
@@ -34,13 +26,6 @@ export function mountainCarSlope(x: number): number {
   return 1.35 * Math.cos(3 * x);
 }
 
-const STATIC: MountainCarStatic = Object.freeze({
-  minPos: MC_MIN_POS,
-  maxPos: MC_MAX_POS,
-  goalPos: MC_GOAL_POS,
-  maxSpeed: MC_MAX_SPEED,
-  startPos: MC_START_POS,
-});
 
 const ANCHORS: Record<string, readonly [number, number, number]> = Object.freeze({
   trackLeft: [MC_MIN_POS, mountainCarHeight(MC_MIN_POS), 0],
@@ -56,37 +41,20 @@ const GEOMETRY: EnvGeometry = Object.freeze({
   classic: Object.freeze({ heightAt: mountainCarHeight, anchors: ANCHORS }),
 });
 
-export const mountainCarDecoder: EnvDecoder<MountainCarStatic> = {
-  envId: 'MountainCar-cont-v0',
-  seedGeometry: false,
-
-  initStatic(): MountainCarStatic {
-    return STATIC;
-  },
-
+export const mountainCarDecoder: EnvDecoder = {
   geometry(): EnvGeometry {
     return GEOMETRY;
   },
 
-  initFrame(): EnvFrame {
-    const pose = new Float32Array(POSE_LEN);
-    pose[0] = MC_START_POS;
-    pose[2] = MC_GOAL_POS;
-    return {
-      step: -1,
-      done: 0,
-      pose,
-    };
-  },
 
   deriveEvents(
-    prev: EnvFrame,
+    _prev: EnvFrame,
     next: EnvFrame,
   ): SimEvent[] {
-    if (next.done === 0 && prev.done === 0) return NO_EVENTS;
+    if (next.done === 0) return NO_EVENTS;
     const out: SimEvent[] = [];
     if (next.done !== 0) out.push({ type: 'goal' }, { type: 'done' });
-    if (prev.done !== 0) out.push({ type: 'teleport' });
+    if (next.done !== 0) out.push({ type: 'teleport' });
     return out;
   },
 };

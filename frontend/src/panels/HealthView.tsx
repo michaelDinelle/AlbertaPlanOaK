@@ -1,4 +1,3 @@
-import type { EnvId } from '../data/envs';
 import type { Recording } from '../data/layout';
 import { cached, envLanes, survival, windowedRates } from '../derive';
 import { formatPercent, formatRate } from '../format';

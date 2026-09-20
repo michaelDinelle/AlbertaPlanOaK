@@ -95,7 +95,8 @@ void jbw_buildShared(device float *shared);
 
 #ifndef __METAL_VERSION__
 typedef struct {
-    const char *name;
+    const char *name, *family;
+    uint32_t instance;
     uint32_t id, obs, actions, box, seedStart, seeds, poseLen;
 } EnvSpec;
 extern const uint32_t OAK_ENV_TABLE_COUNT;

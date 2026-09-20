@@ -1,5 +1,6 @@
+import { parameter, type EnvDescriptor } from '../data/envs';
 import { useEffect, useRef, useState } from 'react';
-import { jbwPolarity, JBW_COLOR, JBW_JELLY, JBW_ONION, JBW_BANANA, JBW_TRUFFLE, JBW_POLARITY_PERIOD } from '@sim/envs/jellybeanworld';
+import { JBW_COLOR, JBW_JELLY, JBW_ONION, JBW_BANANA, JBW_TRUFFLE } from '@sim/envs/jellybeanworld';
 import { formatCount } from '../format';
 import { frameListeners, type Frame } from '../theater/stage';
 
@@ -20,7 +21,8 @@ function Item({ item, label, value }: { item: number; label: string; value: stri
   );
 }
 
-export function JbwLegend() {
+export function JbwLegend({ environment }: { environment: EnvDescriptor }) {
+  const period = parameter(environment, 'polarityPeriod');
   const [polarity, setPolarity] = useState<1 | -1>(1);
   const flipRef = useRef<HTMLSpanElement | null>(null);
   const cycleRef = useRef<HTMLDivElement | null>(null);
@@ -29,18 +31,18 @@ export function JbwLegend() {
   useEffect(() => {
     const listen = (frame: Frame): void => {
       const step = Math.max(0, frame.step);
-      const sign = jbwPolarity(step);
+      const sign = (Math.floor(step / period) & 1) === 0 ? 1 : -1;
       setPolarity((held) => (held === sign ? held : sign));
       const now = performance.now();
       if (now - lastAt.current < 150) return;
       lastAt.current = now;
-      const into = (step + 1) % JBW_POLARITY_PERIOD;
-      if (flipRef.current !== null) flipRef.current.textContent = `flips in ${formatCount(JBW_POLARITY_PERIOD - into)} steps`;
-      if (cycleRef.current !== null) cycleRef.current.style.transform = `scaleX(${(into / JBW_POLARITY_PERIOD).toFixed(4)})`;
+      const into = step % period;
+      if (flipRef.current !== null) flipRef.current.textContent = `flips in ${formatCount(period - into)} steps`;
+      if (cycleRef.current !== null) cycleRef.current.style.transform = `scaleX(${(into / period).toFixed(4)})`;
     };
     frameListeners.add(listen);
     return () => { frameListeners.delete(listen); };
-  }, []);
+  }, [period]);
 
   return (
     <div className="glass flex flex-col gap-1.5 rounded-lg px-3 py-2 text-xs">

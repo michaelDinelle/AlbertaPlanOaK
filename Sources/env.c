@@ -54,8 +54,8 @@
     X(ACCESS_FIXED, access, 0u, "AccessControl-cont-v0", 6u, 2u, 0u, 6144u, 16u, 0u, noPose, noExtra) \
     X(ACCESS_DRIFT, access, 1u, "AccessControl-drift-cont-v0", 6u, 2u, 0u, 6208u, 16u, 0u, noPose, noExtra) \
     X(ACROBOT, acrobot, 0u, "Acrobot-cont-v0", 7u, 3u, 0u, 256u, 32u, 5u, acrobot_pose, noExtra) \
-    X(ACROBOT_SLIP, acrobot, 1u, "Acrobot-slip-cont-v0", 7u, 3u, 0u, 8320u, 64u, 0u, acrobot_pose, noExtra) \
-    X(ACROBOT_POSITION, acrobot, 2u, "Acrobot-position-cont-v0", 7u, 3u, 0u, 8384u, 64u, 0u, acrobot_pose, noExtra) \
+    X(ACROBOT_SLIP, acrobot, 1u, "Acrobot-slip-cont-v0", 7u, 3u, 0u, 8320u, 64u, 5u, acrobot_pose, noExtra) \
+    X(ACROBOT_POSITION, acrobot, 2u, "Acrobot-position-cont-v0", 7u, 3u, 0u, 8384u, 64u, 5u, acrobot_pose, noExtra) \
     X(ALIASED_8, aliased, 0u, "AliasedRing-8-cont-v0", 2u, 2u, 0u, 5824u, 16u, 0u, noPose, noExtra) \
     X(ALIASED_32, aliased, 1u, "AliasedRing-32-cont-v0", 2u, 2u, 0u, 5888u, 64u, 0u, noPose, noExtra) \
     X(ALIASED_128, aliased, 2u, "AliasedRing-128-cont-v0", 2u, 2u, 0u, 5952u, 64u, 0u, noPose, noExtra) \
@@ -92,8 +92,8 @@
     X(COVARIATE_SHIFT, covariate, 1u, "Covariate-shift-cont-v0", 5u, 2u, 0u, 4608u, 47u, 0u, noPose, noExtra) \
     X(DEEPSEA, deepsea, 0u, "DeepSea-cont-v0", 8u, 2u, 0u, 128u, 16u, 5u, deepsea_pose, noExtra) \
     X(LARGEDEEPSEA, deepsea, 1u, "LargeDeepSea-cont-v0", 8u, 2u, 0u, 576u, 64u, 5u, deepsea_pose, noExtra) \
-    X(DEEPSEA_32, deepsea, 2u, "DeepSea-32-cont-v0", 8u, 2u, 0u, 8000u, 16u, 0u, deepsea_pose, noExtra) \
-    X(DEEPSEA_16_SLIP, deepsea, 3u, "DeepSea-16-slip-cont-v0", 8u, 2u, 0u, 8064u, 42u, 0u, deepsea_pose, noExtra) \
+    X(DEEPSEA_32, deepsea, 2u, "DeepSea-32-cont-v0", 8u, 2u, 0u, 8000u, 16u, 5u, deepsea_pose, noExtra) \
+    X(DEEPSEA_16_SLIP, deepsea, 3u, "DeepSea-16-slip-cont-v0", 8u, 2u, 0u, 8064u, 42u, 5u, deepsea_pose, noExtra) \
     X(FORAGER_16_1, forager, 0u, "Forager-16-1-cont-v0", 10u, 4u, 0u, 7296u, 19u, 0u, noPose, forager_extraWords) \
     X(FORAGER_64_1, forager, 1u, "Forager-64-1-cont-v0", 10u, 4u, 0u, 7360u, 61u, 0u, noPose, forager_extraWords) \
     X(FORAGER_16_2, forager, 2u, "Forager-16-2-cont-v0", 26u, 4u, 0u, 7424u, 16u, 0u, noPose, forager_extraWords) \
@@ -115,15 +115,15 @@
     X(KEYDOOR_8, keydoor, 0u, "KeyDoor-8-cont-v0", 4u, 2u, 0u, 2944u, 16u, 0u, noPose, noExtra) \
     X(KEYDOOR_64, keydoor, 1u, "KeyDoor-64-cont-v0", 4u, 2u, 0u, 3008u, 16u, 0u, noPose, noExtra) \
     X(KEYDOOR_512, keydoor, 2u, "KeyDoor-512-cont-v0", 4u, 2u, 0u, 3072u, 64u, 0u, noPose, noExtra) \
-    X(TMAZE_4_1, tmaze, 0u, "TMaze-4-1-cont-v0", 6u, 2u, 0u, 4992u, 16u, 0u, tmaze_pose, noExtra) \
-    X(TMAZE_16_1, tmaze, 1u, "TMaze-16-1-cont-v0", 6u, 2u, 0u, 5056u, 44u, 0u, tmaze_pose, noExtra) \
+    X(TMAZE_4_1, tmaze, 0u, "TMaze-4-1-cont-v0", 6u, 2u, 0u, 4992u, 16u, 4u, tmaze_pose, noExtra) \
+    X(TMAZE_16_1, tmaze, 1u, "TMaze-16-1-cont-v0", 6u, 2u, 0u, 5056u, 44u, 4u, tmaze_pose, noExtra) \
     X(MEMORYCHAIN, tmaze, 2u, "MemoryChain-cont-v0", 6u, 2u, 0u, 704u, 38u, 4u, tmaze_pose, noExtra) \
-    X(TMAZE_64_1, tmaze, 3u, "TMaze-64-1-cont-v0", 6u, 2u, 0u, 5120u, 23u, 0u, tmaze_pose, noExtra) \
-    X(TMAZE_16_2, tmaze, 4u, "TMaze-16-2-cont-v0", 7u, 4u, 0u, 5184u, 64u, 0u, tmaze_pose, noExtra) \
-    X(TMAZE_64_2, tmaze, 5u, "TMaze-64-2-cont-v0", 7u, 4u, 0u, 5248u, 26u, 0u, tmaze_pose, noExtra) \
+    X(TMAZE_64_1, tmaze, 3u, "TMaze-64-1-cont-v0", 6u, 2u, 0u, 5120u, 23u, 4u, tmaze_pose, noExtra) \
+    X(TMAZE_16_2, tmaze, 4u, "TMaze-16-2-cont-v0", 7u, 4u, 0u, 5184u, 64u, 4u, tmaze_pose, noExtra) \
+    X(TMAZE_64_2, tmaze, 5u, "TMaze-64-2-cont-v0", 7u, 4u, 0u, 5248u, 26u, 4u, tmaze_pose, noExtra) \
     X(MOUNTAINCAR, mountainCar, 0u, "MountainCar-cont-v0", 3u, 3u, 0u, 320u, 45u, 4u, mountainCar_pose, noExtra) \
-    X(MOUNTAINCAR_SLIP, mountainCar, 1u, "MountainCar-slip-cont-v0", 3u, 3u, 0u, 8192u, 64u, 0u, mountainCar_pose, noExtra) \
-    X(MOUNTAINCAR_POSITION, mountainCar, 2u, "MountainCar-position-cont-v0", 3u, 3u, 0u, 8256u, 64u, 0u, mountainCar_pose, noExtra) \
+    X(MOUNTAINCAR_SLIP, mountainCar, 1u, "MountainCar-slip-cont-v0", 3u, 3u, 0u, 8192u, 64u, 4u, mountainCar_pose, noExtra) \
+    X(MOUNTAINCAR_POSITION, mountainCar, 2u, "MountainCar-position-cont-v0", 3u, 3u, 0u, 8256u, 64u, 4u, mountainCar_pose, noExtra) \
     X(NEXTING_1, nexting, 0u, "Nexting-1-cont-v0", 4u, 2u, 0u, 4864u, 16u, 0u, noPose, noExtra) \
     X(NEXTING_10, nexting, 1u, "Nexting-10-cont-v0", 4u, 2u, 0u, 4928u, 16u, 0u, noPose, noExtra) \
     X(OPERANT_16, operant, 0u, "Operant-16-cont-v0", 2u, 2u, 0u, 1728u, 16u, 0u, noPose, noExtra) \
@@ -137,8 +137,8 @@
     X(PATIENCE_50, patience, 1u, "Patience-50-cont-v0", 2u, 2u, 0u, 2688u, 64u, 0u, noPose, noExtra) \
     X(PATIENCE_500, patience, 2u, "Patience-500-cont-v0", 2u, 2u, 0u, 2752u, 64u, 0u, noPose, noExtra) \
     X(PENDULUM, pendulum, 0u, "Pendulum-cont-v0", 4u, 1u, 1u, 448u, 64u, 3u, pendulum_pose, noExtra) \
-    X(PENDULUM_SLIP, pendulum, 1u, "Pendulum-slip-cont-v0", 4u, 1u, 1u, 8448u, 64u, 0u, pendulum_pose, noExtra) \
-    X(PENDULUM_POSITION, pendulum, 2u, "Pendulum-position-cont-v0", 4u, 1u, 1u, 8512u, 64u, 0u, pendulum_pose, noExtra) \
+    X(PENDULUM_SLIP, pendulum, 1u, "Pendulum-slip-cont-v0", 4u, 1u, 1u, 8448u, 64u, 3u, pendulum_pose, noExtra) \
+    X(PENDULUM_POSITION, pendulum, 2u, "Pendulum-position-cont-v0", 4u, 1u, 1u, 8512u, 64u, 3u, pendulum_pose, noExtra) \
     X(PERMUTED_FIXED, permuted, 0u, "Permuted-fixed-cont-v0", 9u, 4u, 0u, 4416u, 16u, 0u, noPose, noExtra) \
     X(PERMUTED_RECODE, permuted, 1u, "Permuted-recode-cont-v0", 9u, 4u, 0u, 4480u, 64u, 0u, noPose, noExtra) \
     X(PUDDLE, puddle, 0u, "PuddleWorld-cont-v0", 3u, 4u, 0u, 6400u, 16u, 0u, noPose, noExtra) \
@@ -250,7 +250,7 @@ uint32_t env_extraWords(uint32_t env, uint32_t steps) {
 #include <stdlib.h>
 #include <string.h>
 
-#define OAK_ENV_SPEC(sym, family, instance, name_, obs_, actions_, box_, seedStart_, seeds_, poseLen_, pose, extra) { name_, ENV_##sym, obs_, actions_, box_, seedStart_, seeds_, poseLen_ },
+#define OAK_ENV_SPEC(sym, family, instance, name_, obs_, actions_, box_, seedStart_, seeds_, poseLen_, pose, extra) { name_, #family, instance, ENV_##sym, obs_, actions_, box_, seedStart_, seeds_, poseLen_ },
 static const EnvSpec TABLE[] = { OAK_ENV_LIST(OAK_ENV_SPEC) };
 
 const uint32_t OAK_ENV_TABLE_COUNT = sizeof TABLE / sizeof TABLE[0];

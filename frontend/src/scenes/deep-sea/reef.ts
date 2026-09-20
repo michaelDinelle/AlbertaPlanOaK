@@ -3,7 +3,7 @@ import { blendTokens, clamp01, shade } from '@kit/mix';
 import { TOKENS, type Palette } from '@kit/tokens';
 import type { FrameState } from '@kit/types';
 import * as THREE from 'three';
-import { DEEPSEA_ACTION, DEEPSEA_COL, DEEPSEA_N, DEEPSEA_ROW, deepSeaNextCol, type DeepSeaStatic } from '@sim/envs/deepsea';
+import { DEEPSEA_ACTION, DEEPSEA_COL, DEEPSEA_ROW, deepSeaNextCol, type DeepSeaStatic } from '@sim/envs/deepsea';
 import type { EnvGeometry, GridGeometry } from '@sim/types';
 
 export {
@@ -19,12 +19,10 @@ export {
 
 export const SHELF_THICKNESS = 1.35;
 
-export const TREASURE_ROW = DEEPSEA_N - 1;
-export const TREASURE_COL = DEEPSEA_N - 1;
 
 export function resolveGrid(geometry: EnvGeometry): GridGeometry {
   const grid = geometry.grid;
-  if (!grid || grid.w !== DEEPSEA_N || grid.h !== DEEPSEA_N) throw new Error('Deep Sea grid is missing or invalid');
+  if (!grid || grid.w < 2 || grid.h !== grid.w) throw new Error('Deep Sea grid is missing or invalid');
   return grid;
 }
 
@@ -33,7 +31,7 @@ export function reefReachable(grid: GridGeometry): Uint8Array {
   const h = grid.h;
   const mask = grid.actionMask;
   if (!mask || mask.length !== w * h) throw new Error('Deep Sea action mask is missing or invalid');
-  const st: DeepSeaStatic = { seed: 0, maskLo: 0, maskHi: 0, mask };
+  const st: DeepSeaStatic = { width: w, mask };
   const reach = new Uint8Array(w * h);
   reach[0] = 1;
   for (let r = 0; r + 1 < h; r++) {
@@ -111,7 +109,7 @@ export interface ReefSkin {
 
 export function reefSkin(palette: Palette, tokens: typeof TOKENS): ReefSkin {
   const accent = tokens.accents['deep-sea'] ?? tokens.uiCyan;
-  const green = tokens.accents['memory-chain'] ?? palette.groundB;
+  const green = tokens.accents['t-maze'] ?? palette.groundB;
   const blossom = tokens.accents['chain'] ?? tokens.celebrationGold;
   const dawnRose = tokens.accents['acrobot'] ?? blossom;
   const gold = tokens.accents['multi-key-corridor'] ?? tokens.celebrationGold;
@@ -141,6 +139,6 @@ export function reefSkin(palette: Palette, tokens: typeof TOKENS): ReefSkin {
 export function shelfTint(skin: ReefSkin, grid: GridSize, c: number, r: number, out: THREE.Color): THREE.Color {
   const depth = grid.h > 1 ? clamp01(r / (grid.h - 1)) : 0;
   out.copy(skin.shelfShallow).lerp(skin.shelfDeep, depth);
-  if (r === TREASURE_ROW && c === TREASURE_COL) return out.lerp(skin.shelfTreasure, 0.75);
+  if (r === grid.h - 1 && c === grid.w - 1) return out.lerp(skin.shelfTreasure, 0.75);
   return out;
 }

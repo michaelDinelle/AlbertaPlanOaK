@@ -1,4 +1,3 @@
-import { POSE_LEN } from '../../data/oak';
 import { NO_EVENTS, type EnvDecoder, type EnvFrame, type EnvGeometry, type SimEvent } from '../types';
 
 export const AB_L1 = 1;
@@ -16,17 +15,7 @@ export function acrobotTorque(action: number): number {
   return ((Math.trunc(action) >>> 0) % AB_ACTIONS) - 1;
 }
 
-export interface AcrobotStatic {
-  l1: number;
-  l2: number;
-  successHeight: number;
-}
 
-const STATIC: AcrobotStatic = Object.freeze({
-  l1: AB_L1,
-  l2: AB_L2,
-  successHeight: AB_SUCCESS_HEIGHT,
-});
 
 const ANCHORS: Record<string, readonly [number, number, number]> = Object.freeze({
   pivot: [0, 0, 0],
@@ -41,32 +30,17 @@ const GEOMETRY: EnvGeometry = Object.freeze({
   classic: Object.freeze({ anchors: ANCHORS }),
 });
 
-export const acrobotDecoder: EnvDecoder<AcrobotStatic> = {
-  envId: 'Acrobot-cont-v0',
-  seedGeometry: false,
-
-  initStatic(): AcrobotStatic {
-    return STATIC;
-  },
-
+export const acrobotDecoder: EnvDecoder = {
   geometry(): EnvGeometry {
     return GEOMETRY;
   },
 
-  initFrame(): EnvFrame {
-    const pose = new Float32Array(POSE_LEN);
-    return {
-      step: -1,
-      done: 0,
-      pose,
-    };
-  },
 
-  deriveEvents(prev: EnvFrame, next: EnvFrame): SimEvent[] {
-    if (next.done === 0 && prev.done === 0) return NO_EVENTS;
+  deriveEvents(_prev: EnvFrame, next: EnvFrame): SimEvent[] {
+    if (next.done === 0) return NO_EVENTS;
     const out: SimEvent[] = [];
     if (next.done !== 0) out.push({ type: 'goal' }, { type: 'done' });
-    if (prev.done !== 0) out.push({ type: 'teleport' });
+    if (next.done !== 0) out.push({ type: 'teleport' });
     return out;
   },
 };
