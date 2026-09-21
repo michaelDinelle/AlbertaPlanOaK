@@ -6,7 +6,7 @@
 
 static uint32_t sokoban_pack(int ax, int ay, int bx, int by) { return (uint32_t)(ax + SOKOBAN_SIDE * ay) * SOKOBAN_CELLS + (uint32_t)(bx + SOKOBAN_SIDE * by); }
 
-static int sokoban_move(thread int *ax, thread int *ay, thread int *bx, thread int *by, uint32_t direction) {
+static int sokoban_move(int *ax, int *ay, int *bx, int *by, uint32_t direction) {
     int dx, dy;
     gridDelta(direction, &dx, &dy);
     int nx = *ax + dx, ny = *ay + dy;
@@ -20,7 +20,7 @@ static int sokoban_move(thread int *ax, thread int *ay, thread int *bx, thread i
     return 1;
 }
 
-static void sokoban_puzzle(uint32_t seed, uint32_t index, device uint32_t *words) {
+static void sokoban_puzzle(uint32_t seed, uint32_t index, uint32_t *words) {
     u4 r = philox4x32(seed, ENV_RNG_STREAM, index, 7u, 0u, 0u);
     uint32_t box = 6u + (r.x % 3u) + SOKOBAN_SIDE * (r.y % 3u);
     uint32_t target = r.z % SOKOBAN_CELLS;
@@ -33,18 +33,18 @@ static void sokoban_puzzle(uint32_t seed, uint32_t index, device uint32_t *words
     words[6] = 0u;
 }
 
-static void sokoban_obs(const device uint32_t *words, device float *obs) {
+static void sokoban_obs(const uint32_t *words, float *obs) {
     for (uint32_t i = 0u; i < 6u; i++) obs[i] = (float)words[i] / (float)(SOKOBAN_SIDE - 1);
     obs[6] = 1.0f;
 }
 
-void sokoban_reset(uint32_t instance, uint32_t seed, device uint32_t *words, device uint32_t *extra, uint32_t steps) {
+void sokoban_reset(uint32_t instance, uint32_t seed, uint32_t *words, uint32_t *extra, uint32_t steps) {
     (void)steps;
     (void)instance; (void)extra;
     sokoban_puzzle(seed, 0u, words);
 }
 
-float sokoban_step(uint32_t instance, uint32_t seed, uint32_t step, thread const float *ctrl, device uint32_t *words, device uint32_t *extra, device float *obs, thread uint32_t *done, constant const float *shared) {
+float sokoban_step(uint32_t instance, uint32_t seed, uint32_t step, const float *ctrl, uint32_t *words, uint32_t *extra, float *obs, uint32_t *done, const float *shared) {
     (void)shared;
     (void)instance; (void)extra;
     int ax = (int)words[0], ay = (int)words[1], bx = (int)words[2], by = (int)words[3];
@@ -59,13 +59,13 @@ float sokoban_step(uint32_t instance, uint32_t seed, uint32_t step, thread const
     return reward;
 }
 
-void sokoban_observe(uint32_t instance, uint32_t seed, device const uint32_t *words, device const uint32_t *extra, uint32_t step, device float *obs, constant const float *shared) {
+void sokoban_observe(uint32_t instance, uint32_t seed, const uint32_t *words, const uint32_t *extra, uint32_t step, float *obs, const float *shared) {
     (void)shared;
     (void)instance; (void)seed; (void)extra; (void)step;
     sokoban_obs(words, obs);
 }
 
-void sokoban_oracle(uint32_t instance, uint32_t seed, uint32_t step, device const uint32_t *words, device const uint32_t *extra, device const float *obs, thread float *ctrl, constant const float *shared) {
+void sokoban_oracle(uint32_t instance, uint32_t seed, uint32_t step, const uint32_t *words, const uint32_t *extra, const float *obs, float *ctrl, const float *shared) {
     (void)shared;
     (void)instance; (void)seed; (void)step; (void)extra; (void)obs;
     enum { STATES = SOKOBAN_CELLS * SOKOBAN_CELLS };

@@ -2,20 +2,20 @@
 
 typedef struct { float slip; uint32_t positionOnly; } pendulumKnobs;
 
-OAK_CONSTANT pendulumKnobs PENDULUM_KNOBS[3] = {
+static const pendulumKnobs PENDULUM_KNOBS[3] = {
     { 0.0f, 0u },
     { 0.2f, 0u },
     { 0.0f, 1u }
 };
 
 
-static void pendulum_obs(constant const pendulumKnobs *k, float theta, float thetaDot, device float *obs) {
+static void pendulum_obs(const pendulumKnobs *k, float theta, float thetaDot, float *obs) {
     float s, c;
     oak_sincos(theta, &s, &c);
     obs[0] = c; obs[1] = s; obs[2] = k->positionOnly ? 0.0f : thetaDot; obs[3] = 1.0f;
 }
 
-void pendulum_reset(uint32_t instance, uint32_t seed, device uint32_t *words, device uint32_t *extra, uint32_t steps) {
+void pendulum_reset(uint32_t instance, uint32_t seed, uint32_t *words, uint32_t *extra, uint32_t steps) {
     (void)steps;
     (void)extra;
     (void)instance;
@@ -23,10 +23,10 @@ void pendulum_reset(uint32_t instance, uint32_t seed, device uint32_t *words, de
     words[0] = floatWord(OAK_PI);
 }
 
-float pendulum_step(uint32_t instance, uint32_t seed, uint32_t step, thread const float *ctrl, device uint32_t *words, device uint32_t *extra, device float *obs, thread uint32_t *done, constant const float *shared) {
+float pendulum_step(uint32_t instance, uint32_t seed, uint32_t step, const float *ctrl, uint32_t *words, uint32_t *extra, float *obs, uint32_t *done, const float *shared) {
     (void)shared;
     (void)extra;
-    constant const pendulumKnobs *k = &PENDULUM_KNOBS[instance];
+    const pendulumKnobs *k = &PENDULUM_KNOBS[instance];
     *done = 0u;
     float theta = wordFloat(words[0]), thetaDot = wordFloat(words[1]);
     float command = ctrl[0];
@@ -46,19 +46,19 @@ float pendulum_step(uint32_t instance, uint32_t seed, uint32_t step, thread cons
     return -cost;
 }
 
-void pendulum_observe(uint32_t instance, uint32_t seed, device const uint32_t *words, device const uint32_t *extra, uint32_t step, device float *obs, constant const float *shared) {
+void pendulum_observe(uint32_t instance, uint32_t seed, const uint32_t *words, const uint32_t *extra, uint32_t step, float *obs, const float *shared) {
     (void)shared;
     (void)seed; (void)extra; (void)step;
     pendulum_obs(&PENDULUM_KNOBS[instance], wordFloat(words[0]), wordFloat(words[1]), obs);
 }
 
-void pendulum_pose(uint32_t instance, device const uint32_t *words, thread const float *ctrl, thread float *pose) {
+void pendulum_pose(uint32_t instance, const uint32_t *words, const float *ctrl, float *pose) {
     (void)instance;
     poseZero(pose);
     pose[0] = wordFloat(words[0]); pose[1] = wordFloat(words[1]); pose[2] = oak_clamp(2.0f * ctrl[0], -2.0f, 2.0f);
 }
 
-void pendulum_oracle(uint32_t instance, uint32_t seed, uint32_t step, device const uint32_t *words, device const uint32_t *extra, device const float *obs, thread float *ctrl, constant const float *shared) {
+void pendulum_oracle(uint32_t instance, uint32_t seed, uint32_t step, const uint32_t *words, const uint32_t *extra, const float *obs, float *ctrl, const float *shared) {
     (void)shared;
     (void)instance;
     (void)seed; (void)step; (void)extra; (void)obs;

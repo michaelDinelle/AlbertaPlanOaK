@@ -5,13 +5,13 @@
 
 typedef struct { uint32_t drift; } walkbetKnobs;
 
-OAK_CONSTANT walkbetKnobs WALKBET_KNOBS[2] = {
+static const walkbetKnobs WALKBET_KNOBS[2] = {
     { 0u },
     { 1u }
 };
 
 
-static float walkbet_rightProbability(constant const walkbetKnobs *k, uint32_t step) {
+static float walkbet_rightProbability(const walkbetKnobs *k, uint32_t step) {
     if (!k->drift) return 0.5f;
     float s, c;
     oak_sincos(2.0f * OAK_PI * (float)(step % WALKBET_PERIOD) / (float)WALKBET_PERIOD, &s, &c);
@@ -26,14 +26,14 @@ static float walkbet_absorbRight(float p, uint32_t position) {
     return num / den;
 }
 
-static void walkbet_obs(uint32_t position, device float *obs) { obs[0] = (float)position / (float)WALKBET_CELLS; obs[1] = 1.0f; }
+static void walkbet_obs(uint32_t position, float *obs) { obs[0] = (float)position / (float)WALKBET_CELLS; obs[1] = 1.0f; }
 
-void walkbet_reset(uint32_t instance, uint32_t seed, device uint32_t *words, device uint32_t *extra, uint32_t steps) { (void)steps; (void)instance; (void)seed; (void)extra; words[0] = WALKBET_CELLS / 2u; }
+void walkbet_reset(uint32_t instance, uint32_t seed, uint32_t *words, uint32_t *extra, uint32_t steps) { (void)steps; (void)instance; (void)seed; (void)extra; words[0] = WALKBET_CELLS / 2u; }
 
-float walkbet_step(uint32_t instance, uint32_t seed, uint32_t step, thread const float *ctrl, device uint32_t *words, device uint32_t *extra, device float *obs, thread uint32_t *done, constant const float *shared) {
+float walkbet_step(uint32_t instance, uint32_t seed, uint32_t step, const float *ctrl, uint32_t *words, uint32_t *extra, float *obs, uint32_t *done, const float *shared) {
     (void)shared;
     (void)extra;
-    constant const walkbetKnobs *k = &WALKBET_KNOBS[instance];
+    const walkbetKnobs *k = &WALKBET_KNOBS[instance];
     float p = walkbet_rightProbability(k, step);
     uint32_t position = words[0];
     *done = 0u;
@@ -45,13 +45,13 @@ float walkbet_step(uint32_t instance, uint32_t seed, uint32_t step, thread const
     return reward;
 }
 
-void walkbet_observe(uint32_t instance, uint32_t seed, device const uint32_t *words, device const uint32_t *extra, uint32_t step, device float *obs, constant const float *shared) {
+void walkbet_observe(uint32_t instance, uint32_t seed, const uint32_t *words, const uint32_t *extra, uint32_t step, float *obs, const float *shared) {
     (void)shared;
     (void)instance; (void)seed; (void)extra; (void)step;
     walkbet_obs(words[0], obs);
 }
 
-void walkbet_oracle(uint32_t instance, uint32_t seed, uint32_t step, device const uint32_t *words, device const uint32_t *extra, device const float *obs, thread float *ctrl, constant const float *shared) {
+void walkbet_oracle(uint32_t instance, uint32_t seed, uint32_t step, const uint32_t *words, const uint32_t *extra, const float *obs, float *ctrl, const float *shared) {
     (void)shared;
     (void)seed; (void)extra; (void)obs;
     ctrl[0] = walkbet_absorbRight(walkbet_rightProbability(&WALKBET_KNOBS[instance], step + 1u), words[0]) > 0.5f ? 1.0f : 0.0f;

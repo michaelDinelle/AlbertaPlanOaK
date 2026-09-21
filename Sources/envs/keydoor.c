@@ -2,26 +2,26 @@
 
 typedef struct { uint32_t delay; } keydoorKnobs;
 
-OAK_CONSTANT keydoorKnobs KEYDOOR_KNOBS[3] = {
+static const keydoorKnobs KEYDOOR_KNOBS[3] = {
     { 8u },
     { 64u },
     { 512u }
 };
 
 
-static void keydoor_obs(constant const keydoorKnobs *k, uint32_t phase, uint32_t hasKey, device float *obs) {
+static void keydoor_obs(const keydoorKnobs *k, uint32_t phase, uint32_t hasKey, float *obs) {
     obs[0] = phase == 0u ? 1.0f : 0.0f;
     obs[1] = (float)hasKey;
     obs[2] = (float)phase / (float)k->delay;
     obs[3] = 1.0f;
 }
 
-void keydoor_reset(uint32_t instance, uint32_t seed, device uint32_t *words, device uint32_t *extra, uint32_t steps) { (void)steps; (void)instance; (void)seed; (void)words; (void)extra; }
+void keydoor_reset(uint32_t instance, uint32_t seed, uint32_t *words, uint32_t *extra, uint32_t steps) { (void)steps; (void)instance; (void)seed; (void)words; (void)extra; }
 
-float keydoor_step(uint32_t instance, uint32_t seed, uint32_t step, thread const float *ctrl, device uint32_t *words, device uint32_t *extra, device float *obs, thread uint32_t *done, constant const float *shared) {
+float keydoor_step(uint32_t instance, uint32_t seed, uint32_t step, const float *ctrl, uint32_t *words, uint32_t *extra, float *obs, uint32_t *done, const float *shared) {
     (void)shared;
     (void)extra;
-    constant const keydoorKnobs *k = &KEYDOOR_KNOBS[instance];
+    const keydoorKnobs *k = &KEYDOOR_KNOBS[instance];
     uint32_t phase = words[0], hasKey = words[1];
     float reward;
     *done = 0u;
@@ -40,13 +40,13 @@ float keydoor_step(uint32_t instance, uint32_t seed, uint32_t step, thread const
     return reward;
 }
 
-void keydoor_observe(uint32_t instance, uint32_t seed, device const uint32_t *words, device const uint32_t *extra, uint32_t step, device float *obs, constant const float *shared) {
+void keydoor_observe(uint32_t instance, uint32_t seed, const uint32_t *words, const uint32_t *extra, uint32_t step, float *obs, const float *shared) {
     (void)shared;
     (void)seed; (void)extra; (void)step;
     keydoor_obs(&KEYDOOR_KNOBS[instance], words[0], words[1], obs);
 }
 
-void keydoor_oracle(uint32_t instance, uint32_t seed, uint32_t step, device const uint32_t *words, device const uint32_t *extra, device const float *obs, thread float *ctrl, constant const float *shared) {
+void keydoor_oracle(uint32_t instance, uint32_t seed, uint32_t step, const uint32_t *words, const uint32_t *extra, const float *obs, float *ctrl, const float *shared) {
     (void)shared;
     (void)instance; (void)seed; (void)step; (void)extra; (void)obs;
     ctrl[0] = words[0] == 0u ? 1.0f : 0.0f;

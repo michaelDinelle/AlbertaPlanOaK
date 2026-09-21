@@ -2,7 +2,7 @@
 
 typedef struct { uint32_t length, distractors; } umbrellaKnobs;
 
-OAK_CONSTANT umbrellaKnobs UMBRELLA_KNOBS[6] = {
+static const umbrellaKnobs UMBRELLA_KNOBS[6] = {
     { 4u, 0u },
     { 16u, 0u },
     { 64u, 0u },
@@ -12,7 +12,7 @@ OAK_CONSTANT umbrellaKnobs UMBRELLA_KNOBS[6] = {
 };
 
 
-static void umbrella_obs(constant const umbrellaKnobs *k, uint32_t seed, uint32_t step, uint32_t phase, uint32_t need, uint32_t have, device float *obs) {
+static void umbrella_obs(const umbrellaKnobs *k, uint32_t seed, uint32_t step, uint32_t phase, uint32_t need, uint32_t have, float *obs) {
     obs[0] = phase == 0u ? (float)need : 0.0f;
     obs[1] = (float)have;
     obs[2] = (float)phase / (float)k->length;
@@ -21,7 +21,7 @@ static void umbrella_obs(constant const umbrellaKnobs *k, uint32_t seed, uint32_
         obs[4u + d] = (float)(philox4x32(seed, ENV_RNG_STREAM, step, 16u + (d >> 2u), 0u, 0u).x >> (8u * (d & 3u)) & 1u);
 }
 
-void umbrella_reset(uint32_t instance, uint32_t seed, device uint32_t *words, device uint32_t *extra, uint32_t steps) {
+void umbrella_reset(uint32_t instance, uint32_t seed, uint32_t *words, uint32_t *extra, uint32_t steps) {
     (void)steps;
     (void)instance; (void)extra;
     words[0] = 0u;
@@ -29,10 +29,10 @@ void umbrella_reset(uint32_t instance, uint32_t seed, device uint32_t *words, de
     words[2] = 0u;
 }
 
-float umbrella_step(uint32_t instance, uint32_t seed, uint32_t step, thread const float *ctrl, device uint32_t *words, device uint32_t *extra, device float *obs, thread uint32_t *done, constant const float *shared) {
+float umbrella_step(uint32_t instance, uint32_t seed, uint32_t step, const float *ctrl, uint32_t *words, uint32_t *extra, float *obs, uint32_t *done, const float *shared) {
     (void)shared;
     (void)extra;
-    constant const umbrellaKnobs *k = &UMBRELLA_KNOBS[instance];
+    const umbrellaKnobs *k = &UMBRELLA_KNOBS[instance];
     uint32_t phase = words[0], need = words[1], have = words[2];
     u4 r = philox4x32(seed, ENV_RNG_STREAM, step, 0u, 0u, 0u);
     float reward;
@@ -53,13 +53,13 @@ float umbrella_step(uint32_t instance, uint32_t seed, uint32_t step, thread cons
     return reward;
 }
 
-void umbrella_observe(uint32_t instance, uint32_t seed, device const uint32_t *words, device const uint32_t *extra, uint32_t step, device float *obs, constant const float *shared) {
+void umbrella_observe(uint32_t instance, uint32_t seed, const uint32_t *words, const uint32_t *extra, uint32_t step, float *obs, const float *shared) {
     (void)shared;
     (void)extra;
     umbrella_obs(&UMBRELLA_KNOBS[instance], seed, step, words[0], words[1], words[2], obs);
 }
 
-void umbrella_oracle(uint32_t instance, uint32_t seed, uint32_t step, device const uint32_t *words, device const uint32_t *extra, device const float *obs, thread float *ctrl, constant const float *shared) {
+void umbrella_oracle(uint32_t instance, uint32_t seed, uint32_t step, const uint32_t *words, const uint32_t *extra, const float *obs, float *ctrl, const float *shared) {
     (void)shared;
     (void)instance; (void)seed; (void)step; (void)extra; (void)obs;
     ctrl[0] = words[0] == 0u ? (float)words[1] : 0.0f;

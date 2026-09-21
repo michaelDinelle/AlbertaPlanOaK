@@ -2,7 +2,7 @@
 
 typedef struct { uint32_t competing; } scentpuckKnobs;
 
-OAK_CONSTANT scentpuckKnobs SCENTPUCK_KNOBS[2] = {
+static const scentpuckKnobs SCENTPUCK_KNOBS[2] = {
     { 0u },
     { 1u }
 };
@@ -13,13 +13,13 @@ static float scentpuck_scent(float x, float y, float sx, float sy) {
     return oak_exp(-4.0f * (dx * dx + dy * dy));
 }
 
-static void scentpuck_place(uint32_t seed, uint32_t index, uint32_t slot, device uint32_t *words) {
+static void scentpuck_place(uint32_t seed, uint32_t index, uint32_t slot, uint32_t *words) {
     u4 r = philox4x32(seed, ENV_RNG_STREAM, index, 8u + slot, 0u, 0u);
     words[2u + 2u * slot] = floatWord(uniformRange(r.x, -1.0f, 1.0f));
     words[3u + 2u * slot] = floatWord(uniformRange(r.y, -1.0f, 1.0f));
 }
 
-static void scentpuck_obs(constant const scentpuckKnobs *k, uint32_t seed, uint32_t step, const device uint32_t *words, device float *obs) {
+static void scentpuck_obs(const scentpuckKnobs *k, uint32_t seed, uint32_t step, const uint32_t *words, float *obs) {
     float x = wordFloat(words[0]), y = wordFloat(words[1]);
     u4 r = philox4x32(seed, ENV_RNG_STREAM, step, 1u, 0u, 0u);
     obs[0] = scentpuck_scent(x, y, wordFloat(words[2]), wordFloat(words[3])) + 0.02f * normalFrom(r.x, r.y);
@@ -29,19 +29,19 @@ static void scentpuck_obs(constant const scentpuckKnobs *k, uint32_t seed, uint3
     obs[4] = 1.0f;
 }
 
-void scentpuck_reset(uint32_t instance, uint32_t seed, device uint32_t *words, device uint32_t *extra, uint32_t steps) {
+void scentpuck_reset(uint32_t instance, uint32_t seed, uint32_t *words, uint32_t *extra, uint32_t steps) {
     (void)steps;
     (void)extra;
-    constant const scentpuckKnobs *k = &SCENTPUCK_KNOBS[instance];
+    const scentpuckKnobs *k = &SCENTPUCK_KNOBS[instance];
     words[0] = floatWord(0.0f); words[1] = floatWord(0.0f);
     scentpuck_place(seed, 0u, 0u, words);
     if (k->competing) scentpuck_place(seed, 0u, 1u, words);
 }
 
-float scentpuck_step(uint32_t instance, uint32_t seed, uint32_t step, thread const float *ctrl, device uint32_t *words, device uint32_t *extra, device float *obs, thread uint32_t *done, constant const float *shared) {
+float scentpuck_step(uint32_t instance, uint32_t seed, uint32_t step, const float *ctrl, uint32_t *words, uint32_t *extra, float *obs, uint32_t *done, const float *shared) {
     (void)shared;
     (void)extra;
-    constant const scentpuckKnobs *k = &SCENTPUCK_KNOBS[instance];
+    const scentpuckKnobs *k = &SCENTPUCK_KNOBS[instance];
     *done = 0u;
     uint32_t action = (uint32_t)ctrl[0] % 5u;
     float x = wordFloat(words[0]), y = wordFloat(words[1]);
@@ -69,13 +69,13 @@ float scentpuck_step(uint32_t instance, uint32_t seed, uint32_t step, thread con
     return reward;
 }
 
-void scentpuck_observe(uint32_t instance, uint32_t seed, device const uint32_t *words, device const uint32_t *extra, uint32_t step, device float *obs, constant const float *shared) {
+void scentpuck_observe(uint32_t instance, uint32_t seed, const uint32_t *words, const uint32_t *extra, uint32_t step, float *obs, const float *shared) {
     (void)shared;
     (void)extra;
     scentpuck_obs(&SCENTPUCK_KNOBS[instance], seed, step, words, obs);
 }
 
-void scentpuck_oracle(uint32_t instance, uint32_t seed, uint32_t step, device const uint32_t *words, device const uint32_t *extra, device const float *obs, thread float *ctrl, constant const float *shared) {
+void scentpuck_oracle(uint32_t instance, uint32_t seed, uint32_t step, const uint32_t *words, const uint32_t *extra, const float *obs, float *ctrl, const float *shared) {
     (void)shared;
     (void)instance; (void)seed; (void)step; (void)extra; (void)obs;
     float dx = wordFloat(words[2]) - wordFloat(words[0]), dy = wordFloat(words[3]) - wordFloat(words[1]);

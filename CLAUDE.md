@@ -47,27 +47,28 @@ When a rule drifts from the cited research, fix the rule — never preserve folk
 12. **No branches or commits without explicit user authorization.** Work only in the single current working tree so the user can skim it live in VS Code. Never create a branch, never commit, and never propose a plan that contains branch or commit stages. Only branch or commit when the user has explicitly authorized it in that turn.
 13. **Reuse the recorded best and matching baselines.** Every comparison uses the existing official best/keeper recording as its reference; never launch a fresh reference or source-machine run merely for comparison. If a candidate cannot match the keeper’s required source/schedule, report the mismatch rather than manufacture a new reference. Candidate runs still use `./fleet.py`. Never re-record matching `random` and `ppo` baselines. They are the yardstick: recorded once for a given environment, seed, horizon, and lane schedule, then reused by every science run on that schedule. Do not re-record them as part of a science run — reuse is the point of a baseline. Record only when no complete matching baseline exists, and a baseline changes only when the environment it measures changes: the harness files every baseline under its schedule and the digest of the environment sources, and every run on that schedule links to it. Missing or mismatched baselines fail the run.
 14. **No slice cherry-picking by the agent. Sub-1M tests say nothing about reward.** Reward is judged only at the best's 1,000,000-step horizon on the full fleet. Never gate, promote, decide, or volunteer a prefix, a peak window, a late window, or any other time slice as the result. A run shorter than 1M steps can tell you the engine started; it cannot tell you about reward. This rule binds the agent, not the user: when the user asks to see a slice, show it immediately, in full, without argument or preamble, labelled once as the prefix it is. The user asking is not an invitation to re-litigate the rule, and one label is enough.
-15. **Model geometry is data, declared once.** Every number that sets the agent's shape — lane width, perception budget, gate banks and groups, option count, planning period, and everything derived from them — lives in `Sources/Geometry.metal` and nowhere else. No consumer restates a derivation: the host reads shape back through the shape probe rather than recomputing it, and a `static_assert` pins every identity so drift fails the build. A geometry number that merely equals a hardware number must derive from it explicitly and visibly; coincidence is not derivation, and the wave width is never permitted to set the agent's capacity by accident.
+15. **Model geometry is data, declared once.** Every number that sets the agent's shape — lane width, perception budget, gate banks and groups, option count, planning period, and everything derived from them — lives in `Sources/geometry.h` and nowhere else. No consumer restates a derivation: the host reads shape back through the shape probe rather than recomputing it, and a `static_assert` pins every identity so drift fails the build. A geometry number that merely equals a hardware number must derive from it explicitly and visibly; coincidence is not derivation, and the wave width is never permitted to set the agent's capacity by accident.
 16. **Never opt out of a recording.** `./fleet.py` is the only way to exercise a change: it records the `oak` candidate at the best's schedule and horizon, reuses matching `ppo` and `random` baselines, reports, and gates against the recorded best. Never hand-roll a benchmark request to OaK to check whether something worked, never point a run root outside `.oak-benchmarks/`, and never let a scratch run, a decoded pose tape, a rebuilt older tree, or a reference simulator stand in for the recording. A scratch run is not a smaller gate; it is no gate. When the harness itself is broken, fix the harness and rerun the gate — never route around it. The single exception is the timing instruments under Performance, which are wall-clock probes and make no claim about behaviour or reward.
 17. **Never push without the user's explicit approval in that turn.** Benchmark recordings stay local and are ignored by Git. Nothing uploads them.
 
 
-## Performance: profiling (HEADLESS — verified 2026-07-04)
+## Performance: timing (verified 2026-09-21)
 
-The repo template records without the Instruments GUI. Never trace (or rebuild the metallib) while a fleet run is in flight.
+Throughput drifts with temperature, so **sequential before/after timing is inadmissible**. Ten consecutive 20k-step probes of one identical binary measured 3.41M-3.78M steps/s: 10.6% peak-to-peak, but adjacent runs agreed to 0.5%. The promotion margin is 1%.
+
+The instrument is an interleaved paired probe. Build both binaries, then alternate ABBA blocks and take the median of per-block ratios:
 
 ```
-xctrace record --template ShaderTemplate.tracetemplate \
-  --output out.trace --time-limit 15s \
-  --launch -- .build/release/OaK oak 20000 <scratch root>
-xctrace export --input out.trace --toc                     # list tables
-xctrace export --input out.trace \
-  --xpath '/trace-toc/run[@number="1"]/data/table[@schema="SCHEMA"]' --output t.xml
+.build/oak record oak 20000 .oak-benchmarks/probe-<name>-<n>
 ```
 
-Useful schemas: `metal-gpu-intervals` (per-dispatch GPU times), `gpu-performance-state-intervals` (clock derating, "Minimum … due to active device conditions"), `device-thermal-state-intervals` (thermal axis for SPS-decay questions). Caveat: `metal-shader-profiler-*` and `gpu-counter-*` tables exist but record ZERO rows with this template (shader-profiler/counter profiles are unarmed); arming them needs a one-time GUI template edit — bare `--instrument 'Metal GPU Counters'` records nothing in attach OR launch mode.
+4915 lanes, ~27 s per probe, all 123 environments, no claim about behaviour or reward. Keep the machine quiescent: never probe, trace or rebuild while a fleet run is in flight, and never let a subagent build or run anything during a probe.
 
-Complementary in-code instrument: `OAK_MEGA_STAGE_MASK` (per-stage timing; single-stage-only masks isolate cost but DEGENERATE the data — prefer `encode+X` pairs under live dynamics). It is a timing instrument; trajectories are garbage. The per-stage/falsification evidence log (SPS program) lives in git history: `git log --all -- docs/roadmap.md`.
+Every recording carries a `source/` snapshot so its binary can be rebuilt and timed against a candidate in the same moment. A recording without one cannot serve as a timing reference.
+
+A paired probe compares binaries, not sources. A cold-code edit that moved byte-identical hot functions 216 bytes measured 0.968x over three blocks, three times the margin. Before believing a speed verdict, diff the hot functions between candidate and reference with `objdump -d --disassemble-symbols=_oak_act`; identical bodies mean the verdict is layout, not code. A candidate whose binary is `cmp`-identical to the best's needs no probe.
+
+The per-stage falsification evidence log (SPS program) lives in git history: `git log --all -- docs/roadmap.md`. It describes the deleted GPU engine; its absolute numbers do not transfer, but its measurement law does.
 
 ## Citations (arXiv; fetch on demand)
 

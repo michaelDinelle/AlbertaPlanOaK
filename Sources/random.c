@@ -1,6 +1,6 @@
 #include "policy.h"
 
-void random_act(uint32_t env, uint32_t seed, uint32_t step, thread float *ctrl) {
+void random_act(uint32_t env, uint32_t seed, uint32_t step, float *ctrl) {
     uint32_t actions = env_actions(env);
     if (!env_box(env)) {
         uint32_t w0 = baselineWord(seed, RNG_STREAM_RANDOM_ACT, step, 0u);

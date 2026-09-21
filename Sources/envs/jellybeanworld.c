@@ -15,14 +15,14 @@
 
 typedef struct { uint32_t radius, cells, slot; } jbwKnobs;
 
-OAK_CONSTANT jbwKnobs JBW_KNOBS[2] = {
+static const jbwKnobs JBW_KNOBS[2] = {
     { 17u, 153u, 0u },
     { 8u, 36u, 1u }
 };
 
 
-OAK_CONSTANT int JBW_DIRECTIONS[8][2] = { {0, -1}, {1, -1}, {1, 0}, {1, 1}, {0, 1}, {-1, 1}, {-1, 0}, {-1, -1} };
-OAK_CONSTANT int JBW_FORWARD[4][2] = { {0, -1}, {1, 0}, {0, 1}, {-1, 0} };
+static const int JBW_DIRECTIONS[8][2] = { {0, -1}, {1, -1}, {1, 0}, {1, 1}, {0, 1}, {-1, 1}, {-1, 0}, {-1, -1} };
+static const int JBW_FORWARD[4][2] = { {0, -1}, {1, 0}, {0, 1}, {-1, 0} };
 
 static int jbw_floorDiv(int x, int d) {
     int q = x / d;
@@ -33,7 +33,7 @@ static u4 jbw_field(uint32_t seed, int x, int y, uint32_t stream) {
     return philox4x32(seed, ENV_RNG_STREAM, (uint32_t)x, (uint32_t)y, stream, 0u);
 }
 
-static void jbw_candidate(u4 block, int bx, int by, uint32_t slot, thread int *cx, thread int *cy) {
+static void jbw_candidate(u4 block, int bx, int by, uint32_t slot, int *cx, int *cy) {
     uint32_t bits = (block.x >> (8u * slot)) & 255u;
     *cx = bx * 16 + (int)(bits & 15u);
     *cy = by * 16 + (int)((bits >> 4u) & 15u);
@@ -82,22 +82,22 @@ static uint32_t jbw_slot(uint64_t key, uint32_t mask) {
     return (uint32_t)key & mask;
 }
 
-static uint32_t jbw_destroyedAt(device const uint32_t *history, uint32_t mask, int x, int y) {
+static uint32_t jbw_destroyedAt(const uint32_t *history, uint32_t mask, int x, int y) {
     uint64_t key = jbw_key(x, y);
     uint32_t slot = jbw_slot(key, mask);
     for (uint32_t probe = 0u; probe <= mask; probe++, slot = (slot + 1u) & mask) {
-        device const uint32_t *entry = history + 3u * slot;
+        const uint32_t *entry = history + 3u * slot;
         if (entry[2] == 0u) return 0u;
         if (entry[0] == (uint32_t)(key >> 32u) && entry[1] == (uint32_t)key) return entry[2];
     }
     return 0u;
 }
 
-static int jbw_destroy(device uint32_t *history, uint32_t mask, int x, int y, uint32_t step) {
+static int jbw_destroy(uint32_t *history, uint32_t mask, int x, int y, uint32_t step) {
     uint64_t key = jbw_key(x, y);
     uint32_t slot = jbw_slot(key, mask);
     for (uint32_t probe = 0u; probe <= mask; probe++, slot = (slot + 1u) & mask) {
-        device uint32_t *entry = history + 3u * slot;
+        uint32_t *entry = history + 3u * slot;
         if (entry[2] == 0u) {
             entry[0] = (uint32_t)(key >> 32u);
             entry[1] = (uint32_t)key;
@@ -124,7 +124,7 @@ static float jbw_energy(uint32_t item) {
     }
 }
 
-static void jbw_scent(uint32_t item, thread float *s) {
+static void jbw_scent(uint32_t item, float *s) {
     switch (item) {
         case JBW_BANANA: s[0] = 1.92f; s[1] = 1.76f; s[2] = 0.40f; return;
         case JBW_ONION: s[0] = 0.68f; s[1] = 0.01f; s[2] = 0.99f; return;
@@ -141,7 +141,7 @@ static uint32_t jbw_responseIndex(uint32_t cells, uint32_t time, int dx, int dy)
     return time * cells + x * (x + 1u) / 2u + y;
 }
 
-static void jbw_buildResponse(constant const jbwKnobs *k, device float *response) {
+static void jbw_buildResponse(const jbwKnobs *k, float *response) {
     uint32_t radius = k->radius, cells = k->cells;
     for (uint32_t i = 0u; i < cells * JBW_DESTRUCTION_LIFETIME; i++) response[i] = 0.0f;
     response[0] = 1.0f;
@@ -170,8 +170,8 @@ static void jbw_buildResponse(constant const jbwKnobs *k, device float *response
     }
 }
 
-static void jbw_scentAt(constant const jbwKnobs *knobs, uint32_t seed, int x, int y, uint32_t step, device const uint32_t *history, uint32_t historyMask, thread float *scent, constant const float *shared) {
-    constant const float *table = shared + knobs->slot * JBW_RESPONSE_WORDS;
+static void jbw_scentAt(const jbwKnobs *knobs, uint32_t seed, int x, int y, uint32_t step, const uint32_t *history, uint32_t historyMask, float *scent, const float *shared) {
+    const float *table = shared + knobs->slot * JBW_RESPONSE_WORDS;
     scent[0] = 0.0f; scent[1] = 0.0f; scent[2] = 0.0f;
     int reach = (int)knobs->radius - 1;
     int bx0 = jbw_floorDiv(x - reach, 16), bx1 = jbw_floorDiv(x + reach, 16);
@@ -215,11 +215,11 @@ static void jbw_scentAt(constant const jbwKnobs *knobs, uint32_t seed, int x, in
     }
 }
 
-static void jbw_observeWords(constant const jbwKnobs *k, uint32_t seed, device const uint32_t *words, device const uint32_t *history, uint32_t historyMask, uint32_t step, device float *obs, constant const float *shared) {
+static void jbw_observeWords(const jbwKnobs *k, uint32_t seed, const uint32_t *words, const uint32_t *history, uint32_t historyMask, uint32_t step, float *obs, const float *shared) {
     int x = (int)words[0], y = (int)words[1];
     uint32_t heading = words[2] & 3u;
     for (uint32_t i = 0u; i < 8u; i++) {
-        constant const int *d = JBW_DIRECTIONS[(2u * heading + i) & 7u];
+        const int *d = JBW_DIRECTIONS[(2u * heading + i) & 7u];
         uint32_t item = jbw_itemAt(seed, x + d[0], y + d[1]);
         int absent = !jbw_blocks(item) && jbw_destroyedAt(history, historyMask, x + d[0], y + d[1]) != 0u;
         obs[i] = absent ? 0.0f : jbw_energy(item);
@@ -237,15 +237,15 @@ static uint32_t jbw_slots(uint32_t steps) {
     return slots;
 }
 
-void jbw_reset(uint32_t instance, uint32_t seed, device uint32_t *words, device uint32_t *extra, uint32_t steps) {
+void jbw_reset(uint32_t instance, uint32_t seed, uint32_t *words, uint32_t *extra, uint32_t steps) {
     (void)instance; (void)seed; (void)words;
     extra[0] = jbw_slots(steps) - 1u;
 }
 
-float jbw_step(uint32_t instance, uint32_t seed, uint32_t step, thread const float *ctrl, device uint32_t *words, device uint32_t *extra, device float *obs, thread uint32_t *done, constant const float *shared) {
+float jbw_step(uint32_t instance, uint32_t seed, uint32_t step, const float *ctrl, uint32_t *words, uint32_t *extra, float *obs, uint32_t *done, const float *shared) {
     (void)shared;
     (void)instance;
-    device uint32_t *history = extra + 1;
+    uint32_t *history = extra + 1;
     uint32_t historyMask = extra[0];
     uint32_t action = (uint32_t)ctrl[0];
     *done = 0u;
@@ -279,13 +279,13 @@ float jbw_step(uint32_t instance, uint32_t seed, uint32_t step, thread const flo
     return reward;
 }
 
-void jbw_observe(uint32_t instance, uint32_t seed, device const uint32_t *words, device const uint32_t *extra, uint32_t step, device float *obs, constant const float *shared) {
+void jbw_observe(uint32_t instance, uint32_t seed, const uint32_t *words, const uint32_t *extra, uint32_t step, float *obs, const float *shared) {
     (void)shared;
     (void)instance;
     jbw_observeWords(&JBW_KNOBS[instance], seed, words, extra + 1, extra[0], step, obs, shared);
 }
 
-void jbw_pose(uint32_t instance, device const uint32_t *words, thread const float *ctrl, thread float *pose) {
+void jbw_pose(uint32_t instance, const uint32_t *words, const float *ctrl, float *pose) {
     (void)instance;
     (void)ctrl;
     poseZero(pose);
@@ -297,7 +297,7 @@ void jbw_pose(uint32_t instance, device const uint32_t *words, thread const floa
 
 uint32_t jbw_sharedWords(void) { return 2u * JBW_RESPONSE_WORDS; }
 
-void jbw_buildShared(device float *shared) {
+void jbw_buildShared(float *shared) {
     for (uint32_t i = 0u; i < 2u; i++) jbw_buildResponse(&JBW_KNOBS[i], shared + JBW_KNOBS[i].slot * JBW_RESPONSE_WORDS);
 }
 
@@ -308,11 +308,11 @@ uint32_t jbw_extraWords(uint32_t instance, uint32_t steps) {
 
 #define JBW_ORACLE_REACH 12
 
-void jbw_oracle(uint32_t instance, uint32_t seed, uint32_t step, device const uint32_t *words, device const uint32_t *extra, device const float *obs, thread float *ctrl, constant const float *shared) {
+void jbw_oracle(uint32_t instance, uint32_t seed, uint32_t step, const uint32_t *words, const uint32_t *extra, const float *obs, float *ctrl, const float *shared) {
     (void)shared;
     (void)instance;
     (void)obs;
-    device const uint32_t *history = extra + 1;
+    const uint32_t *history = extra + 1;
     uint32_t historyMask = extra[0];
     int x = (int)words[0], y = (int)words[1];
     uint32_t heading = words[2] & 3u;

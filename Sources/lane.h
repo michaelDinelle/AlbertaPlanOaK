@@ -15,7 +15,7 @@ typedef struct {
     float obs[OAK_ENV_OBS_MAX];
 } Lane;
 
-static inline void lane_init(device Lane *l, uint32_t lane, uint32_t steps, device uint32_t *state, device uint32_t *extra, constant const float *shared, uint32_t policy) {
+static inline void lane_init(Lane *l, uint32_t lane, uint32_t steps, uint32_t *state, uint32_t *extra, const float *shared, uint32_t policy) {
     l->hash = OAK_HASH_BASIS;
     l->step = 0u;
     l->done = 0u;
@@ -30,7 +30,7 @@ static inline void lane_init(device Lane *l, uint32_t lane, uint32_t steps, devi
     policy_init(policy, state, lane, l->env, l->seed, l->obs);
 }
 
-static inline void lane_step(device Lane *l, uint32_t lane, device uint32_t *state, device uint32_t *extra, constant const float *shared, uint32_t policy, thread float *ctrl) {
+static inline void lane_step(Lane *l, uint32_t lane, uint32_t *state, uint32_t *extra, const float *shared, uint32_t policy, float *ctrl) {
     for (uint32_t d = 0u; d < OAK_ENV_ACT_MAX; d++) ctrl[d] = 0.0f;
     policy_act(policy, state, lane, l->env, l->seed, l->step, l->obs, l->reward, l->done, l->words, extra, ctrl, shared);
     uint32_t done = 0u;
@@ -52,7 +52,7 @@ static inline void lane_step(device Lane *l, uint32_t lane, device uint32_t *sta
     l->step += 1u;
 }
 
-static inline void lane_window(device Lane *l, uint32_t lane, device uint32_t *state, device uint32_t *extra, constant const float *shared, uint32_t policy, uint32_t end) {
+static inline void lane_window(Lane *l, uint32_t lane, uint32_t *state, uint32_t *extra, const float *shared, uint32_t policy, uint32_t end) {
     float ctrl[OAK_ENV_ACT_MAX];
     while (l->step < end) lane_step(l, lane, state, extra, shared, policy, ctrl);
 }

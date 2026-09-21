@@ -2,20 +2,20 @@
 
 typedef struct { float slip; uint32_t positionOnly; } mountaincarKnobs;
 
-OAK_CONSTANT mountaincarKnobs MOUNTAINCAR_KNOBS[3] = {
+static const mountaincarKnobs MOUNTAINCAR_KNOBS[3] = {
     { 0.0f, 0u },
     { 0.2f, 0u },
     { 0.0f, 1u }
 };
 
 
-static void mountainCar_obs(constant const mountaincarKnobs *k, uint32_t seed, uint32_t step, float pos, float vel, device float *obs) {
+static void mountainCar_obs(const mountaincarKnobs *k, uint32_t seed, uint32_t step, float pos, float vel, float *obs) {
     if (k->positionOnly) { obs[0] = pos + 0.01f * normalFrom(philox4x32(seed, ENV_RNG_STREAM, step, 1u, 0u, 0u).x, philox4x32(seed, ENV_RNG_STREAM, step, 1u, 0u, 0u).y); obs[1] = 0.0f; }
     else { obs[0] = pos; obs[1] = vel; }
     obs[2] = 1.0f;
 }
 
-void mountainCar_reset(uint32_t instance, uint32_t seed, device uint32_t *words, device uint32_t *extra, uint32_t steps) {
+void mountainCar_reset(uint32_t instance, uint32_t seed, uint32_t *words, uint32_t *extra, uint32_t steps) {
     (void)steps;
     (void)extra;
     (void)instance;
@@ -23,10 +23,10 @@ void mountainCar_reset(uint32_t instance, uint32_t seed, device uint32_t *words,
     words[0] = floatWord(-0.5f);
 }
 
-float mountainCar_step(uint32_t instance, uint32_t seed, uint32_t step, thread const float *ctrl, device uint32_t *words, device uint32_t *extra, device float *obs, thread uint32_t *doneOut, constant const float *shared) {
+float mountainCar_step(uint32_t instance, uint32_t seed, uint32_t step, const float *ctrl, uint32_t *words, uint32_t *extra, float *obs, uint32_t *doneOut, const float *shared) {
     (void)shared;
     (void)extra;
-    constant const mountaincarKnobs *k = &MOUNTAINCAR_KNOBS[instance];
+    const mountaincarKnobs *k = &MOUNTAINCAR_KNOBS[instance];
     uint32_t action = (uint32_t)ctrl[0];
     if (k->slip > 0.0f) {
         u4 r = philox4x32(seed, ENV_RNG_STREAM, step, 0u, 0u, 0u);
@@ -52,19 +52,19 @@ float mountainCar_step(uint32_t instance, uint32_t seed, uint32_t step, thread c
     return reward;
 }
 
-void mountainCar_observe(uint32_t instance, uint32_t seed, device const uint32_t *words, device const uint32_t *extra, uint32_t step, device float *obs, constant const float *shared) {
+void mountainCar_observe(uint32_t instance, uint32_t seed, const uint32_t *words, const uint32_t *extra, uint32_t step, float *obs, const float *shared) {
     (void)shared;
     (void)extra;
     mountainCar_obs(&MOUNTAINCAR_KNOBS[instance], seed, step, wordFloat(words[0]), wordFloat(words[1]), obs);
 }
 
-void mountainCar_pose(uint32_t instance, device const uint32_t *words, thread const float *ctrl, thread float *pose) {
+void mountainCar_pose(uint32_t instance, const uint32_t *words, const float *ctrl, float *pose) {
     (void)instance;
     poseZero(pose);
     pose[0] = wordFloat(words[0]); pose[1] = wordFloat(words[1]); pose[2] = 0.5f; pose[3] = ctrl[0];
 }
 
-void mountainCar_oracle(uint32_t instance, uint32_t seed, uint32_t step, device const uint32_t *words, device const uint32_t *extra, device const float *obs, thread float *ctrl, constant const float *shared) {
+void mountainCar_oracle(uint32_t instance, uint32_t seed, uint32_t step, const uint32_t *words, const uint32_t *extra, const float *obs, float *ctrl, const float *shared) {
     (void)shared;
     (void)instance;
     (void)seed; (void)step; (void)extra; (void)obs;

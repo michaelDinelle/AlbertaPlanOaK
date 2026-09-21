@@ -27,7 +27,7 @@ def generate():
         knobs = re.search(r'typedef struct \{([^}]+)\}\s*(\w+Knobs);', source)
         lines.append(emit(',"parameters":{'))
         if knobs:
-            table = re.search(rf'OAK_CONSTANT {knobs[2]} (\w+)\[\d+\] = \{{.*?\n\}};', source, re.S)
+            table = re.search(rf'static const {knobs[2]} (\w+)\[\d+\] = \{{.*?\n\}};', source, re.S)
             assert table, path
             lines += [knobs[0], table[0], f'const {knobs[2]} *k = &{table[1]}[env->instance];']
             fields = []
@@ -51,7 +51,7 @@ def generate():
             lines += [emit(',\"polarityPeriod\":'), f'fprintf(out, \"%u\", {period});']
         lines.append(emit('}'))
         if family == 'hall':
-            walls = re.search(r'OAK_CONSTANT GridWalls HALL_WALLS = .*?;', source)[0]
+            walls = re.search(r'static const GridWalls HALL_WALLS = .*?;', source)[0]
             lines += [walls, emit(',"grid":'), 'catalogWalls(out, &HALL_WALLS);']
         if family == 'jbw':
             scent = re.search(r'static void jbw_scent\(.*?\n\}', source, re.S)[0]

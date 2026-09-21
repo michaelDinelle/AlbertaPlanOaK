@@ -3,8 +3,8 @@
 #define TAXI_SIDE 5
 #define TAXI_DEPOTS 4u
 
-OAK_CONSTANT int TAXI_DEPOT_X[TAXI_DEPOTS] = { 0, 4, 0, 3 };
-OAK_CONSTANT int TAXI_DEPOT_Y[TAXI_DEPOTS] = { 0, 0, 4, 4 };
+static const int TAXI_DEPOT_X[TAXI_DEPOTS] = { 0, 4, 0, 3 };
+static const int TAXI_DEPOT_Y[TAXI_DEPOTS] = { 0, 0, 4, 4 };
 
 static int taxi_blocked(int x, int y, int nx, int ny) {
     if (nx < 0 || ny < 0 || nx >= TAXI_SIDE || ny >= TAXI_SIDE) return 1;
@@ -15,27 +15,27 @@ static int taxi_blocked(int x, int y, int nx, int ny) {
     return 0;
 }
 
-static void taxi_obs(const device uint32_t *words, device float *obs) {
+static void taxi_obs(const uint32_t *words, float *obs) {
     for (uint32_t b = 0u; b < 3u; b++) { obs[b] = (float)((words[0] >> b) & 1u); obs[3u + b] = (float)((words[1] >> b) & 1u); }
     for (uint32_t d = 0u; d <= TAXI_DEPOTS; d++) obs[6u + d] = words[2] == d ? 1.0f : 0.0f;
     for (uint32_t d = 0u; d < TAXI_DEPOTS; d++) obs[11u + d] = words[3] == d ? 1.0f : 0.0f;
     obs[15] = 1.0f;
 }
 
-static void taxi_task(uint32_t seed, uint32_t index, device uint32_t *words) {
+static void taxi_task(uint32_t seed, uint32_t index, uint32_t *words) {
     u4 r = philox4x32(seed, ENV_RNG_STREAM, index, 5u, 0u, 0u);
     words[2] = r.x % TAXI_DEPOTS;
     words[3] = (words[2] + 1u + r.y % (TAXI_DEPOTS - 1u)) % TAXI_DEPOTS;
 }
 
-void taxi_reset(uint32_t instance, uint32_t seed, device uint32_t *words, device uint32_t *extra, uint32_t steps) {
+void taxi_reset(uint32_t instance, uint32_t seed, uint32_t *words, uint32_t *extra, uint32_t steps) {
     (void)steps;
     (void)instance; (void)extra;
     words[0] = 2u; words[1] = 2u;
     taxi_task(seed, 0u, words);
 }
 
-float taxi_step(uint32_t instance, uint32_t seed, uint32_t step, thread const float *ctrl, device uint32_t *words, device uint32_t *extra, device float *obs, thread uint32_t *done, constant const float *shared) {
+float taxi_step(uint32_t instance, uint32_t seed, uint32_t step, const float *ctrl, uint32_t *words, uint32_t *extra, float *obs, uint32_t *done, const float *shared) {
     (void)shared;
     (void)instance; (void)extra;
     uint32_t action = (uint32_t)ctrl[0] % 6u;
@@ -58,13 +58,13 @@ float taxi_step(uint32_t instance, uint32_t seed, uint32_t step, thread const fl
     return reward;
 }
 
-void taxi_observe(uint32_t instance, uint32_t seed, device const uint32_t *words, device const uint32_t *extra, uint32_t step, device float *obs, constant const float *shared) {
+void taxi_observe(uint32_t instance, uint32_t seed, const uint32_t *words, const uint32_t *extra, uint32_t step, float *obs, const float *shared) {
     (void)shared;
     (void)instance; (void)seed; (void)extra; (void)step;
     taxi_obs(words, obs);
 }
 
-void taxi_oracle(uint32_t instance, uint32_t seed, uint32_t step, device const uint32_t *words, device const uint32_t *extra, device const float *obs, thread float *ctrl, constant const float *shared) {
+void taxi_oracle(uint32_t instance, uint32_t seed, uint32_t step, const uint32_t *words, const uint32_t *extra, const float *obs, float *ctrl, const float *shared) {
     (void)shared;
     (void)instance; (void)seed; (void)step; (void)extra; (void)obs;
     int x = (int)words[0], y = (int)words[1];

@@ -2,17 +2,17 @@
 
 typedef struct { uint32_t goalPeriod; } hallKnobs;
 
-OAK_CONSTANT hallKnobs HALL_KNOBS[2] = {
+static const hallKnobs HALL_KNOBS[2] = {
     { 0u },
     { 10000u }
 };
 
 
-OAK_CONSTANT GridWalls HALL_WALLS = { 11, 11, 1, 6, { 5, 5, 5, 1, 3, 9 }, { 1, 3, 9, 5, 5, 5 }, { 5, 5, 5, 1, 7, 9 }, { 1, 7, 9, 5, 5, 5 } };
+static const GridWalls HALL_WALLS = { 11, 11, 1, 6, { 5, 5, 5, 1, 3, 9 }, { 1, 3, 9, 5, 5, 5 }, { 5, 5, 5, 1, 7, 9 }, { 1, 7, 9, 5, 5, 5 } };
 
 static int hall_isWall(int x, int y) { return gridWall(&HALL_WALLS, x, y); }
 
-static void hall_obs(uint32_t x, uint32_t y, device float *obs) {
+static void hall_obs(uint32_t x, uint32_t y, float *obs) {
     for (uint32_t b = 0u; b < 4u; b++) { obs[b] = (float)((x >> b) & 1u); obs[4u + b] = (float)((y >> b) & 1u); }
     obs[8] = hall_isWall((int)x, (int)y - 1) ? 1.0f : 0.0f;
     obs[9] = hall_isWall((int)x, (int)y + 1) ? 1.0f : 0.0f;
@@ -22,13 +22,13 @@ static void hall_obs(uint32_t x, uint32_t y, device float *obs) {
     obs[13] = 1.0f;
 }
 
-static void hall_goal(uint32_t seed, uint32_t epoch, device uint32_t *gx, device uint32_t *gy) {
+static void hall_goal(uint32_t seed, uint32_t epoch, uint32_t *gx, uint32_t *gy) {
     int x, y;
     sampleFreeCell(seed, 0xf0000u + epoch, 0u, &HALL_WALLS, -1, -1, &x, &y);
     *gx = (uint32_t)x; *gy = (uint32_t)y;
 }
 
-void hall_reset(uint32_t instance, uint32_t seed, device uint32_t *words, device uint32_t *extra, uint32_t steps) {
+void hall_reset(uint32_t instance, uint32_t seed, uint32_t *words, uint32_t *extra, uint32_t steps) {
     (void)steps;
     (void)instance; (void)extra;
     words[0] = 1u; words[1] = 1u;
@@ -36,10 +36,10 @@ void hall_reset(uint32_t instance, uint32_t seed, device uint32_t *words, device
     words[4] = 0u;
 }
 
-float hall_step(uint32_t instance, uint32_t seed, uint32_t step, thread const float *ctrl, device uint32_t *words, device uint32_t *extra, device float *obs, thread uint32_t *done, constant const float *shared) {
+float hall_step(uint32_t instance, uint32_t seed, uint32_t step, const float *ctrl, uint32_t *words, uint32_t *extra, float *obs, uint32_t *done, const float *shared) {
     (void)shared;
     (void)extra;
-    constant const hallKnobs *k = &HALL_KNOBS[instance];
+    const hallKnobs *k = &HALL_KNOBS[instance];
     uint32_t action = (uint32_t)ctrl[0] & 3u;
     u4 r = philox4x32(seed, ENV_RNG_STREAM, step, 0u, 0u, 0u);
     if (u01(r.x) < 0.1f) action = r.y & 3u;
@@ -60,19 +60,19 @@ float hall_step(uint32_t instance, uint32_t seed, uint32_t step, thread const fl
     return reward;
 }
 
-void hall_observe(uint32_t instance, uint32_t seed, device const uint32_t *words, device const uint32_t *extra, uint32_t step, device float *obs, constant const float *shared) {
+void hall_observe(uint32_t instance, uint32_t seed, const uint32_t *words, const uint32_t *extra, uint32_t step, float *obs, const float *shared) {
     (void)shared;
     (void)instance; (void)seed; (void)extra; (void)step;
     hall_obs(words[0], words[1], obs);
 }
 
-void hall_pose(uint32_t instance, device const uint32_t *words, thread const float *ctrl, thread float *pose) {
+void hall_pose(uint32_t instance, const uint32_t *words, const float *ctrl, float *pose) {
     (void)instance; (void)ctrl;
     poseZero(pose);
     for (int i = 0; i < 4; i++) pose[i] = (float)words[i];
 }
 
-void hall_oracle(uint32_t instance, uint32_t seed, uint32_t step, device const uint32_t *words, device const uint32_t *extra, device const float *obs, thread float *ctrl, constant const float *shared) {
+void hall_oracle(uint32_t instance, uint32_t seed, uint32_t step, const uint32_t *words, const uint32_t *extra, const float *obs, float *ctrl, const float *shared) {
     (void)shared;
     (void)instance; (void)seed; (void)step; (void)extra; (void)obs;
     int d = gridFirstStep(&HALL_WALLS, (int)words[0], (int)words[1], (int)words[2], (int)words[3]);

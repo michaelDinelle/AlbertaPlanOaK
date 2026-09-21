@@ -9,25 +9,25 @@
 
 typedef struct { float slip; } cartpoleKnobs;
 
-OAK_CONSTANT cartpoleKnobs CARTPOLE_KNOBS[2] = {
+static const cartpoleKnobs CARTPOLE_KNOBS[2] = {
     { 0.0f },
     { 0.2f }
 };
 
 
-static void cartpole_obs(float x, float xDot, float theta, float thetaDot, device float *obs) {
+static void cartpole_obs(float x, float xDot, float theta, float thetaDot, float *obs) {
     float s, c;
     oak_sincos(theta, &s, &c);
     obs[0] = x / 2.4f; obs[1] = xDot / 5.0f; obs[2] = c; obs[3] = s; obs[4] = thetaDot / 10.0f; obs[5] = 1.0f;
 }
 
-void cartpole_reset(uint32_t instance, uint32_t seed, device uint32_t *words, device uint32_t *extra, uint32_t steps) {
+void cartpole_reset(uint32_t instance, uint32_t seed, uint32_t *words, uint32_t *extra, uint32_t steps) {
     (void)steps;
     (void)instance; (void)seed; (void)extra;
     words[0] = floatWord(0.0f); words[1] = floatWord(0.0f); words[2] = floatWord(OAK_PI); words[3] = floatWord(0.0f);
 }
 
-static void cartpole_integrate(uint32_t action, thread float *x, thread float *xDot, thread float *theta, thread float *thetaDot) {
+static void cartpole_integrate(uint32_t action, float *x, float *xDot, float *theta, float *thetaDot) {
     float force = ((float)action - 1.0f) * CARTPOLE_FORCE;
     float s, c;
     oak_sincos(*theta, &s, &c);
@@ -41,10 +41,10 @@ static void cartpole_integrate(uint32_t action, thread float *x, thread float *x
     *thetaDot += CARTPOLE_DT * thetaAcc;
 }
 
-float cartpole_step(uint32_t instance, uint32_t seed, uint32_t step, thread const float *ctrl, device uint32_t *words, device uint32_t *extra, device float *obs, thread uint32_t *done, constant const float *shared) {
+float cartpole_step(uint32_t instance, uint32_t seed, uint32_t step, const float *ctrl, uint32_t *words, uint32_t *extra, float *obs, uint32_t *done, const float *shared) {
     (void)shared;
     (void)extra;
-    constant const cartpoleKnobs *k = &CARTPOLE_KNOBS[instance];
+    const cartpoleKnobs *k = &CARTPOLE_KNOBS[instance];
     uint32_t action = (uint32_t)ctrl[0] % 3u;
     if (k->slip > 0.0f) {
         u4 r = philox4x32(seed, ENV_RNG_STREAM, step, 0u, 0u, 0u);
@@ -60,13 +60,13 @@ float cartpole_step(uint32_t instance, uint32_t seed, uint32_t step, thread cons
     return reward;
 }
 
-void cartpole_observe(uint32_t instance, uint32_t seed, device const uint32_t *words, device const uint32_t *extra, uint32_t step, device float *obs, constant const float *shared) {
+void cartpole_observe(uint32_t instance, uint32_t seed, const uint32_t *words, const uint32_t *extra, uint32_t step, float *obs, const float *shared) {
     (void)shared;
     (void)instance; (void)seed; (void)extra; (void)step;
     cartpole_obs(wordFloat(words[0]), wordFloat(words[1]), wordFloat(words[2]), wordFloat(words[3]), obs);
 }
 
-void cartpole_oracle(uint32_t instance, uint32_t seed, uint32_t step, device const uint32_t *words, device const uint32_t *extra, device const float *obs, thread float *ctrl, constant const float *shared) {
+void cartpole_oracle(uint32_t instance, uint32_t seed, uint32_t step, const uint32_t *words, const uint32_t *extra, const float *obs, float *ctrl, const float *shared) {
     (void)shared;
     (void)instance; (void)seed; (void)step; (void)extra; (void)obs;
     uint32_t best = 1u;

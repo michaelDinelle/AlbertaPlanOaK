@@ -14,18 +14,18 @@ static uint32_t cellular_next(uint32_t cells) {
     return next;
 }
 
-static void cellular_obs(uint32_t cells, device float *obs) {
+static void cellular_obs(uint32_t cells, float *obs) {
     for (uint32_t i = 0u; i < CELLULAR_CELLS; i++) obs[i] = (float)((cells >> i) & 1u);
     obs[CELLULAR_CELLS] = 1.0f;
 }
 
-void cellular_reset(uint32_t instance, uint32_t seed, device uint32_t *words, device uint32_t *extra, uint32_t steps) {
+void cellular_reset(uint32_t instance, uint32_t seed, uint32_t *words, uint32_t *extra, uint32_t steps) {
     (void)steps;
     (void)instance; (void)extra;
     words[0] = philox4x32(seed, RNG_STREAM_RESET, 0u, 0u, 0u, 0u).x & ((1u << CELLULAR_CELLS) - 1u);
 }
 
-float cellular_step(uint32_t instance, uint32_t seed, uint32_t step, thread const float *ctrl, device uint32_t *words, device uint32_t *extra, device float *obs, thread uint32_t *done, constant const float *shared) {
+float cellular_step(uint32_t instance, uint32_t seed, uint32_t step, const float *ctrl, uint32_t *words, uint32_t *extra, float *obs, uint32_t *done, const float *shared) {
     (void)shared;
     (void)instance; (void)extra;
     *done = 0u;
@@ -37,13 +37,13 @@ float cellular_step(uint32_t instance, uint32_t seed, uint32_t step, thread cons
     return (float)((cells >> 1u) & 1u);
 }
 
-void cellular_observe(uint32_t instance, uint32_t seed, device const uint32_t *words, device const uint32_t *extra, uint32_t step, device float *obs, constant const float *shared) {
+void cellular_observe(uint32_t instance, uint32_t seed, const uint32_t *words, const uint32_t *extra, uint32_t step, float *obs, const float *shared) {
     (void)shared;
     (void)instance; (void)seed; (void)extra; (void)step;
     cellular_obs(words[0], obs);
 }
 
-void cellular_oracle(uint32_t instance, uint32_t seed, uint32_t step, device const uint32_t *words, device const uint32_t *extra, device const float *obs, thread float *ctrl, constant const float *shared) {
+void cellular_oracle(uint32_t instance, uint32_t seed, uint32_t step, const uint32_t *words, const uint32_t *extra, const float *obs, float *ctrl, const float *shared) {
     (void)shared;
     (void)instance; (void)seed; (void)step; (void)extra; (void)obs;
     uint32_t keep = (cellular_next(words[0]) >> 1u) & 1u, flip = (cellular_next(words[0] ^ 1u) >> 1u) & 1u;

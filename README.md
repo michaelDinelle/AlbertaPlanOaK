@@ -12,7 +12,7 @@ Recorded on a binned M4 Max.
 
 ## Base
 
-Geometry starts at 32 percepts, 480 features (96 active per step); 3,360 parameters (6 action dimensions). 3,754,245 SPS on the 123-environment schedule.
+Geometry starts at 32 percepts, 480 features (96 active per step); 3,360 parameters (6 action dimensions). 4,617,722 SPS on the 123-environment schedule.
 
 Reward per step over the final 100,928 steps of the 1,000,000-step best recording (`019b414811583459f6931b87ecf61724d6e31d68`), all 123 environments with their declared seed counts (4,915 lanes), with the reused Oracle, Random and PPO baselines on the same seeds. Mean over seeds; Score = (OaK − Random) / (Oracle − Random), unclipped.
 
@@ -142,7 +142,7 @@ Reward per step over the final 100,928 steps of the 1,000,000-step best recordin
 | WalkBet-cont-v0 | 0.8733 | 1.0000 | 0.5004 | 0.9944 | 0.7464 |
 | WalkBet-drift-cont-v0 | 0.7135 | 1.0000 | 0.4998 | 0.9028 | 0.4272 |
 
-Rewards match the reference recording (`63eb24064dfcfa55c491f86533d05d332bd765e0`) bit for bit on all 4,915 lanes; throughput increased 6.72%. No unhealthy lanes. Baseline throughput on the same schedule: PPO 4,965,166 steps/s, Random 143,753,832 steps/s, Oracle 24,578,802 steps/s. All baseline recordings were reused unchanged.
+Rewards match the reference recording (`019b414811583459f6931b87ecf61724d6e31d68`) bit for bit on all 4,915 lanes across three promotions; throughput increased 28.7%, the product of three interleaved paired probes (1.2226, 1.0302, 1.0215). The last two probes timed each candidate against the source snapshot carried by the recording it replaced; the reference recording carries no snapshot, so the first probe's reference binary cannot be rebuilt from this repository. No unhealthy lanes. Baseline throughput on the same schedule: PPO 4,502,847 steps/s, Random 160,387,227 steps/s, Oracle 21,109,017 steps/s. All baseline recordings were reused unchanged.
 
 ![Policy comparison](oak-performance-radar.svg)
 
@@ -150,9 +150,9 @@ Regenerate with `python3 radar.py`.
 
 ## Setup and run
 
-Requires macOS with the Xcode command line tools (clang) and Bun. Benchmark recordings stay local and are ignored by Git. From the repo root: `./setup.sh --preset base` builds `.build/oak`, `./fleet.py` records a candidate and judges it against the best, `./fleet.py adopt` explicitly adopts a recording using the existing reference and baseline links, and `cd frontend && bun install && bun run dev` serves the recordings and prints the URL to open. The theater replays any lane on demand through `.build/oak replay` and shows whether the replay reproduces the recorded reward stream bit for bit.
+The engine is plain C. `./setup.sh --preset base` builds `.build/oak` with clang for Apple silicon, `./fleet.py` needs Python 3, and the theater needs Bun. Benchmark recordings stay local and are ignored by Git. `./fleet.py` records a candidate and judges it against the best, `./fleet.py adopt` makes the candidate the best without judging it, for intended schedule changes, and `cd frontend && bun install && bun run dev` serves the recordings and prints the URL to open. The theater replays any lane on demand through `.build/oak replay` and shows whether the replay reproduces the recorded reward stream bit for bit.
 
-The judge promotes when the candidate is better on reward or throughput and worse on neither. Reward is compared on paired seeds: identical reward streams count as not worse with no uncertainty; otherwise the suite statistic is the interquartile mean over every environment and seed of the difference scaled by the best's per-environment interquartile range, with a stratified bootstrap CI, and a Holm-adjusted one-sided Wilcoxon test per environment guards against a single large regression. Throughput must clear the best by one percent to count as better and stay within one percent to count as not worse. Random, PPO and Oracle baselines are the saved recordings linked from the recorded best. The judge validates their policies, environment dimensions, seeds and horizon, then reuses them. Missing or mismatched baselines stop the run; the judge does not regenerate them.
+The judge promotes when the candidate is better on reward or throughput and worse on neither. Reward is compared on paired seeds: identical reward streams count as not worse with no uncertainty; otherwise the suite statistic is the interquartile mean over every environment and seed of the difference scaled by the best's per-environment interquartile range, with a stratified bootstrap CI, and a Holm-adjusted one-sided Wilcoxon test per environment guards against a single large regression. Throughput is an interleaved paired probe against the best rebuilt from the source snapshot in its recording, one percent above to count as better and within one percent to count as not worse; a byte-identical binary skips the probe. Random, PPO and Oracle baselines are filed under the environment digests, the baseline policy's source and the horizon, recorded once when missing and reused otherwise.
 
 Geometry is agent capacity, declared in `Sources/geometry.h`; larger presets use more compute and memory. Wide streams increase percept and feature counts above these declared sizes. Total parameters = features × (1 + action dimensions); counts below use 6 action dimensions.
 

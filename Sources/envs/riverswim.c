@@ -2,23 +2,23 @@
 
 typedef struct { uint32_t states, bits; } riverswimKnobs;
 
-OAK_CONSTANT riverswimKnobs RIVERSWIM_KNOBS[2] = {
+static const riverswimKnobs RIVERSWIM_KNOBS[2] = {
     { 6u, 3u },
     { 24u, 5u }
 };
 
 
-static void riverswim_obs(constant const riverswimKnobs *k, uint32_t position, device float *obs) {
+static void riverswim_obs(const riverswimKnobs *k, uint32_t position, float *obs) {
     for (uint32_t b = 0u; b < k->bits; b++) obs[b] = (float)((position >> b) & 1u);
     obs[k->bits] = 1.0f;
 }
 
-void riverswim_reset(uint32_t instance, uint32_t seed, device uint32_t *words, device uint32_t *extra, uint32_t steps) { (void)steps; (void)instance; (void)seed; (void)words; (void)extra; }
+void riverswim_reset(uint32_t instance, uint32_t seed, uint32_t *words, uint32_t *extra, uint32_t steps) { (void)steps; (void)instance; (void)seed; (void)words; (void)extra; }
 
-float riverswim_step(uint32_t instance, uint32_t seed, uint32_t step, thread const float *ctrl, device uint32_t *words, device uint32_t *extra, device float *obs, thread uint32_t *done, constant const float *shared) {
+float riverswim_step(uint32_t instance, uint32_t seed, uint32_t step, const float *ctrl, uint32_t *words, uint32_t *extra, float *obs, uint32_t *done, const float *shared) {
     (void)shared;
     (void)extra;
-    constant const riverswimKnobs *k = &RIVERSWIM_KNOBS[instance];
+    const riverswimKnobs *k = &RIVERSWIM_KNOBS[instance];
     *done = 0u;
     uint32_t position = words[0], last = k->states - 1u;
     float reward = 0.0f;
@@ -37,13 +37,13 @@ float riverswim_step(uint32_t instance, uint32_t seed, uint32_t step, thread con
     return reward;
 }
 
-void riverswim_observe(uint32_t instance, uint32_t seed, device const uint32_t *words, device const uint32_t *extra, uint32_t step, device float *obs, constant const float *shared) {
+void riverswim_observe(uint32_t instance, uint32_t seed, const uint32_t *words, const uint32_t *extra, uint32_t step, float *obs, const float *shared) {
     (void)shared;
     (void)seed; (void)extra; (void)step;
     riverswim_obs(&RIVERSWIM_KNOBS[instance], words[0], obs);
 }
 
-void riverswim_oracle(uint32_t instance, uint32_t seed, uint32_t step, device const uint32_t *words, device const uint32_t *extra, device const float *obs, thread float *ctrl, constant const float *shared) {
+void riverswim_oracle(uint32_t instance, uint32_t seed, uint32_t step, const uint32_t *words, const uint32_t *extra, const float *obs, float *ctrl, const float *shared) {
     (void)shared;
     (void)instance; (void)seed; (void)step; (void)words; (void)extra; (void)obs;
     ctrl[0] = 1.0f;

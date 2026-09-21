@@ -6,38 +6,38 @@
 
 typedef struct { uint32_t drift; } accessKnobs;
 
-OAK_CONSTANT accessKnobs ACCESS_KNOBS[2] = {
+static const accessKnobs ACCESS_KNOBS[2] = {
     { 0u },
     { 1u }
 };
 
-OAK_CONSTANT float ACCESS_REWARD[ACCESS_PRIORITIES] = { 1.0f, 2.0f, 4.0f, 8.0f };
-OAK_CONSTANT uint32_t ACCESS_THRESHOLD[ACCESS_PRIORITIES] = { 6u, 4u, 2u, 0u };
+static const float ACCESS_REWARD[ACCESS_PRIORITIES] = { 1.0f, 2.0f, 4.0f, 8.0f };
+static const uint32_t ACCESS_THRESHOLD[ACCESS_PRIORITIES] = { 6u, 4u, 2u, 0u };
 
-static float access_freeRate(constant const accessKnobs *k, uint32_t step) {
+static float access_freeRate(const accessKnobs *k, uint32_t step) {
     if (!k->drift) return 0.06f;
     float s, c;
     oak_sincos(2.0f * OAK_PI * (float)(step % ACCESS_DRIFT_PERIOD) / (float)ACCESS_DRIFT_PERIOD, &s, &c);
     return 0.04f + 0.02f * s;
 }
 
-static void access_obs(uint32_t free, uint32_t priority, device float *obs) {
+static void access_obs(uint32_t free, uint32_t priority, float *obs) {
     obs[0] = (float)free / (float)ACCESS_SERVERS;
     for (uint32_t p = 0u; p < ACCESS_PRIORITIES; p++) obs[1u + p] = p == priority ? 1.0f : 0.0f;
     obs[1u + ACCESS_PRIORITIES] = 1.0f;
 }
 
-void access_reset(uint32_t instance, uint32_t seed, device uint32_t *words, device uint32_t *extra, uint32_t steps) {
+void access_reset(uint32_t instance, uint32_t seed, uint32_t *words, uint32_t *extra, uint32_t steps) {
     (void)steps;
     (void)instance; (void)extra;
     words[0] = ACCESS_SERVERS;
     words[1] = philox4x32(seed, RNG_STREAM_RESET, 0u, 0u, 0u, 0u).x % ACCESS_PRIORITIES;
 }
 
-float access_step(uint32_t instance, uint32_t seed, uint32_t step, thread const float *ctrl, device uint32_t *words, device uint32_t *extra, device float *obs, thread uint32_t *done, constant const float *shared) {
+float access_step(uint32_t instance, uint32_t seed, uint32_t step, const float *ctrl, uint32_t *words, uint32_t *extra, float *obs, uint32_t *done, const float *shared) {
     (void)shared;
     (void)extra;
-    constant const accessKnobs *k = &ACCESS_KNOBS[instance];
+    const accessKnobs *k = &ACCESS_KNOBS[instance];
     uint32_t free = words[0], priority = words[1];
     *done = 0u;
     float reward = 0.0f;
@@ -56,13 +56,13 @@ float access_step(uint32_t instance, uint32_t seed, uint32_t step, thread const 
     return reward;
 }
 
-void access_observe(uint32_t instance, uint32_t seed, device const uint32_t *words, device const uint32_t *extra, uint32_t step, device float *obs, constant const float *shared) {
+void access_observe(uint32_t instance, uint32_t seed, const uint32_t *words, const uint32_t *extra, uint32_t step, float *obs, const float *shared) {
     (void)shared;
     (void)instance; (void)seed; (void)extra; (void)step;
     access_obs(words[0], words[1], obs);
 }
 
-void access_oracle(uint32_t instance, uint32_t seed, uint32_t step, device const uint32_t *words, device const uint32_t *extra, device const float *obs, thread float *ctrl, constant const float *shared) {
+void access_oracle(uint32_t instance, uint32_t seed, uint32_t step, const uint32_t *words, const uint32_t *extra, const float *obs, float *ctrl, const float *shared) {
     (void)shared;
     (void)instance; (void)seed; (void)step; (void)extra; (void)obs;
     ctrl[0] = words[0] > ACCESS_THRESHOLD[words[1]] ? 1.0f : 0.0f;

@@ -12,16 +12,16 @@ static float puddle_depth(float x, float y) {
 
 static float puddle_reward(float x, float y) { return -1.0f - 400.0f * puddle_depth(x, y); }
 
-static void puddle_obs(const device uint32_t *words, device float *obs) { obs[0] = wordFloat(words[0]); obs[1] = wordFloat(words[1]); obs[2] = 1.0f; }
+static void puddle_obs(const uint32_t *words, float *obs) { obs[0] = wordFloat(words[0]); obs[1] = wordFloat(words[1]); obs[2] = 1.0f; }
 
-static void puddle_start(uint32_t seed, uint32_t index, device uint32_t *words) {
+static void puddle_start(uint32_t seed, uint32_t index, uint32_t *words) {
     u4 r = philox4x32(seed, ENV_RNG_STREAM, index, 9u, 0u, 0u);
     words[0] = floatWord(u01(r.x)); words[1] = floatWord(u01(r.y));
 }
 
-void puddle_reset(uint32_t instance, uint32_t seed, device uint32_t *words, device uint32_t *extra, uint32_t steps) { (void)steps; (void)instance; (void)extra; puddle_start(seed, 0u, words); }
+void puddle_reset(uint32_t instance, uint32_t seed, uint32_t *words, uint32_t *extra, uint32_t steps) { (void)steps; (void)instance; (void)extra; puddle_start(seed, 0u, words); }
 
-static void puddle_move(uint32_t seed, uint32_t step, uint32_t action, thread float *x, thread float *y) {
+static void puddle_move(uint32_t seed, uint32_t step, uint32_t action, float *x, float *y) {
     int dx, dy;
     gridDelta(action & 3u, &dx, &dy);
     u4 r = philox4x32(seed, ENV_RNG_STREAM, step, 0u, 0u, 0u);
@@ -29,7 +29,7 @@ static void puddle_move(uint32_t seed, uint32_t step, uint32_t action, thread fl
     *y = oak_clamp(*y - 0.05f * (float)dy + 0.01f * normalFrom(r.z, r.w), 0.0f, 1.0f);
 }
 
-float puddle_step(uint32_t instance, uint32_t seed, uint32_t step, thread const float *ctrl, device uint32_t *words, device uint32_t *extra, device float *obs, thread uint32_t *done, constant const float *shared) {
+float puddle_step(uint32_t instance, uint32_t seed, uint32_t step, const float *ctrl, uint32_t *words, uint32_t *extra, float *obs, uint32_t *done, const float *shared) {
     (void)shared;
     (void)instance; (void)extra;
     float x = wordFloat(words[0]), y = wordFloat(words[1]);
@@ -42,13 +42,13 @@ float puddle_step(uint32_t instance, uint32_t seed, uint32_t step, thread const 
     return reward;
 }
 
-void puddle_observe(uint32_t instance, uint32_t seed, device const uint32_t *words, device const uint32_t *extra, uint32_t step, device float *obs, constant const float *shared) {
+void puddle_observe(uint32_t instance, uint32_t seed, const uint32_t *words, const uint32_t *extra, uint32_t step, float *obs, const float *shared) {
     (void)shared;
     (void)instance; (void)seed; (void)extra; (void)step;
     puddle_obs(words, obs);
 }
 
-void puddle_oracle(uint32_t instance, uint32_t seed, uint32_t step, device const uint32_t *words, device const uint32_t *extra, device const float *obs, thread float *ctrl, constant const float *shared) {
+void puddle_oracle(uint32_t instance, uint32_t seed, uint32_t step, const uint32_t *words, const uint32_t *extra, const float *obs, float *ctrl, const float *shared) {
     (void)shared;
     (void)instance; (void)seed; (void)step; (void)extra; (void)obs;
     float x = wordFloat(words[0]), y = wordFloat(words[1]);

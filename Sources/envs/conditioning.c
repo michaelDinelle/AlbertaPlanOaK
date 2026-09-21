@@ -2,16 +2,16 @@
 
 typedef struct { uint32_t interval, pattern; } conditioningKnobs;
 
-OAK_CONSTANT conditioningKnobs CONDITIONING_KNOBS[3] = {
+static const conditioningKnobs CONDITIONING_KNOBS[3] = {
     { 10u, 0u },
     { 100u, 0u },
     { 10u, 1u }
 };
 
 
-static uint32_t conditioning_predicts(constant const conditioningKnobs *k, uint32_t cues) { return k->pattern ? (cues & 3u) == 3u && (cues & 4u) == 0u : cues != 0u; }
+static uint32_t conditioning_predicts(const conditioningKnobs *k, uint32_t cues) { return k->pattern ? (cues & 3u) == 3u && (cues & 4u) == 0u : cues != 0u; }
 
-static void conditioning_obs(constant const conditioningKnobs *k, uint32_t cues, uint32_t countdown, device float *obs) {
+static void conditioning_obs(const conditioningKnobs *k, uint32_t cues, uint32_t countdown, float *obs) {
     obs[0] = (float)(cues & 1u);
     obs[1] = k->pattern ? (float)((cues >> 1u) & 1u) : 0.0f;
     obs[2] = k->pattern ? (float)((cues >> 2u) & 1u) : 0.0f;
@@ -19,12 +19,12 @@ static void conditioning_obs(constant const conditioningKnobs *k, uint32_t cues,
     obs[4] = 1.0f;
 }
 
-void conditioning_reset(uint32_t instance, uint32_t seed, device uint32_t *words, device uint32_t *extra, uint32_t steps) { (void)steps; (void)instance; (void)seed; (void)words; (void)extra; }
+void conditioning_reset(uint32_t instance, uint32_t seed, uint32_t *words, uint32_t *extra, uint32_t steps) { (void)steps; (void)instance; (void)seed; (void)words; (void)extra; }
 
-float conditioning_step(uint32_t instance, uint32_t seed, uint32_t step, thread const float *ctrl, device uint32_t *words, device uint32_t *extra, device float *obs, thread uint32_t *done, constant const float *shared) {
+float conditioning_step(uint32_t instance, uint32_t seed, uint32_t step, const float *ctrl, uint32_t *words, uint32_t *extra, float *obs, uint32_t *done, const float *shared) {
     (void)shared;
     (void)extra;
-    constant const conditioningKnobs *k = &CONDITIONING_KNOBS[instance];
+    const conditioningKnobs *k = &CONDITIONING_KNOBS[instance];
     uint32_t countdown = words[0];
     *done = 0u;
     uint32_t blink = (uint32_t)ctrl[0] & 1u;
@@ -41,13 +41,13 @@ float conditioning_step(uint32_t instance, uint32_t seed, uint32_t step, thread 
     return reward;
 }
 
-void conditioning_observe(uint32_t instance, uint32_t seed, device const uint32_t *words, device const uint32_t *extra, uint32_t step, device float *obs, constant const float *shared) {
+void conditioning_observe(uint32_t instance, uint32_t seed, const uint32_t *words, const uint32_t *extra, uint32_t step, float *obs, const float *shared) {
     (void)shared;
     (void)seed; (void)extra; (void)step;
     conditioning_obs(&CONDITIONING_KNOBS[instance], words[1], words[0], obs);
 }
 
-void conditioning_oracle(uint32_t instance, uint32_t seed, uint32_t step, device const uint32_t *words, device const uint32_t *extra, device const float *obs, thread float *ctrl, constant const float *shared) {
+void conditioning_oracle(uint32_t instance, uint32_t seed, uint32_t step, const uint32_t *words, const uint32_t *extra, const float *obs, float *ctrl, const float *shared) {
     (void)shared;
     (void)instance; (void)seed; (void)step; (void)extra; (void)obs;
     ctrl[0] = words[0] == 1u ? 1.0f : 0.0f;

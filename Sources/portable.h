@@ -1,39 +1,16 @@
 #ifndef OAK_PORTABLE_H
 #define OAK_PORTABLE_H
 
-#ifdef __METAL_VERSION__
-#include <metal_stdlib>
-using namespace metal;
-#define OAK_PI M_PI_F
-#define OAK_FLT_MAX FLT_MAX
-#define sqrtf(x) precise::sqrt(x)
-#define floorf(x) floor(x)
-#define fabsf(x) fabs(x)
-#define fminf(x, y) fmin(x, y)
-#define fmaxf(x, y) fmax(x, y)
-#define fmaf(x, y, z) fma(x, y, z)
-#define oak_popcount(x) popcount(x)
-#define OAK_CONSTANT constant
-#define OAK_LANES 32u
-static inline float wordFloat(uint32_t w) { return as_type<float>(w); }
-static inline uint32_t floatWord(float f) { return as_type<uint32_t>(f); }
-#else
 #include <float.h>
 #include <math.h>
 #include <stdint.h>
 #include <stdlib.h>
-#define device
-#define thread
-#define constant
 #define OAK_PI ((float)M_PI)
-#define OAK_FLT_MAX FLT_MAX
 #define oak_popcount(x) __builtin_popcount(x)
-#define OAK_CONSTANT static const
 #define OAK_LANES 1u
 static inline float wordFloat(uint32_t w) { union { uint32_t u; float f; } v; v.u = w; return v.f; }
 static inline uint32_t floatWord(float f) { union { uint32_t u; float f; } v; v.f = f; return v.u; }
 static inline uint32_t mulhi(uint32_t a, uint32_t b) { return (uint32_t)(((uint64_t)a * (uint64_t)b) >> 32); }
-#endif
 
 static inline float oak_pow2i(int n) { return wordFloat((uint32_t)(n + 127) << 23); }
 
@@ -90,7 +67,7 @@ static inline float oak_tanh(float x) {
     return x != x ? x : t;
 }
 
-static inline void oak_sincos(float x, thread float *s, thread float *c) {
+static inline void oak_sincos(float x, float *s, float *c) {
     if (x != x || x == INFINITY || x == -INFINITY) {
         *s = NAN;
         *c = NAN;

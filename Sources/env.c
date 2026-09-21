@@ -1,4 +1,4 @@
-#include "env.h"
+#include "geometry.h"
 
 #define OAK_FAMILY_LIST(F) \
     F(access) \
@@ -176,51 +176,51 @@
     X(WALKBET_DRIFT, walkbet, 1u, "WalkBet-drift-cont-v0", 2u, 2u, 0u, 7104u, 60u, 0u, noPose, noExtra)
 
 #define OAK_FAMILY_PROTOTYPES(family) \
-    void family##_reset(uint32_t instance, uint32_t seed, device uint32_t *words, device uint32_t *extra, uint32_t steps); \
-    float family##_step(uint32_t instance, uint32_t seed, uint32_t step, thread const float *ctrl, device uint32_t *words, device uint32_t *extra, device float *obs, thread uint32_t *done, constant const float *shared); \
-    void family##_observe(uint32_t instance, uint32_t seed, device const uint32_t *words, device const uint32_t *extra, uint32_t step, device float *obs, constant const float *shared); \
-    void family##_oracle(uint32_t instance, uint32_t seed, uint32_t step, device const uint32_t *words, device const uint32_t *extra, device const float *obs, thread float *ctrl, constant const float *shared);
+    void family##_reset(uint32_t instance, uint32_t seed, uint32_t *words, uint32_t *extra, uint32_t steps); \
+    float family##_step(uint32_t instance, uint32_t seed, uint32_t step, const float *ctrl, uint32_t *words, uint32_t *extra, float *obs, uint32_t *done, const float *shared); \
+    void family##_observe(uint32_t instance, uint32_t seed, const uint32_t *words, const uint32_t *extra, uint32_t step, float *obs, const float *shared); \
+    void family##_oracle(uint32_t instance, uint32_t seed, uint32_t step, const uint32_t *words, const uint32_t *extra, const float *obs, float *ctrl, const float *shared);
 OAK_FAMILY_LIST(OAK_FAMILY_PROTOTYPES)
-void acrobot_pose(uint32_t instance, device const uint32_t *words, thread const float *ctrl, thread float *pose);
-void walk_pose(uint32_t instance, device const uint32_t *words, thread const float *ctrl, thread float *pose);
-void deepsea_pose(uint32_t instance, device const uint32_t *words, thread const float *ctrl, thread float *pose);
-void hall_pose(uint32_t instance, device const uint32_t *words, thread const float *ctrl, thread float *pose);
-void jbw_pose(uint32_t instance, device const uint32_t *words, thread const float *ctrl, thread float *pose);
-void tmaze_pose(uint32_t instance, device const uint32_t *words, thread const float *ctrl, thread float *pose);
-void mountainCar_pose(uint32_t instance, device const uint32_t *words, thread const float *ctrl, thread float *pose);
-void pendulum_pose(uint32_t instance, device const uint32_t *words, thread const float *ctrl, thread float *pose);
+void acrobot_pose(uint32_t instance, const uint32_t *words, const float *ctrl, float *pose);
+void walk_pose(uint32_t instance, const uint32_t *words, const float *ctrl, float *pose);
+void deepsea_pose(uint32_t instance, const uint32_t *words, const float *ctrl, float *pose);
+void hall_pose(uint32_t instance, const uint32_t *words, const float *ctrl, float *pose);
+void jbw_pose(uint32_t instance, const uint32_t *words, const float *ctrl, float *pose);
+void tmaze_pose(uint32_t instance, const uint32_t *words, const float *ctrl, float *pose);
+void mountainCar_pose(uint32_t instance, const uint32_t *words, const float *ctrl, float *pose);
+void pendulum_pose(uint32_t instance, const uint32_t *words, const float *ctrl, float *pose);
 uint32_t contextual_extraWords(uint32_t instance, uint32_t steps);
 uint32_t forager_extraWords(uint32_t instance, uint32_t steps);
 uint32_t garnet_extraWords(uint32_t instance, uint32_t steps);
 uint32_t jbw_extraWords(uint32_t instance, uint32_t steps);
 
-static inline void noPose(uint32_t instance, device const uint32_t *words, thread const float *ctrl, thread float *pose) { (void)instance; (void)words; (void)ctrl; (void)pose; }
+static inline void noPose(uint32_t instance, const uint32_t *words, const float *ctrl, float *pose) { (void)instance; (void)words; (void)ctrl; (void)pose; }
 static inline uint32_t noExtra(uint32_t instance, uint32_t steps) { (void)instance; (void)steps; return 0u; }
 
 #define OAK_ENV_ENUM(sym, family, instance, name, obs, actions, box, seedStart, seeds, poseLen, pose, extra) ENV_##sym,
 enum { OAK_ENV_LIST(OAK_ENV_ENUM) OAK_ENV_COUNT };
 
-void env_reset(uint32_t env, uint32_t seed, device uint32_t *words, device uint32_t *extra, uint32_t steps) {
+void env_reset(uint32_t env, uint32_t seed, uint32_t *words, uint32_t *extra, uint32_t steps) {
 #define OAK_ENV_RESET(sym, family, instance, name, obs, actions, box, seedStart, seeds, poseLen, pose, extra_) case ENV_##sym: family##_reset(instance, seed, words, extra, steps); return;
     switch (env) { OAK_ENV_LIST(OAK_ENV_RESET) default: return; }
 }
 
-float env_step(uint32_t env, uint32_t seed, uint32_t step, thread const float *ctrl, device uint32_t *words, device uint32_t *extra, device float *obs, thread uint32_t *done, constant const float *shared) {
+float env_step(uint32_t env, uint32_t seed, uint32_t step, const float *ctrl, uint32_t *words, uint32_t *extra, float *obs, uint32_t *done, const float *shared) {
 #define OAK_ENV_STEP(sym, family, instance, name, obs_, actions, box, seedStart, seeds, poseLen, pose, extra_) case ENV_##sym: return family##_step(instance, seed, step, ctrl, words, extra, obs, done, shared);
     switch (env) { OAK_ENV_LIST(OAK_ENV_STEP) default: *done = 0u; return 0.0f; }
 }
 
-void env_observe(uint32_t env, uint32_t seed, device const uint32_t *words, device const uint32_t *extra, uint32_t step, device float *obs, constant const float *shared) {
+void env_observe(uint32_t env, uint32_t seed, const uint32_t *words, const uint32_t *extra, uint32_t step, float *obs, const float *shared) {
 #define OAK_ENV_OBSERVE(sym, family, instance, name, obs_, actions, box, seedStart, seeds, poseLen, pose, extra_) case ENV_##sym: family##_observe(instance, seed, words, extra, step, obs, shared); return;
     switch (env) { OAK_ENV_LIST(OAK_ENV_OBSERVE) default: return; }
 }
 
-void env_pose(uint32_t env, device const uint32_t *words, thread const float *ctrl, thread float *pose) {
+void env_pose(uint32_t env, const uint32_t *words, const float *ctrl, float *pose) {
 #define OAK_ENV_POSE(sym, family, instance, name, obs, actions, box, seedStart, seeds, poseLen, poseFn, extra) case ENV_##sym: poseFn(instance, words, ctrl, pose); return;
     switch (env) { OAK_ENV_LIST(OAK_ENV_POSE) default: return; }
 }
 
-void env_oracle(uint32_t env, uint32_t seed, uint32_t step, device const uint32_t *words, device const uint32_t *extra, device const float *obs, thread float *ctrl, constant const float *shared) {
+void env_oracle(uint32_t env, uint32_t seed, uint32_t step, const uint32_t *words, const uint32_t *extra, const float *obs, float *ctrl, const float *shared) {
 #define OAK_ENV_ORACLE(sym, family, instance, name, obs_, actions, box, seedStart, seeds, poseLen, pose, extra_) case ENV_##sym: family##_oracle(instance, seed, step, words, extra, obs, ctrl, shared); return;
     switch (env) { OAK_ENV_LIST(OAK_ENV_ORACLE) default: return; }
 }
@@ -245,7 +245,6 @@ uint32_t env_extraWords(uint32_t env, uint32_t steps) {
     switch (env) { OAK_ENV_LIST(OAK_ENV_EXTRA) default: return 0u; }
 }
 
-#ifndef __METAL_VERSION__
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -267,9 +266,9 @@ void env_checkTable(void) {
     if (OAK_ENV_TABLE_COUNT > OAK_ENV_TABLE_MAX) { fprintf(stderr, "the environment table holds %u entries, above the engine's capacity of %u\n", OAK_ENV_TABLE_COUNT, OAK_ENV_TABLE_MAX); exit(1); }
     for (uint32_t i = 0u; i < OAK_ENV_TABLE_COUNT; i++) {
         const EnvSpec *env = &TABLE[i];
-        if (env->obs == 0u || env->obs > OAK_ENV_OBS_MAX || env->actions == 0u || env->actions > OAK_ENV_ACT_MAX || env->poseLen > OAK_POSE_LEN || env->seeds == 0u || env->seeds > 64u) {
+        if (env->obs == 0u || env->obs > OAK_OBSERVATION_LIMIT || env->actions == 0u || env->actions > OAK_ENV_ACT_MAX || env->poseLen > OAK_POSE_LEN || env->seeds == 0u || env->seeds > 64u) {
             fprintf(stderr, "%s exceeds the engine's stream capacity (obs %u/%u, actions %u/%u, pose %u/%u)\n", env->name,
-                    env->obs, OAK_ENV_OBS_MAX, env->actions, OAK_ENV_ACT_MAX, env->poseLen, OAK_POSE_LEN);
+                    env->obs, OAK_OBSERVATION_LIMIT, env->actions, OAK_ENV_ACT_MAX, env->poseLen, OAK_POSE_LEN);
             exit(1);
         }
         for (uint32_t j = 0u; j < i; j++)
@@ -279,4 +278,3 @@ void env_checkTable(void) {
             }
     }
 }
-#endif

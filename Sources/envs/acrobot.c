@@ -6,14 +6,14 @@
 
 typedef struct { float slip; uint32_t positionOnly; } acrobotKnobs;
 
-OAK_CONSTANT acrobotKnobs ACROBOT_KNOBS[3] = {
+static const acrobotKnobs ACROBOT_KNOBS[3] = {
     { 0.0f, 0u },
     { 0.2f, 0u },
     { 0.0f, 1u }
 };
 
 
-static void acrobot_obs(constant const acrobotKnobs *k, float theta1, float theta2, float omega1, float omega2, device float *obs) {
+static void acrobot_obs(const acrobotKnobs *k, float theta1, float theta2, float omega1, float omega2, float *obs) {
     float s1, c1, s2, c2;
     oak_sincos(theta1, &s1, &c1);
     oak_sincos(theta2, &s2, &c2);
@@ -21,7 +21,7 @@ static void acrobot_obs(constant const acrobotKnobs *k, float theta1, float thet
     obs[4] = k->positionOnly ? 0.0f : omega1; obs[5] = k->positionOnly ? 0.0f : omega2; obs[6] = 1.0f;
 }
 
-static void acrobot_dynamics(float theta1, float theta2, float omega1, float omega2, float tau, thread float *derivative) {
+static void acrobot_dynamics(float theta1, float theta2, float omega1, float omega2, float tau, float *derivative) {
     float sinTheta2, cosTheta2;
     oak_sincos(theta2, &sinTheta2, &cosTheta2);
     float inertia1 = 3.5f + cosTheta2;
@@ -33,12 +33,12 @@ static void acrobot_dynamics(float theta1, float theta2, float omega1, float ome
     derivative[0] = omega1; derivative[1] = omega2; derivative[2] = alpha1; derivative[3] = alpha2;
 }
 
-void acrobot_reset(uint32_t instance, uint32_t seed, device uint32_t *words, device uint32_t *extra, uint32_t steps) { (void)steps; (void)extra; (void)instance; (void)seed; (void)words; }
+void acrobot_reset(uint32_t instance, uint32_t seed, uint32_t *words, uint32_t *extra, uint32_t steps) { (void)steps; (void)extra; (void)instance; (void)seed; (void)words; }
 
-float acrobot_step(uint32_t instance, uint32_t seed, uint32_t step, thread const float *ctrl, device uint32_t *words, device uint32_t *extra, device float *obs, thread uint32_t *doneOut, constant const float *shared) {
+float acrobot_step(uint32_t instance, uint32_t seed, uint32_t step, const float *ctrl, uint32_t *words, uint32_t *extra, float *obs, uint32_t *doneOut, const float *shared) {
     (void)shared;
     (void)extra;
-    constant const acrobotKnobs *k = &ACROBOT_KNOBS[instance];
+    const acrobotKnobs *k = &ACROBOT_KNOBS[instance];
     uint32_t action = (uint32_t)ctrl[0];
     if (k->slip > 0.0f) {
         u4 r = philox4x32(seed, ENV_RNG_STREAM, step, 0u, 0u, 0u);
@@ -75,20 +75,20 @@ float acrobot_step(uint32_t instance, uint32_t seed, uint32_t step, thread const
     return reward;
 }
 
-void acrobot_observe(uint32_t instance, uint32_t seed, device const uint32_t *words, device const uint32_t *extra, uint32_t step, device float *obs, constant const float *shared) {
+void acrobot_observe(uint32_t instance, uint32_t seed, const uint32_t *words, const uint32_t *extra, uint32_t step, float *obs, const float *shared) {
     (void)shared;
     (void)seed; (void)extra; (void)step;
     acrobot_obs(&ACROBOT_KNOBS[instance], wordFloat(words[0]), wordFloat(words[1]), wordFloat(words[2]), wordFloat(words[3]), obs);
 }
 
-void acrobot_pose(uint32_t instance, device const uint32_t *words, thread const float *ctrl, thread float *pose) {
+void acrobot_pose(uint32_t instance, const uint32_t *words, const float *ctrl, float *pose) {
     (void)instance;
     poseZero(pose);
     for (int i = 0; i < 4; i++) pose[i] = wordFloat(words[i]);
     pose[4] = ctrl[0];
 }
 
-void acrobot_oracle(uint32_t instance, uint32_t seed, uint32_t step, device const uint32_t *words, device const uint32_t *extra, device const float *obs, thread float *ctrl, constant const float *shared) {
+void acrobot_oracle(uint32_t instance, uint32_t seed, uint32_t step, const uint32_t *words, const uint32_t *extra, const float *obs, float *ctrl, const float *shared) {
     (void)shared;
     (void)instance;
     (void)seed; (void)step; (void)extra; (void)obs;

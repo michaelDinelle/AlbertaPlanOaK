@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
+import filecmp
 import hashlib
 import json
 import math
 import random
 import re
+import shutil
 import subprocess
 import sys
 from array import array
@@ -21,8 +23,12 @@ BOOTSTRAP = 10_000
 SEED_POWER = 7.85
 SEED_EFFECT = 0.10
 SEED_FLOOR, SEED_CAP = 16, 64
+PROBE_STEPS = 20_000
+PROBE_BLOCKS = 3
 POLICIES = ("random", "ppo", "oracle")
+POLICY_SOURCES = {"random": ("Sources/random.c",), "ppo": ("Sources/ppo.c",), "oracle": ()}
 ENV_LAYER = ("Sources/env.h", "Sources/rng.h", "Sources/portable.h")
+SNAPSHOT = ("Sources", "catalog.py", "setup.sh")
 ENV_ROW = re.compile(r'\s*X\(\s*\w+\s*,\s*(\w+)\s*,.*?"([^"]+)"')
 
 
@@ -30,7 +36,7 @@ def digest(entries):
     result = hashlib.sha256()
     for entry in sorted(entries):
         path = REPO / entry
-        files = sorted(p for p in path.rglob("*") if p.is_file()) if path.is_dir() else [path]
+        files = sorted(p for p in path.rglob("*") if p.is_file() and not p.name.startswith(".")) if path.is_dir() else [path]
         for file in files:
             result.update(str(file.relative_to(REPO)).encode() + b"\0" + file.read_bytes() + b"\0")
     return result.hexdigest()
@@ -94,36 +100,77 @@ class Recording:
         return json.loads((self.root / "sources.json").read_text())
 
 
+def snapshot(target):
+    shutil.rmtree(target, ignore_errors=True)
+    target.mkdir(parents=True)
+    for entry in SNAPSHOT:
+        source = REPO / entry
+        if source.is_dir():
+            shutil.copytree(source, target / entry, ignore=shutil.ignore_patterns(".*"))
+        else:
+            shutil.copy2(source, target / entry)
+
+
+def probe(engine, tag, index):
+    root = BENCH / f"probe-{tag}-{index}"
+    shutil.rmtree(root, ignore_errors=True)
+    out = subprocess.run(["caffeinate", "-i", str(engine), "record", "oak", str(PROBE_STEPS), str(root)],
+                         capture_output=True, text=True, check=True, cwd=REPO).stdout
+    shutil.rmtree(root, ignore_errors=True)
+    return float(out.rsplit(":", 1)[1].split()[0])
+
+
+def reference_engine(reference, preset):
+    source = reference.root / "source"
+    if not source.is_dir():
+        raise SystemExit(f"Recorded reference carries no source snapshot and cannot be timed: {reference.root.name}")
+    tree = REPO / ".build/reference"
+    shutil.rmtree(tree, ignore_errors=True)
+    shutil.copytree(source, tree)
+    subprocess.run([tree / "setup.sh", "--preset", preset], cwd=tree, check=True, capture_output=True)
+    return tree / ".build/oak"
+
+
+def paired_speed(reference, preset):
+    other = reference_engine(reference, preset)
+    if filecmp.cmp(ENGINE, other, shallow=False):
+        print(f"binary identical to recorded {reference.root.name[:9]}; no probe", flush=True)
+        return 1.0
+    print(f"timing against recorded {reference.root.name[:9]}", flush=True)
+    ratios = []
+    for block in range(PROBE_BLOCKS):
+        a = probe(ENGINE, "candidate", 2 * block)
+        b = probe(other, "reference", 2 * block)
+        c = probe(other, "reference", 2 * block + 1)
+        d = probe(ENGINE, "candidate", 2 * block + 1)
+        ratios.append((a + d) / (b + c))
+        print(f"speed block {block + 1}: candidate {(a + d) / 2:,.0f}  reference {(b + c) / 2:,.0f}  ratio {ratios[-1]:.4f}", flush=True)
+    return quantile(sorted(ratios), 0.5)
+
+
 def record(policy, root, sources):
     print(f"Recording {policy} into {root.name}", flush=True)
+    staged = root.with_name(root.name + ".source")
+    snapshot(staged)
     subprocess.run(["caffeinate", "-i", ENGINE, "record", policy, str(STEPS), root], check=True, cwd=REPO)
     (root / "sources.json").write_text(json.dumps(sources, indent=1, sort_keys=True) + "\n")
+    staged.rename(root / "source")
     return Recording(root)
 
 
-def baseline(policy, reference):
-    path = reference.root / "baselines.json"
-    if not path.exists():
-        raise SystemExit(f"Recorded reference lacks baseline links: {reference.root.name}")
-    links = json.loads(path.read_text()).get(policy, {})
-    expected = {entry["envId"]: entry for entry in reference.meta["envSchedule"]}
-    found, loaded = {}, {}
-    for env in reference.envs:
-        if env not in links:
-            raise SystemExit(f"Recorded reference lacks {policy} baseline for {env}")
-        root = BENCH / links[env]
-        if root not in loaded:
-            loaded[root] = Recording(root)
-        rec = loaded[root]
-        src = rec.sources()
-        entry = next((entry for entry in rec.meta["envSchedule"] if entry["envId"] == env), None)
-        if (rec.meta["policy"] != policy or src["policy"] != policy or rec.steps != reference.steps
-                or rec.seeds.get(env) != reference.seeds[env] or env not in src["envs"]
-                or entry is None or any(entry[key] != expected[env][key] for key in ("obs", "actions", "box"))):
-            raise SystemExit(f"Recorded {policy} baseline does not match the reference for {env}: {root.name}")
-        found[env] = rec
-    print(f"Reusing {policy}: {len(loaded)} recording(s), {len(found)} environments", flush=True)
-    return found
+def baseline(policy, digests):
+    policy_digest = digest(POLICY_SOURCES[policy])
+    sources = {"policy": policy, "envs": digests, "policyDigest": policy_digest}
+    identity = hashlib.sha256(json.dumps({"sources": sources, "steps": STEPS}, sort_keys=True).encode()).hexdigest()[:40]
+    root = BENCH / f"{policy}-{identity}"
+    if (root / "meta.json").exists():
+        print(f"Reusing {policy}: {root.name}", flush=True)
+        rec = Recording(root)
+    else:
+        rec = record(policy, root, sources)
+    if rec.meta["policy"] != policy or rec.steps != STEPS or rec.sources() != sources:
+        raise SystemExit(f"Recorded {policy} baseline does not match its identity: {root.name}")
+    return {env: rec for env in rec.envs}
 
 
 def mean(xs):
@@ -317,12 +364,13 @@ def main():
         changed = sorted(env for env in reference_sources.keys() | digests.keys() if reference_sources.get(env) != digests.get(env))
         if changed:
             print(f"Environment sources changed since the recorded best ({len(changed)} environments); comparing on the same seeds and horizon: {', '.join(changed)}", flush=True)
-    baselines = {policy: baseline(policy, reference) for policy in POLICIES}
+    baselines = {policy: baseline(policy, digests) for policy in POLICIES}
     BENCH.mkdir(exist_ok=True)
     candidate_root = BENCH / tree
     sources = {"policy": "oak", "preset": preset, "envs": digests, "policyDigest": digest(("Sources",))}
     if (candidate_root / "meta.json").exists():
         (candidate_root / "sources.json").write_text(json.dumps(sources, indent=1, sort_keys=True) + "\n")
+        snapshot(candidate_root / "source")
         candidate = Recording(candidate_root)
     else:
         candidate = record("oak", candidate_root, sources)
@@ -347,13 +395,15 @@ def main():
         BEST.write_text(tree + "\n")
         print(f"ADOPT: best is {tree}")
         return
-    best_sps = best.meta["stepsPerSecond"]
-    print(f"Steps/s: {sps:,.0f}; best: {best_sps:,.0f}")
     reward_better = verdict["lo"] > 0 and not verdict["guard"]
     reward_not_worse = verdict["identical"] or (verdict["lo"] >= -MARGIN and not verdict["guard"])
-    sps_better = sps >= best_sps * (1 + MARGIN)
-    sps_not_worse = sps >= best_sps * (1 - MARGIN)
-    if (reward_better and sps_not_worse) or (sps_better and reward_not_worse):
+    if not reward_not_worse:
+        raise SystemExit(f"REJECT: best stays {best_id}")
+    ratio = paired_speed(best, preset)
+    print(f"Steps/s: {sps:,.0f} recorded; paired speed against best: {ratio:.4f}x")
+    sps_better = ratio >= 1 + MARGIN
+    sps_not_worse = ratio >= 1 - MARGIN
+    if (reward_better and sps_not_worse) or sps_better:
         BEST.write_text(tree + "\n")
         print(f"PROMOTE: {tree}")
     else:

@@ -94,7 +94,7 @@ static float ppoGauss(uint32_t seed, uint32_t stream, uint32_t c0, uint32_t c1) 
     return sqrtf(-2.0f * oak_log(u1)) * oak_cos(2.0f * OAK_PI * u2);
 }
 
-static void ppoNormObs(uint32_t lane, device const float *S, uint32_t O, device const float *raw, device float *outN) {
+static void ppoNormObs(uint32_t lane, const float *S, uint32_t O, const float *raw, float *outN) {
     float count = fmaxf(S[AT(PPO_ST_OBSCOUNT)], 1.0f);
     for (uint32_t d = 0u; d < O; d++) {
         float variance = S[AT(PPO_ST_OBSM2 + d)] / count;
@@ -103,7 +103,7 @@ static void ppoNormObs(uint32_t lane, device const float *S, uint32_t O, device 
     }
 }
 
-static void ppoWelfordObs(uint32_t lane, device float *S, uint32_t O, device const float *raw) {
+static void ppoWelfordObs(uint32_t lane, float *S, uint32_t O, const float *raw) {
     float count = S[AT(PPO_ST_OBSCOUNT)] + 1.0f;
     S[AT(PPO_ST_OBSCOUNT)] = count;
     for (uint32_t d = 0u; d < O; d++) {
@@ -113,7 +113,7 @@ static void ppoWelfordObs(uint32_t lane, device float *S, uint32_t O, device con
     }
 }
 
-static float ppoScaleReward(uint32_t lane, device float *S, float reward, uint32_t done) {
+static float ppoScaleReward(uint32_t lane, float *S, float reward, uint32_t done) {
     float trace = S[AT(PPO_ST_RETTRACE)] * PPO_GAMMA * (done != 0u ? 0.0f : 1.0f) + reward;
     S[AT(PPO_ST_RETTRACE)] = trace;
     float count = S[AT(PPO_ST_RETCOUNT)] + 1.0f;
@@ -125,18 +125,18 @@ static float ppoScaleReward(uint32_t lane, device float *S, float reward, uint32
     return oak_clamp(reward / sqrtf(variance + PPO_NORM_EPS), -PPO_NORM_CLIP, PPO_NORM_CLIP);
 }
 
-static float ppoForward(uint32_t lane, device const float *P, thread const PpoLayout *L, device const float *obsn, device float *haOut, device float *hcOut, thread float *logits) {
+static float ppoForward(uint32_t lane, const float *P, const PpoLayout *L, const float *obsn, float *haOut, float *hcOut, float *logits) {
     float actor[PPO_H], critic[PPO_H];
     for (uint32_t hu = 0u; hu < PPO_H; hu++) { actor[hu] = P[AT(L->b1a + hu)]; critic[hu] = P[AT(L->b1c + hu)]; }
     for (uint32_t o = 0u; o < L->O; o++) {
-        device const float *wa = P + (L->w1a + o * PPO_H) * OAK_LANES, *wc = P + (L->w1c + o * PPO_H) * OAK_LANES;
+        const float *wa = P + (L->w1a + o * PPO_H) * OAK_LANES, *wc = P + (L->w1c + o * PPO_H) * OAK_LANES;
         float x = obsn[AT(o)];
         for (uint32_t hu = 0u; hu < PPO_H; hu++) { actor[hu] += wa[AT(hu)] * x; critic[hu] += wc[AT(hu)] * x; }
     }
     for (uint32_t hu = 0u; hu < PPO_H; hu++) { haOut[AT(hu)] = oak_tanh(actor[hu]); hcOut[AT(hu)] = oak_tanh(critic[hu]); }
     for (uint32_t a = 0u; a < L->A; a++) logits[a] = P[AT(L->b2a + a)];
     for (uint32_t hu = 0u; hu < PPO_H; hu++) {
-        device const float *w = P + (L->w2a + hu * L->A) * OAK_LANES;
+        const float *w = P + (L->w2a + hu * L->A) * OAK_LANES;
         float h = haOut[AT(hu)];
         for (uint32_t a = 0u; a < L->A; a++) logits[a] += w[AT(a)] * h;
     }
@@ -147,12 +147,12 @@ static float ppoForward(uint32_t lane, device const float *P, thread const PpoLa
 
 uint32_t ppo_stateWords(void) { return (uint32_t)(sizeof(PpoAgent) / sizeof(uint32_t) / OAK_LANES); }
 
-void ppo_init(device uint32_t *state, uint32_t lane, uint32_t env, uint32_t seed, device const float *obs) {
-    device PpoAgent *g = (device PpoAgent *)state;
+void ppo_init(uint32_t *state, uint32_t lane, uint32_t env, uint32_t seed, const float *obs) {
+    PpoAgent *g = (PpoAgent *)state;
     for (uint32_t w = 0u; w < ppo_stateWords(); w++) state[AT(w)] = 0u;
     PpoLayout layout = ppoLayout(env);
     g->L[lane] = layout;
-    thread const PpoLayout *L = &layout;
+    const PpoLayout *L = &layout;
     float stdIn = sqrtf(2.0f / (float)(L->O + PPO_H));
     float stdOutA = 0.01f * sqrtf(2.0f / (float)(PPO_H + L->A));
     float stdOutC = sqrtf(2.0f / (float)(PPO_H + 1u));
@@ -168,10 +168,10 @@ void ppo_init(device uint32_t *state, uint32_t lane, uint32_t env, uint32_t seed
     ppoWelfordObs(lane, g->S, L->O, obs);
 }
 
-static void ppoUpdate(device PpoAgent *g, uint32_t lane, uint32_t seed, uint32_t updateIdx) {
+static void ppoUpdate(PpoAgent *g, uint32_t lane, uint32_t seed, uint32_t updateIdx) {
     PpoLayout layout = g->L[lane];
-    thread const PpoLayout *L = &layout;
-    device float *P = g->P, *M = g->M, *V = g->V, *R = g->R, *W = g->W, *S = g->S;
+    const PpoLayout *L = &layout;
+    float *P = g->P, *M = g->M, *V = g->V, *R = g->R, *W = g->W, *S = g->S;
     float bootLogits[PPO_AMAX];
     ppoNormObs(lane, S, L->O, R + (PPO_ROLL_OBS + PPO_T * PPO_OMAX) * OAK_LANES, W + PPO_SCR_OBSN * OAK_LANES);
     float bootV = ppoForward(lane, P, L, W + PPO_SCR_OBSN * OAK_LANES, W + PPO_SCR_HA * OAK_LANES, W + PPO_SCR_HC * OAK_LANES, bootLogits);
@@ -215,10 +215,10 @@ static void ppoUpdate(device PpoAgent *g, uint32_t lane, uint32_t seed, uint32_t
             for (uint32_t ss = 0u; ss < PPO_MB; ss++) {
                 uint32_t s = (uint32_t)W[AT(PPO_SCR_IDX + mb * PPO_MB + ss)];
                 float an = (R[AT(PPO_ROLL_ADV + s)] - mbMean) / (mbStd + PPO_NORM_EPS);
-                device float *obsnRow = W + (PPO_SCR_OBSN + ss * PPO_OMAX) * OAK_LANES;
+                float *obsnRow = W + (PPO_SCR_OBSN + ss * PPO_OMAX) * OAK_LANES;
                 ppoNormObs(lane, S, L->O, R + (PPO_ROLL_OBS + s * PPO_OMAX) * OAK_LANES, obsnRow);
-                device float *haRow = W + (PPO_SCR_HA + ss * PPO_H) * OAK_LANES;
-                device float *hcRow = W + (PPO_SCR_HC + ss * PPO_H) * OAK_LANES;
+                float *haRow = W + (PPO_SCR_HA + ss * PPO_H) * OAK_LANES;
+                float *hcRow = W + (PPO_SCR_HC + ss * PPO_H) * OAK_LANES;
                 float sLogits[PPO_AMAX];
                 float v = ppoForward(lane, P, L, obsnRow, haRow, hcRow, sLogits);
                 float oldLogp = R[AT(PPO_ROLL_LOGP + s)];
@@ -272,15 +272,15 @@ static void ppoUpdate(device PpoAgent *g, uint32_t lane, uint32_t seed, uint32_t
                 float dV;
                 if (l1 >= l2) dV = PPO_VF_COEF * (v - retS);
                 else dV = fabsf(v - oldV) < PPO_CLIP ? PPO_VF_COEF * (vClipped - retS) : 0.0f;
-                device float *dlgRow = W + (PPO_SCR_DLG + ss * PPO_AMAX) * OAK_LANES;
-                device float *dlsRow = W + (PPO_SCR_DLS + ss * PPO_AMAX) * OAK_LANES;
+                float *dlgRow = W + (PPO_SCR_DLG + ss * PPO_AMAX) * OAK_LANES;
+                float *dlsRow = W + (PPO_SCR_DLS + ss * PPO_AMAX) * OAK_LANES;
                 for (uint32_t a = 0u; a < L->A; a++) {
                     dlgRow[AT(a)] = dlg[a];
                     dlsRow[AT(a)] = dls[a];
                 }
                 W[AT(PPO_SCR_DV + ss)] = dV;
-                device float *dhaRow = W + (PPO_SCR_DHA + ss * PPO_H) * OAK_LANES;
-                device float *dhcRow = W + (PPO_SCR_DHC + ss * PPO_H) * OAK_LANES;
+                float *dhaRow = W + (PPO_SCR_DHA + ss * PPO_H) * OAK_LANES;
+                float *dhcRow = W + (PPO_SCR_DHC + ss * PPO_H) * OAK_LANES;
                 for (uint32_t hu = 0u; hu < PPO_H; hu++) {
                     float accA = 0.0f;
                     for (uint32_t a = 0u; a < L->A; a++) accA += dlg[a] * P[AT(L->w2a + hu * L->A + a)];
@@ -290,21 +290,21 @@ static void ppoUpdate(device PpoAgent *g, uint32_t lane, uint32_t seed, uint32_t
                     dhcRow[AT(hu)] = dV * P[AT(L->w2c + hu)] * (1.0f - hcv * hcv);
                 }
             }
-            device float *G = W + PPO_SCR_GRAD * OAK_LANES;
-            device const float *dha = W + PPO_SCR_DHA * OAK_LANES, *dhc = W + PPO_SCR_DHC * OAK_LANES, *obsn = W + PPO_SCR_OBSN * OAK_LANES;
-            device const float *ha = W + PPO_SCR_HA * OAK_LANES, *hc = W + PPO_SCR_HC * OAK_LANES, *dlg = W + PPO_SCR_DLG * OAK_LANES;
-            device const float *dls = W + PPO_SCR_DLS * OAK_LANES, *dv = W + PPO_SCR_DV * OAK_LANES;
+            float *G = W + PPO_SCR_GRAD * OAK_LANES;
+            const float *dha = W + PPO_SCR_DHA * OAK_LANES, *dhc = W + PPO_SCR_DHC * OAK_LANES, *obsn = W + PPO_SCR_OBSN * OAK_LANES;
+            const float *ha = W + PPO_SCR_HA * OAK_LANES, *hc = W + PPO_SCR_HC * OAK_LANES, *dlg = W + PPO_SCR_DLG * OAK_LANES;
+            const float *dls = W + PPO_SCR_DLS * OAK_LANES, *dv = W + PPO_SCR_DV * OAK_LANES;
             for (uint32_t o = 0u; o < L->O; o++) {
-                device const float *column = obsn + o * OAK_LANES;
+                const float *column = obsn + o * OAK_LANES;
                 for (uint32_t hu = 0u; hu < PPO_H; hu += 16u) {
                     float a[16], c[16];
                     for (uint32_t k = 0u; k < 16u; k++) { a[k] = 0.0f; c[k] = 0.0f; }
                     for (uint32_t ss = 0u; ss < PPO_MB; ss++) {
                         float x = column[AT(ss * PPO_OMAX)];
-                        device const float *da = dha + (ss * PPO_H + hu) * OAK_LANES, *dc = dhc + (ss * PPO_H + hu) * OAK_LANES;
+                        const float *da = dha + (ss * PPO_H + hu) * OAK_LANES, *dc = dhc + (ss * PPO_H + hu) * OAK_LANES;
                         for (uint32_t k = 0u; k < 16u; k++) { a[k] += da[AT(k)] * x; c[k] += dc[AT(k)] * x; }
                     }
-                    device float *ga = G + (L->w1a + o * PPO_H + hu) * OAK_LANES, *gc = G + (L->w1c + o * PPO_H + hu) * OAK_LANES;
+                    float *ga = G + (L->w1a + o * PPO_H + hu) * OAK_LANES, *gc = G + (L->w1c + o * PPO_H + hu) * OAK_LANES;
                     for (uint32_t k = 0u; k < 16u; k++) { ga[AT(k)] = a[k]; gc[AT(k)] = c[k]; }
                 }
             }
@@ -312,20 +312,20 @@ static void ppoUpdate(device PpoAgent *g, uint32_t lane, uint32_t seed, uint32_t
                 float b[16], d[16], v[16];
                 for (uint32_t k = 0u; k < 16u; k++) { b[k] = 0.0f; d[k] = 0.0f; v[k] = 0.0f; }
                 for (uint32_t ss = 0u; ss < PPO_MB; ss++) {
-                    device const float *da = dha + (ss * PPO_H + hu) * OAK_LANES, *dc = dhc + (ss * PPO_H + hu) * OAK_LANES, *h = hc + (ss * PPO_H + hu) * OAK_LANES;
+                    const float *da = dha + (ss * PPO_H + hu) * OAK_LANES, *dc = dhc + (ss * PPO_H + hu) * OAK_LANES, *h = hc + (ss * PPO_H + hu) * OAK_LANES;
                     float scale = dv[AT(ss)];
                     for (uint32_t k = 0u; k < 16u; k++) { b[k] += da[AT(k)]; d[k] += dc[AT(k)]; v[k] += scale * h[AT(k)]; }
                 }
                 for (uint32_t k = 0u; k < 16u; k++) { G[AT(L->b1a + hu + k)] = b[k]; G[AT(L->b1c + hu + k)] = d[k]; G[AT(L->w2c + hu + k)] = v[k]; }
             }
             for (uint32_t a = 0u; a < L->A; a++) {
-                device const float *column = dlg + a * OAK_LANES;
+                const float *column = dlg + a * OAK_LANES;
                 for (uint32_t hu = 0u; hu < PPO_H; hu += 16u) {
                     float w[16];
                     for (uint32_t k = 0u; k < 16u; k++) w[k] = 0.0f;
                     for (uint32_t ss = 0u; ss < PPO_MB; ss++) {
                         float g = column[AT(ss * PPO_AMAX)];
-                        device const float *hAct = ha + (ss * PPO_H + hu) * OAK_LANES;
+                        const float *hAct = ha + (ss * PPO_H + hu) * OAK_LANES;
                         for (uint32_t k = 0u; k < 16u; k++) w[k] += g * hAct[AT(k)];
                     }
                     for (uint32_t k = 0u; k < 16u; k++) G[AT(L->w2a + (hu + k) * L->A + a)] = w[k];
@@ -366,12 +366,12 @@ static void ppoUpdate(device PpoAgent *g, uint32_t lane, uint32_t seed, uint32_t
     for (uint32_t d = 0u; d < L->O; d++) R[AT(PPO_ROLL_OBS + d)] = R[AT(PPO_ROLL_OBS + PPO_T * PPO_OMAX + d)];
 }
 
-void ppo_act(device uint32_t *state, uint32_t lane, uint32_t env, uint32_t seed, uint32_t step, device const float *obs, float reward, uint32_t done, thread float *ctrl) {
+void ppo_act(uint32_t *state, uint32_t lane, uint32_t env, uint32_t seed, uint32_t step, const float *obs, float reward, uint32_t done, float *ctrl) {
     (void)env;
-    device PpoAgent *g = (device PpoAgent *)state;
+    PpoAgent *g = (PpoAgent *)state;
     PpoLayout layout = g->L[lane];
-    thread const PpoLayout *L = &layout;
-    device float *P = g->P, *R = g->R, *S = g->S;
+    const PpoLayout *L = &layout;
+    float *P = g->P, *R = g->R, *S = g->S;
     if (step > 0u) {
         uint32_t tPrev = (step - 1u) % PPO_T;
         float safeReward = isfinite(reward) ? reward : 0.0f;
@@ -383,7 +383,7 @@ void ppo_act(device uint32_t *state, uint32_t lane, uint32_t env, uint32_t seed,
     }
     uint32_t t = step % PPO_T;
     float logits[PPO_AMAX];
-    device float *W = g->W;
+    float *W = g->W;
     ppoNormObs(lane, S, L->O, R + (PPO_ROLL_OBS + t * PPO_OMAX) * OAK_LANES, W + PPO_SCR_OBSN * OAK_LANES);
     float value = ppoForward(lane, P, L, W + PPO_SCR_OBSN * OAK_LANES, W + PPO_SCR_HA * OAK_LANES, W + PPO_SCR_HC * OAK_LANES, logits);
     float logp;
