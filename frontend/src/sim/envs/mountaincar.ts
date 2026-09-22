@@ -1,4 +1,5 @@
 import { NO_EVENTS, type EnvDecoder, type EnvFrame, type EnvGeometry, type SimEvent } from '../types';
+import { wordFloat } from '../words';
 
 export const MC_MIN_POS = -1.2;
 export const MC_MAX_POS = 0.6;
@@ -9,7 +10,7 @@ export const MC_ACTIONS = 3;
 
 export const MOUNTAINCAR_POS = 0;
 export const MOUNTAINCAR_VEL = 1;
-export const MOUNTAINCAR_ACTION = 3;
+export const MOUNTAINCAR_ACTION = 2;
 
 export function mountainCarForce(action: number): number {
   return ((Math.trunc(action) >>> 0) % MC_ACTIONS) - 1;
@@ -42,6 +43,8 @@ const GEOMETRY: EnvGeometry = Object.freeze({
 });
 
 export const mountainCarDecoder: EnvDecoder = {
+  slots: 3,
+  decode(frame, out) { out[MOUNTAINCAR_POS] = wordFloat(frame.words[0]!); out[MOUNTAINCAR_VEL] = wordFloat(frame.words[1]!); out[MOUNTAINCAR_ACTION] = frame.actions[0]!; },
   geometry(): EnvGeometry {
     return GEOMETRY;
   },

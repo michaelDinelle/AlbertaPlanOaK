@@ -7,10 +7,10 @@ import { formatDate, formatStep } from './format';
 import { BEST_TOKEN, POLICY_NAMES, POLICY_ORDER, POLICY_TOKENS } from './panels/charts';
 import { EnvPicker } from './panels/EnvPicker';
 import { HealthView } from './panels/HealthView';
-import { JbwLegend } from './panels/JbwLegend';
 import { AUTHOR_LINKS } from './panels/links';
 import { PlaybackBar, PolicySwitch } from './panels/PlaybackBar';
 import { RewardView, type Comparison } from './panels/RewardView';
+import { SceneLegend } from './panels/SceneLegend';
 import { StandingsView } from './panels/StandingsView';
 import { addRecording, cycleSpeed, fail, patch, selectEnv, selectRun, setStage, store, type Panel } from './store';
 import { mountStage, type Stage } from './theater/stage';
@@ -135,6 +135,13 @@ export function App() {
         const next = families[(at + direction + families.length) % families.length]?.configurations[0];
         if (next !== undefined) selectEnv(next.envId);
       };
+      const cycleConfiguration = (direction: 1 | -1): void => {
+        const family = families.find(entry => entry.configurations.some(config => config.envId === state.envId));
+        if (family === undefined) return;
+        const at = family.configurations.findIndex(config => config.envId === state.envId);
+        const next = family.configurations[(at + direction + family.configurations.length) % family.configurations.length];
+        if (next !== undefined) selectEnv(next.envId);
+      };
       const cyclePolicy = (): void => {
         const open = POLICY_ORDER.filter((p) => available[p]);
         const next = open[(open.indexOf(state.policy) + 1) % open.length];
@@ -147,6 +154,8 @@ export function App() {
         ArrowRight: () => { patch({ playing: false }); stage.current?.stepBy(20 * (event.shiftKey ? 10 : 1)); },
         '[': () => cycleEnv(-1),
         ']': () => cycleEnv(1),
+        ',': () => cycleConfiguration(-1),
+        '.': () => cycleConfiguration(1),
         g: () => patch({ debug: !state.debug }),
         x: cycleSpeed,
         p: cyclePolicy,
@@ -211,7 +220,7 @@ export function App() {
       )}
       <div className="absolute inset-x-0 bottom-4 z-30 grid grid-cols-[1fr_minmax(0,760px)_1fr] items-end gap-3 px-4">
         <div className="flex flex-col items-start gap-3">
-          {environment?.family === 'jbw' && <JbwLegend environment={environment} />}
+          <SceneLegend stage={stage} />
           <EnvPicker families={families} run={run} seed={seed} />
         </div>
         <PlaybackBar stage={stage} live={live} />

@@ -2,8 +2,9 @@ import * as THREE from 'three';
 import { MeshoptSimplifier } from 'meshoptimizer/simplifier';
 import { celebrationPulse } from '@kit/celebrate';
 import { buildComposer, GLASS_RECTS, type ComposerHandle, type GlassRect } from '@kit/post';
+import type { Tick } from './recording';
 import { TOKENS } from '@kit/tokens';
-import type { FrameState, FrameUpdate, SceneContext, SceneModule, SceneSize } from '@kit/types';
+import type { FrameState, FrameUpdate, LegendSpec, SceneContext, SceneModule, SceneSize } from '@kit/types';
 import { EMPTY_EVENT_STREAM, type SimEvent } from '@sim/types';
 import type { EnvDescriptor } from '../data/envs';
 import { SCENES } from '../scenes/table';
@@ -33,33 +34,39 @@ export interface Stage {
   seekStep(step: number): void;
   stepBy(delta: number): void;
   setDebug(on: boolean): void;
+  legend(): LegendSpec | null;
   resetCamera(): void;
   destroy(): void;
 }
 
+export interface Progress { frameCount: number; ticks: Tick[] }
+
 export const frameListeners = new Set<(frame: Frame) => void>();
+export const progressListeners = new Set<(progress: Progress) => void>();
 
 const MAX_CATCHUP_FRAMES = 12;
+const MAX_PIXEL_RATIO = 1.5;
+const GLASS_EVERY_FRAMES = 10;
 
-const frameState = (): FrameState => ({ pose: new Float32Array(9), observations: new Float32Array(0), reward: 0, reset: false, done: false, step: 0, simTime: 0 });
+const frameState = (slots = 0): FrameState => ({ pose: new Float32Array(slots), observations: new Float32Array(0), reward: 0, reset: false, done: false, step: 0, simTime: 0 });
 
-function sample(source: Tape, position: number, out: FrameState): void {
-  const i = Math.floor(position), frame = source.frameAt(i);
+function sample(source: Tape, controlHz: number, position: number, a: Float32Array, b: Float32Array, out: FrameState): void {
+  const i = Math.floor(position), frame = source.frameAt(i), decoder = source.decoder;
   const next = source.hasFrame(i + 1) ? source.frameAt(i + 1) : frame;
-  const alpha = source.discretePose || next.reset ? 0 : position - i;
-  out.pose.fill(0);
-  for (let k = 0; k < frame.pose.length; k++) {
-    const a = frame.pose[k]!;
-    let d = next.pose[k]! - a;
-    if (((source.wrapMask >>> k) & 1) !== 0) d -= 2 * Math.PI * Math.round(d / (2 * Math.PI));
-    out.pose[k] = a + d * alpha;
+  decoder.decode(frame, a);
+  decoder.decode(next, b);
+  const alpha = decoder.discrete || next.reset ? 0 : position - i, wrap = decoder.wrap ?? 0;
+  for (let k = 0; k < a.length; k++) {
+    let d = b[k]! - a[k]!;
+    if (((wrap >>> k) & 1) !== 0) d -= 2 * Math.PI * Math.round(d / (2 * Math.PI));
+    out.pose[k] = a[k]! + d * alpha;
   }
   out.observations = frame.observations;
   out.reward = frame.reward;
   out.reset = frame.reset;
   out.done = frame.done !== 0;
   out.step = frame.step;
-  out.simTime = frame.step / source.controlHz;
+  out.simTime = frame.step / controlHz;
 }
 
 const radii = new WeakMap<Element, number>();
@@ -83,7 +90,7 @@ export function mountStage(container: HTMLElement): Stage {
   const canvas = document.createElement('canvas');
   canvas.className = 'theater-canvas';
   container.appendChild(canvas);
-  const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, alpha: false, powerPreference: 'high-performance', preserveDrawingBuffer: true });
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, alpha: false, powerPreference: 'high-performance', preserveDrawingBuffer: false });
   renderer.setClearColor(0x05070c, 1);
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFShadowMap;
@@ -107,16 +114,18 @@ export function mountStage(container: HTMLElement): Stage {
   let hasPrevious = false;
   let awaitingFrame = true;
   let broken: string | null = null;
-  const state = frameState();
-  const previous = frameState();
+  let state = frameState();
+  let previous = frameState();
+  let scratchA = new Float32Array(0), scratchB = new Float32Array(0), scratchPose = new Float32Array(0);
+  let glassCountdown = 0;
   const events: SimEvent[] = [];
-  const update: FrameUpdate = { state, prev: null, events, eventLog: EMPTY_EVENT_STREAM, dtReal: 0, scrubbed: true, position: 0, controlHz: 1, frameAt: () => { throw new Error('No replay frame selected'); } };
+  const update: FrameUpdate = { state, prev: null, events, eventLog: EMPTY_EVENT_STREAM, dtReal: 0, scrubbed: true, position: 0, controlHz: 1, frameAt: () => { throw new Error('No replay frame selected'); }, poseAt: () => { throw new Error('No replay frame selected'); } };
   const frame: Frame = { step: -1, simTime: 0, requestedStep: 0 };
 
   const sizeOf = (): SceneSize => ({
     width: Math.max(1, container.clientWidth),
     height: Math.max(1, container.clientHeight),
-    dpr: window.devicePixelRatio || 1,
+    dpr: Math.min(MAX_PIXEL_RATIO, window.devicePixelRatio || 1),
   });
   const applySize = (): void => {
     const size = sizeOf();
@@ -147,12 +156,10 @@ export function mountStage(container: HTMLElement): Stage {
     setStage({
       status: error !== null ? 'error' : scene === null || recording.geometry === null ? 'loading' : recording.hasFrame(position) ? 'ready' : 'buffering',
       note: error,
-      frameCount: recording.frameCount,
       totalSteps: target.horizon,
-      requestedStep: Math.floor(position),
-      ticks: recording.ticks,
-      identical: recording.identical,
     });
+    const progress: Progress = { frameCount: recording.frameCount, ticks: recording.ticks };
+    for (const listener of progressListeners) listener(progress);
   };
   const failStage = (what: string, error: unknown): void => {
     broken = `${what}: ${error instanceof Error ? error.message : String(error)}`;
@@ -175,7 +182,7 @@ export function mountStage(container: HTMLElement): Stage {
       if (destroyed || gen !== generation || target === null || keyOf(target) !== key) { module.dispose(); return; }
       scene = module;
       renderer.compile(module.scene, module.camera);
-      post = buildComposer(renderer, module.scene, module.camera, spec, sizeOf());
+      post = buildComposer(renderer, module.scene, module.camera, module.post, sizeOf());
       sceneKey = key; buildingKey = null;
       module.setDebug(debug); applySize(); resetCursor(); publish();
     } catch (error) {
@@ -197,9 +204,10 @@ export function mountStage(container: HTMLElement): Stage {
     }
     const dt = lastWall === 0 ? 0 : Math.min(0.1, (now - lastWall) / 1000);
     lastWall = now;
-    const source = recording;
+    const source = recording, controlHz = scene.controlHz;
+    source.follow(position);
     if (playing && hasPrevious && !awaitingFrame && source.hasFrame(position)) {
-      position = Math.min(target.horizon, position + dt * speed * source.controlHz);
+      position = Math.min(target.horizon, position + dt * speed * controlHz);
       if (!source.hasFrame(position)) { source.seek(position); publish(); }
       if (position === target.horizon) patch({ playing: false });
     }
@@ -211,7 +219,7 @@ export function mountStage(container: HTMLElement): Stage {
       return;
     }
     awaitingFrame = false;
-    seconds = position / source.controlHz;
+    seconds = position / controlHz;
     if (hasPrevious) {
       previous.pose.set(state.pose);
       previous.done = state.done;
@@ -219,7 +227,7 @@ export function mountStage(container: HTMLElement): Stage {
       previous.simTime = state.simTime;
       previous.observations = state.observations; previous.reward = state.reward; previous.reset = state.reset;
     }
-    sample(source, position, state);
+    sample(source, controlHz, position, scratchA, scratchB, state);
     const index = Math.floor(position);
     const sequential = hasPrevious && index >= lastIndex && index - lastIndex <= MAX_CATCHUP_FRAMES;
     events.length = 0;
@@ -229,13 +237,14 @@ export function mountStage(container: HTMLElement): Stage {
     update.dtReal = dt;
     update.scrubbed = !sequential;
     update.position = position;
-    update.controlHz = source.controlHz;
+    update.controlHz = controlHz;
     update.frameAt = (i) => { const step = Math.max(0, Math.min(target!.horizon, Math.floor(i))); return source.frameAt(source.hasFrame(step) ? step : index); };
+    update.poseAt = (i) => { source.decoder.decode(update.frameAt(i), scratchPose); return scratchPose; };
     lastIndex = index;
     hasPrevious = true;
     scene.update(update);
     post.setBloomPulse(celebrationPulse(scene.scene).bloom);
-    post.setGlass(glassRects(container));
+    if (--glassCountdown <= 0) { glassCountdown = GLASS_EVERY_FRAMES; post.setGlass(glassRects(container)); }
     post.render(dt);
     frame.step = state.step;
     frame.simTime = state.simTime;
@@ -257,12 +266,13 @@ export function mountStage(container: HTMLElement): Stage {
       target = next; broken = null; resetCursor(); lastWall = 0;
       if (!sameEnvironment) { position = 0; seconds = 0; frame.step = -1; }
       if (next === null) { setStage(EMPTY_STAGE); return; }
-      if (!SCENES[next.environment.family] || !next.environment.replay) {
-        setStage({ ...EMPTY_STAGE, status: 'unsupported', note: 'Visualization unavailable', totalSteps: next.horizon });
-        return;
-      }
-      const opened = openTape(next.runId, next.lane, next.environment, next.seed, next.horizon, next.hash);
+      let opened: Tape;
+      try { opened = openTape(next.runId, next.lane, next.environment, next.seed, next.horizon, next.hash); }
+      catch (error) { failStage(`Could not open ${next.environment.envId}`, error); return; }
       recording = opened;
+      const slots = opened.decoder.slots;
+      state = frameState(slots); previous = frameState(slots); update.state = state;
+      scratchA = new Float32Array(slots); scratchB = new Float32Array(slots); scratchPose = new Float32Array(slots);
       opened.onChange = () => {
         if (recording !== opened) return;
         publish();
@@ -280,6 +290,7 @@ export function mountStage(container: HTMLElement): Stage {
       debug = on;
       scene?.setDebug(on);
     },
+    legend: () => scene?.legend ?? null,
     resetCamera: () => scene?.resetCamera(),
     destroy() {
       destroyed = true;

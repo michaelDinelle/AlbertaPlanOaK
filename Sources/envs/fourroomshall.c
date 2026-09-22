@@ -66,12 +66,6 @@ void hall_observe(uint32_t instance, uint32_t seed, const uint32_t *words, const
     hall_obs(words[0], words[1], obs);
 }
 
-void hall_pose(uint32_t instance, const uint32_t *words, const float *ctrl, float *pose) {
-    (void)instance; (void)ctrl;
-    poseZero(pose);
-    for (int i = 0; i < 4; i++) pose[i] = (float)words[i];
-}
-
 void hall_oracle(uint32_t instance, uint32_t seed, uint32_t step, const uint32_t *words, const uint32_t *extra, const float *obs, float *ctrl, const float *shared) {
     (void)shared;
     (void)instance; (void)seed; (void)step; (void)extra; (void)obs;

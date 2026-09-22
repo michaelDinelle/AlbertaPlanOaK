@@ -7,9 +7,8 @@ import {
 } from './celebrate';
 import { GroundTruthOverlay, type GroundTruthOptions } from './debug';
 import { makeOrbitRig, type OrbitRig, type OrbitRigOptions } from './rigs';
-import type { FrameUpdate, SceneContext, SceneModule, SceneSize } from './types';
+import type { FrameUpdate, LegendSpec, SceneContext, SceneModule, ScenePost, SceneSize } from './types';
 import type { WorldCore } from './world';
-import { SCENES } from '../scenes/table';
 
 export interface Stage<W extends WorldCore> {
   ctx: SceneContext;
@@ -30,6 +29,9 @@ export abstract class StageScene<W extends WorldCore> implements SceneModule {
   protected overlay: GroundTruthOverlay | null = null;
   protected debugOn = false;
 
+  abstract readonly post: ScenePost;
+  abstract readonly controlHz: number;
+  legend: LegendSpec | null = null;
   protected abstract readonly stageName: string;
   protected abstract buildWorld(ctx: SceneContext): W | Promise<W>;
   protected abstract buildActors(ctx: SceneContext, world: W): void;
@@ -44,7 +46,7 @@ export abstract class StageScene<W extends WorldCore> implements SceneModule {
   }
 
   protected accentOf(ctx: SceneContext): number {
-    return ctx.tokens.accents[SCENES[ctx.environment.family]!.slug] ?? ctx.tokens.celebrationGold;
+    return ctx.tokens.accents[ctx.environment.family] ?? ctx.tokens.celebrationGold;
   }
 
   async init(ctx: SceneContext): Promise<void> {
@@ -67,7 +69,6 @@ export abstract class StageScene<W extends WorldCore> implements SceneModule {
     const pool = new CelebrationPool({
       seed: ctx.seed,
       name: `${this.stageName}Celebrations`,
-      burstSize: SCENES[ctx.environment.family]!.burst,
       ...this.poolOptions(ctx),
     });
     attachCelebrations(this.scene, pool);

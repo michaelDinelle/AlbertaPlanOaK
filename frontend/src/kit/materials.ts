@@ -352,6 +352,10 @@ export function oakMaterial(opts: OakMaterialOptions = {}): OakMaterial {
   return material;
 }
 
+export function sculptureMaterial(opts: OakMaterialOptions): OakMaterial {
+  return oakMaterial({ vertexColors: true, flatShading: true, toonSteps: 3, ...opts });
+}
+
 export interface EmissiveMaterialOptions {
   transparent?: boolean;
   opacity?: number;

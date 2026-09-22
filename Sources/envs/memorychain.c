@@ -57,15 +57,6 @@ void tmaze_observe(uint32_t instance, uint32_t seed, const uint32_t *words, cons
     tmaze_obs(&TMAZE_KNOBS[instance], words[0], words[1], words[2], obs);
 }
 
-void tmaze_pose(uint32_t instance, const uint32_t *words, const float *ctrl, float *pose) {
-    const tmazeKnobs *k = &TMAZE_KNOBS[instance];
-    poseZero(pose);
-    pose[0] = (float)words[0];
-    pose[1] = (float)(k->length - 1u);
-    pose[2] = (float)words[1];
-    pose[3] = ctrl[0];
-}
-
 void tmaze_oracle(uint32_t instance, uint32_t seed, uint32_t step, const uint32_t *words, const uint32_t *extra, const float *obs, float *ctrl, const float *shared) {
     (void)shared;
     (void)seed; (void)step; (void)extra; (void)obs;

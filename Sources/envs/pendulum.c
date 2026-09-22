@@ -52,12 +52,6 @@ void pendulum_observe(uint32_t instance, uint32_t seed, const uint32_t *words, c
     pendulum_obs(&PENDULUM_KNOBS[instance], wordFloat(words[0]), wordFloat(words[1]), obs);
 }
 
-void pendulum_pose(uint32_t instance, const uint32_t *words, const float *ctrl, float *pose) {
-    (void)instance;
-    poseZero(pose);
-    pose[0] = wordFloat(words[0]); pose[1] = wordFloat(words[1]); pose[2] = oak_clamp(2.0f * ctrl[0], -2.0f, 2.0f);
-}
-
 void pendulum_oracle(uint32_t instance, uint32_t seed, uint32_t step, const uint32_t *words, const uint32_t *extra, const float *obs, float *ctrl, const float *shared) {
     (void)shared;
     (void)instance;

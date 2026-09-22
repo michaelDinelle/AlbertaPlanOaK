@@ -1,20 +1,14 @@
 import * as THREE from 'three';
 import { mergeGeometries, mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
-import { applyFog, makeLightRig, type LightRig } from '@kit/lighting';
-import { buildAurora } from '@kit/aurora';
-import { makeMountains } from '@kit/mountains';
+import { applyFog, makeLightRig } from '@kit/lighting';
 import { leafSurface } from '@kit/leaves';
 import { oakMaterial, oakUniforms } from '@kit/materials';
-import { rngAt } from '@kit/rng';
-import { skyFromPalette, type SkyHandle } from '@kit/sky';
+import { skyFromPalette } from '@kit/sky';
 import type { Palette } from '@kit/tokens';
-import type { SceneContext } from '@kit/types';
 import type { VegetationHandle } from '@kit/vegetation';
-import { makeWorld, type WorldCore } from '@kit/world';
+import { makeWorld } from '@kit/world';
 import { makeContinuousSurface, makeSceneryBank, type ViewCoverage } from '@kit/view';
-import { makePrairieTerrain, prairieGroundHeight, prairiePlacement, prairieRidge } from './prairie';
-
-export { prairieHeight } from './prairie';
+import { makeAmbientParticles, type AmbientParticlesOptions } from '@kit/particles';
 
 export type Landscape = ReturnType<typeof makeLandscape>;
 
@@ -23,6 +17,7 @@ export function makeLandscape(scene: THREE.Scene, name: string, palette: Palette
   light?: Parameters<typeof makeLightRig>[1];
   fogExtent?: number;
   fogDensity?: number;
+  weather?: Omit<AmbientParticlesOptions, 'name'>;
 } = {}) {
   const world = makeWorld(name);
   const skyRadius = options.sky?.radius ?? 1;
@@ -31,6 +26,7 @@ export function makeLandscape(scene: THREE.Scene, name: string, palette: Palette
   const rig = world.own(makeLightRig(palette, { sunDir: sky.sunDirection, pointCount: 2, ...options.light }));
   world.add(rig.group);
   const fog = applyFog(scene, palette, options.fogExtent ?? 220);
+  if (options.weather) world.add(world.size(world.time(world.own(makeAmbientParticles({ ...options.weather, name: `${name}Weather` })))).points);
   const surfaces: ReturnType<typeof makeContinuousSurface>[] = [];
   const banks: { bank: ReturnType<typeof makeSceneryBank>; camera: boolean }[] = [];
   return {
@@ -58,8 +54,7 @@ export function makeLandscape(scene: THREE.Scene, name: string, palette: Palette
       for (const surface of surfaces) surface.setView(coverage);
       for (const entry of banks) entry.bank.setView(entry.camera ? { ...coverage, x: camera.position.x, z: camera.position.z } : coverage);
       for (const other of others) other.setView(coverage);
-      sky.mesh.position.copy(camera.position);
-      sky.mesh.scale.setScalar(coverage.far * 0.85 / skyRadius);
+      sky.fit(coverage.far);
       fog.density = options.fogDensity ?? 2.8 / coverage.far;
     },
   };
@@ -158,221 +153,6 @@ export function fieldstones() {
   return { geometry: fieldstoneGeometry(), material: new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 1 }) };
 }
 
-function hoodooGeometry(): THREE.BufferGeometry {
-  const height = (x: number, z: number) => 1.65 * Math.exp(-x * x / 8 - z * z / 2.5)
-    + 2.3 * Math.exp(-Math.pow((x + 1.1 + z * 0.22) / 0.9, 6) - Math.pow((z + 0.2) / 0.8, 6))
-    + 1.3 * Math.exp(-Math.pow((x - 1.4) / 0.8, 4) - Math.pow((z - 0.15) / 0.7, 4));
-  const bluff = new THREE.PlaneGeometry(9, 5, 36, 24);
-  bluff.rotateX(-Math.PI / 2);
-  const position = bluff.getAttribute('position');
-  for (let i = 0; i < position.count; i++) {
-    const x = position.getX(i), z = position.getZ(i);
-    const erosion = 0.06 * Math.sin(x * 15 + z * 3) * Math.sin(z * 11);
-    position.setY(i, height(x, z) * (1 + erosion) - 0.16);
-  }
-  bluff.computeVertexNormals();
-  const parts: THREE.BufferGeometry[] = [bluff.toNonIndexed()];
-  bluff.dispose();
-  for (const [x, z, width] of [[-1.1, -0.2, 1.9]] as const) {
-    const cap = new THREE.IcosahedronGeometry(1, 1);
-    const vertices = cap.getAttribute('position');
-    for (let i = 0; i < vertices.count; i++) {
-      const px = vertices.getX(i), py = vertices.getY(i), pz = vertices.getZ(i);
-      vertices.setXYZ(i, px * width * 0.62 * (1 + 0.15 * Math.sin(pz * 5 + x)), py * 0.22 + px * 0.06 + pz * 0.045, pz * 0.88 * (1 + 0.13 * Math.cos(px * 4 + x)));
-    }
-    cap.computeVertexNormals();
-    cap.translate(x, height(x, z) - 0.22, z);
-    parts.push(cap);
-  }
-  for (const [part, geometry] of parts.entries()) {
-    const vertices = geometry.getAttribute('position');
-    const colors = new Float32Array(vertices.count * 3);
-    const sand = new THREE.Color(0xdec9a9), shale = new THREE.Color(0x796656), color = new THREE.Color();
-    for (let i = 0; i < vertices.count; i++) {
-      const y = vertices.getY(i);
-      color.copy(sand).lerp(shale, part > 0 ? 0.65 : y < 1.1 ? 0.48 + 0.14 * Math.sin(y * 18) : 0.08);
-      colors.set([color.r, color.g, color.b], i * 3);
-    }
-    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-  }
-  const merged = mergeGeometries(parts), geometry = mergeVertices(merged);
-  merged.dispose();
-  for (const part of parts) part.dispose();
-  return geometry;
-}
-
-function makeHoodoos(world: ReturnType<typeof makeWorld>, terrainMaterial: THREE.MeshStandardMaterial, seed: number) {
-  const source = world.own(hoodooGeometry());
-  const material = world.own(terrainMaterial.clone());
-  material.vertexColors = true;
-  material.onBeforeCompile = terrainMaterial.onBeforeCompile;
-  const meshes = new Map<string, THREE.Mesh>();
-  let previous = '';
-  let pending: { key: string; x: number; z: number; rng: () => number }[] = [];
-  const build = ({ key, x, z, rng }: (typeof pending)[number]): void => {
-    const scale = 1.2 + rng() * 0.5, angle = (rng() - 0.5) * 0.4;
-    const geometry = source.clone().scale(scale, scale, scale).rotateY(angle);
-    const positions = geometry.getAttribute('position'), colors = geometry.getAttribute('color');
-    const exposure = new Float32Array(positions.count);
-    const anchor = prairieGroundHeight(x, z);
-    for (let i = 0; i < positions.count; i++) {
-      const px = x + positions.getX(i), pz = z + positions.getZ(i), py = positions.getY(i);
-      const ground = prairieGroundHeight(px, pz);
-      const y = py + THREE.MathUtils.lerp(ground, anchor, THREE.MathUtils.smoothstep(py / scale, 0.3, 1.8)) - 0.08;
-      positions.setXYZ(i, px, y, pz);
-      const blend = THREE.MathUtils.smoothstep(py / scale, 0, 0.9);
-      exposure[i] = THREE.MathUtils.lerp(prairieRidge(px, pz).exposure, 1, blend);
-      colors.setXYZ(i, THREE.MathUtils.lerp(1, colors.getX(i) * 2.2, blend), THREE.MathUtils.lerp(1, colors.getY(i) * 2.5, blend), THREE.MathUtils.lerp(1, colors.getZ(i) * 3.2, blend));
-    }
-    geometry.setAttribute('exposure', new THREE.BufferAttribute(exposure, 1));
-    geometry.computeVertexNormals();
-    geometry.computeBoundingSphere();
-    const mesh = world.add(new THREE.Mesh(geometry, material));
-    mesh.name = 'sandstoneHoodoos';
-    mesh.castShadow = mesh.receiveShadow = true;
-    meshes.set(key, mesh);
-  };
-  return world.own({
-    setView(coverage: ViewCoverage) {
-      const cx = Math.floor(coverage.x / 64), cz = Math.floor(coverage.z / 96), center = `${cx},${cz}`;
-      if (center !== previous) {
-        previous = center;
-        const active = new Set<string>();
-        pending = [];
-        for (let tx = cx - 6; tx <= cx + 6; tx++) for (let tz = cz - 5; tz <= cz + 5; tz++) {
-          const rng = rngAt(tx, tz, seed), x = tx * 64 + (rng() - 0.5) * 32;
-          const ridge = prairieRidge(x, (tz + 0.5) * 96);
-          const z = Math.sign(tz + 0.5) * (ridge.center - ridge.width * 0.57);
-          if (tz !== Math.floor(z / 96) || prairieRidge(x, z).exposure < 0.35) continue;
-          const key = `${tx},${tz}`;
-          active.add(key);
-          if (!meshes.has(key)) pending.push({ key, x, z, rng });
-        }
-        pending.sort((a, b) => (b.x - coverage.x) ** 2 + (b.z - coverage.z) ** 2 - (a.x - coverage.x) ** 2 - (a.z - coverage.z) ** 2);
-        for (const [key, mesh] of meshes) if (!active.has(key)) {
-          mesh.geometry.dispose();
-          mesh.removeFromParent();
-          meshes.delete(key);
-        }
-      }
-      const start = performance.now();
-      while (pending.length > 0 && performance.now() - start < 2) build(pending.pop()!);
-    },
-    dispose() {
-      for (const mesh of meshes.values()) { mesh.geometry.dispose(); mesh.removeFromParent(); }
-      meshes.clear();
-    },
-  });
-}
-
-export interface WorldHandle extends WorldCore {
-  sky: SkyHandle;
-  rig: LightRig;
-  setView(coverage: ViewCoverage, camera: THREE.Camera): void;
-  setShadowTarget(x: number): void;
-}
-
-export async function buildWorld(ctx: SceneContext, scene: THREE.Scene): Promise<WorldHandle> {
-  const land = makeLandscape(scene, 'albertaPrairieSunrise', ctx.tokens.palettes.dusk, 'dawn', {
-    sky: { topSpread: 0.18, sunSize: 0.035, sunGlow: 0.35, sunDir: [-0.62, 0.28, -0.73], stars: { intensity: 3, density: 180, threshold: 0.976, size: 0.08, color: 0xe4e4ff } }, light: { pointCount: 0 }, fogDensity: 0.00022,
-  });
-  const { world, sky, rig, fog } = land;
-  sky.setColors(0x352d65, 0xff9fad, 0xe9ae9c);
-  world.time(world.own(buildAurora(sky, 0x95ddd0, 2.6))).setGain(1.5);
-  const terrain = makePrairieTerrain(world);
-  const mountains = await makeMountains(world, ctx.tokens.palettes.dusk);
-  mountains.name = 'rockyMountainRanges';
-  rig.sun.color.set(0xffd2ad);
-  rig.sun.intensity = 2.5;
-  rig.hemi.color.set(0xd7d8ef);
-  rig.hemi.groundColor.set(0xc2a074);
-  rig.hemi.intensity = 2.1;
-  fog.color.set(0xb8a2b6);
-  const hoodoos = makeHoodoos(world, terrain.material, ctx.seed);
-  land.scatter({
-    name: 'prairieBunchgrass', seed: ctx.seed, tileSize: 28, perTile: 448,
-    ...prairieGrass(), colorA: 0xc1c895, colorB: 0xf1dfa9,
-    fill(tx, tz, rng, write) {
-      for (let i = 0; i < 448; i++) {
-        const x = (tx + rng()) * 28, z = (tz + rng()) * 28;
-        if (Math.abs(z) < 0.9 || prairieRidge(x, z).exposure > 0.16) continue;
-        write(x, prairieGroundHeight(x, z) - 0.01, z, rng() * Math.PI * 2, 0.95 + rng() * 0.7, 0.8 + rng() * 0.4, rng());
-      }
-    },
-  }, true);
-  land.scatter({
-    name: 'aspenGroves', seed: ctx.seed, tileSize: 48, perTile: 5,
-    ...aspenTree(world),
-    colorA: 0xd4d3af, colorB: 0xffffff, castShadow: true,
-    fill(tx, tz, rng, write) {
-      const x = tx * 48 + 10 + rng() * 26, z = tz * 48 + 9 + rng() * 28;
-      if (Math.abs(z) < 7 || prairieRidge(x, z).exposure > 0.06 || Math.sin(x * 0.047 + z * 0.027) < -0.1) return;
-      for (let i = 0; i < 5; i++) {
-        const px = x + Math.cos(i * 2.4) * Math.sqrt(i) * 1.5, pz = z + Math.sin(i * 2.4) * Math.sqrt(i) * 1.5;
-        write(px, prairieGroundHeight(px, pz) - 0.08, pz, rng() * 6.28, 0.85 + rng() * 0.6, 0.9 + rng() * 0.25, rng());
-      }
-    },
-  });
-  land.scatter({
-    name: 'prairieFieldstones', seed: ctx.seed, tileSize: 20, perTile: 4,
-    ...fieldstones(),
-    colorA: 0xd7d1c7, colorB: 0xffffff,
-    fill(tx, tz, rng, write) {
-      const x = tx * 20 + 4 + rng() * 12, z = tz * 20 + 4 + rng() * 12;
-      if (Math.abs(z) < 2) return;
-      for (let i = 0; i < 4; i++) {
-        const px = x + rng() * 2.4, pz = z + rng() * 1.8;
-        const scale = 1.3 + rng() * 1.6;
-        const place = prairiePlacement(px, pz, scale * 0.4);
-        write(px, place.height - 0.04 * scale, pz, rng() * 6.28, scale, 0.7 + rng() * 0.4, rng(), place.normal);
-      }
-    },
-  });
-  const shadowRight = new THREE.Vector3().crossVectors(new THREE.Vector3(0, 1, 0), rig.sunDirection).normalize();
-  const shadowUp = new THREE.Vector3().crossVectors(rig.sunDirection, shadowRight).normalize();
-  const shadowCenter = new THREE.Vector3();
-  return world.seal<WorldHandle>({
-    sky, rig,
-    setView(coverage, camera) {
-      land.setView(coverage, camera);
-      terrain.setView(coverage, camera);
-      hoodoos.setView(coverage);
-      mountains.position.x = coverage.x;
-    },
-    setShadowTarget(x) {
-      shadowCenter.set(x, 0.65, 0);
-      const texel = 14 / rig.sun.shadow.mapSize.x;
-      const right = shadowCenter.dot(shadowRight);
-      const up = shadowCenter.dot(shadowUp);
-      shadowCenter.addScaledVector(shadowRight, Math.round(right / texel) * texel - right);
-      shadowCenter.addScaledVector(shadowUp, Math.round(up / texel) * texel - up);
-      rig.setShadowFocus(shadowCenter, 7);
-    },
-  });
-}
-
-export const WORLD_NOISE = `
-float worldHash(vec2 p, uint seed) {
-  uint h = seed ^ 0x9e3779b9u;
-  h = (h ^ uint(p.x)) * 0x85ebca6bu;
-  h ^= h >> 13u;
-  h = (h ^ uint(p.y)) * 0xc2b2ae35u;
-  h ^= h >> 16u;
-  h *= 0x27d4eb2fu;
-  h ^= h >> 15u;
-  return float(h) / 4294967296.0;
-}
-float worldNoise(vec2 p, float period, uint seed) {
-  vec2 cell = floor(p);
-  vec2 f = fract(p);
-  f = f * f * (3.0 - 2.0 * f);
-  vec2 a = mod(cell, period);
-  vec2 b = mod(cell + 1.0, period);
-  float value = mix(mix(worldHash(a, seed), worldHash(vec2(b.x, a.y), seed), f.x), mix(worldHash(vec2(a.x, b.y), seed), worldHash(b, seed), f.x), f.y);
-  return value;
-}
-`;
-
 export function makeSceneTerrain(
   options: Parameters<typeof makeContinuousSurface>[0],
   sampleHeight: (x: number, z: number) => number,
@@ -386,8 +166,6 @@ export function makeSceneTerrain(
   surface.material.onBeforeCompile = (shader, renderer) => {
     finish.onBeforeCompile.call(finish, shader, renderer);
     compile.call(surface.material, shader, renderer);
-    shader.vertexShader = shader.vertexShader.replace('float landHash', `${WORLD_NOISE}\nfloat landHash`);
-    shader.fragmentShader = shader.fragmentShader.replace('float landHash', `${WORLD_NOISE}\nfloat landHash`);
   };
   surface.material.customProgramCacheKey = () => `${key}|${finish.customProgramCacheKey()}|world-noise`;
   return {

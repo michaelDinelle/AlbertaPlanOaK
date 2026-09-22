@@ -4,18 +4,12 @@ import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
-import type { SceneSize } from './types';
+import type { FogRecipe, ScenePost, SceneSize } from './types';
 import { TOKENS } from './tokens';
-import type { FogRecipe } from '../scenes/table';
 import { prepareInstances } from './instances';
-export const MSAA_SAMPLES = 4;
+export const MSAA_SAMPLES = 2;
 
 const BLOOM_THRESHOLD = 0.85;
-
-export interface ScenePost {
-  bloom: number;
-  fog: FogRecipe;
-}
 
 function resolveFog(recipe: FogRecipe): number {
   const color = new THREE.Color(TOKENS.palettes[recipe.from[0]][recipe.from[1]]);
@@ -33,7 +27,7 @@ export interface ComposerHandle {
   dispose(): void;
 }
 
-export const BLOOM_RESOLUTION_SCALE = 0.5;
+export const BLOOM_RESOLUTION_SCALE = 0.25;
 
 export function pulsedBloomStrength(base: number, t01: number): number {
   const t = t01 < 0 ? 0 : t01 > 1 ? 1 : t01;

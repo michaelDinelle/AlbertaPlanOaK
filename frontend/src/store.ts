@@ -1,21 +1,16 @@
 import { useSyncExternalStore } from 'react';
 import type { EnvDescriptor } from './data/envs';
 import type { Policy, Recording, RunIndexEntry } from './data/layout';
-import type { Tick } from './theater/recording';
 
 export type Panel = 'reward' | 'standings' | 'health';
 
 export interface StageMeta {
-  status: 'empty' | 'loading' | 'buffering' | 'ready' | 'unsupported' | 'error';
+  status: 'empty' | 'loading' | 'buffering' | 'ready' | 'error';
   note: string | null;
-  frameCount: number;
   totalSteps: number;
-  requestedStep: number;
-  ticks: Tick[];
-  identical: boolean | null;
 }
 
-export const EMPTY_STAGE: StageMeta = { status: 'empty', note: null, frameCount: 1, totalSteps: 0, requestedStep: 0, ticks: [], identical: null };
+export const EMPTY_STAGE: StageMeta = { status: 'empty', note: null, totalSteps: 0 };
 
 export interface State {
   runs: RunIndexEntry[] | null;

@@ -8,15 +8,16 @@ export interface ScentParameters {
 export interface EnvDescriptor {
   envId: string;
   family: string;
+  category: string;
   instance: number;
   obs: number;
   actions: number;
   box: number;
   seedStart: number;
   seedEnd: number;
-  pose: number;
-  replay: boolean;
+  words: number;
   parameters: Record<string, unknown>;
+  constants: Record<string, number | number[]>;
   grid?: { w: number; h: number; walls: number[] };
   scent?: ScentParameters;
 }
@@ -24,6 +25,18 @@ export interface EnvDescriptor {
 export function parameter(env: EnvDescriptor, key: string): number {
   const value = env.parameters[key];
   if (typeof value !== 'number' || !Number.isFinite(value)) throw new Error(`${env.envId} lacks parameter ${key}`);
+  return value;
+}
+
+export function constant(env: EnvDescriptor, key: string): number {
+  const value = env.constants[key];
+  if (typeof value !== 'number' || !Number.isFinite(value)) throw new Error(`${env.envId} lacks constant ${key}`);
+  return value;
+}
+
+export function constantList(env: EnvDescriptor, key: string): number[] {
+  const value = env.constants[key];
+  if (!Array.isArray(value)) throw new Error(`${env.envId} lacks constant list ${key}`);
   return value;
 }
 
@@ -42,6 +55,7 @@ export function configurationLabel(env: EnvDescriptor, family: readonly EnvDescr
 export interface EnvFamily {
   id: string;
   name: string;
+  category: string;
   configurations: EnvDescriptor[];
 }
 
@@ -53,8 +67,7 @@ export function recordedFamilies(catalog: readonly EnvDescriptor[], ids: readonl
     if (env === undefined) throw new Error(`Recording configuration ${id} is missing from the catalog`);
     let family = groups.get(env.family);
     if (family === undefined) {
-      const name = { deepsea: 'DeepSea', tmaze: 'TMaze', hall: 'FourRoomsHall', walk: 'Chain', jbw: 'JellyBeanWorld', blocking: 'BlockingMaze' }[env.family] ?? env.envId.replace(/-cont-v0$/, '').split('-')[0]!;
-      family = { id: env.family, name, configurations: [] };
+      family = { id: env.family, name: env.envId.replace(/-cont-v0$/, '').split('-')[0]!, category: env.category, configurations: [] };
       groups.set(env.family, family);
     }
     family.configurations.push(env);

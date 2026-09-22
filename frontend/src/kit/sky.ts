@@ -188,7 +188,8 @@ export function makeGradientSky(opts: GradientSkyOptions) {
   const geometry = new THREE.IcosahedronGeometry(1, 2);
   const mesh = new THREE.Mesh(geometry, material);
   mesh.name = opts.name ?? 'oakSky';
-  mesh.scale.setScalar(opts.radius ?? 400);
+  const radius = opts.radius ?? 400;
+  mesh.scale.setScalar(radius);
   mesh.renderOrder = -1000;
   mesh.frustumCulled = false;
   mesh.matrixAutoUpdate = true;
@@ -203,6 +204,7 @@ export function makeGradientSky(opts: GradientSkyOptions) {
     uniforms,
     sunDirection,
     setSunDirection(x: number, y: number, z: number) { toVec3([x, y, z], sunDirection); },
+    fit(far: number) { mesh.scale.setScalar(far * 0.85 / radius); },
     setColors(top: THREE.ColorRepresentation, horizon: THREE.ColorRepresentation, bottom: THREE.ColorRepresentation) {
       uniforms.uTop.value.set(top);
       uniforms.uHorizon.value.set(horizon);

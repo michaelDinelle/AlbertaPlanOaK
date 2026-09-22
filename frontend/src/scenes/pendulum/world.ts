@@ -17,17 +17,18 @@ import {
 import { mergeColoredParts, type ColoredPart } from '@kit/parts';
 import { streamFor } from '@kit/rng';
 import type { SkyHandle } from '@kit/sky';
-import { makeLandscape, makeSceneTerrain, extendWater, extendVegetation, WORLD_NOISE } from '@kit/landscape';
+import { makeLandscape, makeSceneTerrain, extendWater, extendVegetation } from '@kit/landscape';
+import { makeHeightField, WORLD_NOISE } from '@kit/heightfield';
 import { plantInstances } from '@kit/vegetation';
 import type { ViewCoverage } from '@kit/view';
 import { radialSprite } from '@kit/textures';
 import { TOKENS, type Palette } from '@kit/tokens';
 import type { SceneContext } from '@kit/types';
-import { valueNoise2 } from '@kit/textures';
 import { excludeAny, scatterGrass, scatterRocks, type ExcludeFn } from '@kit/vegetation';
 import { makeWater, type WaterHandle } from '@kit/water';
 import type { Disposable, WorldBuilder, WorldCore } from '@kit/world';
 import type { EnvGeometry } from '@sim/types';
+import { parameter } from '../../data/envs';
 import {
   HANGER_PLATE_DROP,
   HANGER_PLATE_H,
@@ -75,17 +76,21 @@ export function pivotOf(geometry: EnvGeometry): readonly [number, number, number
   return pivot;
 }
 
-export function makePondBed(seed: number): (x: number, z: number) => number {
+export function pondFields(seed: number) {
+  return {
+    relief: makeHeightField({ octaves: [{ wavelength: 110, amplitude: 0.5, seed: seed ^ 0x77 }, { wavelength: 42, amplitude: 0.22, seed: seed ^ 0x78 }] }),
+    grain: makeHeightField({ octaves: [{ wavelength: 1.39, amplitude: 0.015, seed }, { wavelength: 0.49, amplitude: 0.0045, seed: seed ^ 0x4d2f13 }] }),
+  };
+}
+
+export function makePondBed(fields: ReturnType<typeof pondFields>): (x: number, z: number) => number {
   return (x, z) => {
     const r = Math.hypot(x / POND_RX, z / POND_RZ);
     const bowl = 1 - smoothstep01(r);
     const bank = smoothstep01((r - 1) / 1.25);
-    const n1 = valueNoise2(x * 0.72 + 4.1, z * 0.72 + 2.3, 64, seed) - 0.5;
-    const n2 = valueNoise2(x * 2.05 + 9.7, z * 2.05 + 1.1, 64, seed ^ 0x4d2f13) - 0.5;
     const shore = 1 - smoothstep01(Math.abs(r - 1) / 0.5);
     const noiseW = 0.22 + 1.35 * bank + 0.75 * shore;
-    const relief = bank * (Math.sin(x * 0.075 + Math.sin(z * 0.04)) * 0.22 + Math.sin(z * 0.056) * Math.cos(x * 0.036) * 0.28);
-    const ground = BANK_Y - BOWL_DEPTH * bowl + BANK_RISE * bank + relief + (n1 * 0.03 + n2 * 0.009) * noiseW;
+    const ground = BANK_Y - BOWL_DEPTH * bowl + BANK_RISE * bank + bank * fields.relief.heightAt(x, z) + fields.grain.heightAt(x, z) * noiseW;
     const reach = smoothstep01((Math.abs(z) - 6) / 84);
     const channel = x - Math.sin(z * 0.058) * 2.5 - Math.sin(z * 0.018) * 3 - Math.sin(z * 0.008) * 8 * reach;
     const width = 1.45 + 0.45 * (0.5 + 0.5 * Math.cos(z * 0.047)) + reach * (5.5 + Math.abs(z) * 0.035);
@@ -153,16 +158,19 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   rig.hemi.groundColor.set(0x5b6872);
   rig.hemi.intensity = 1.05;
 
-  const bed = makePondBed(ctx.seed);
+  const fields = pondFields(ctx.seed);
+  const bed = makePondBed(fields);
+  const slip = parameter(ctx.environment, 'slip') > 0;
   const bedHeight = `
 float r = length(p / vec2(${POND_RX}, ${POND_RZ}));
 float bowl = 1.0 - smoothstep(0.0, 1.0, r);
 float bank = smoothstep(1.0, 2.25, r);
-float n1 = worldNoise(p * 0.72 + vec2(4.1, 2.3), 64.0, ${ctx.seed >>> 0}u) - 0.5;
-float n2 = worldNoise(p * 2.05 + vec2(9.7, 1.1), 64.0, ${(ctx.seed ^ 0x4d2f13) >>> 0}u) - 0.5;
 float shore = 1.0 - smoothstep(0.0, 0.5, abs(r - 1.0));
-float relief = bank * (sin(p.x * 0.075 + sin(p.y * 0.04)) * 0.22 + sin(p.y * 0.056) * cos(p.x * 0.036) * 0.28);
-float ground = ${BANK_Y} - ${BOWL_DEPTH} * bowl + ${BANK_RISE} * bank + relief + (n1 * 0.03 + n2 * 0.009) * (0.22 + 1.35 * bank + 0.75 * shore);
+float relief;
+{ ${fields.relief.glsl.replace('return h;', 'relief = h;')} }
+float grain;
+{ ${fields.grain.glsl.replace('return h;', 'grain = h;')} }
+float ground = ${BANK_Y} - ${BOWL_DEPTH} * bowl + ${BANK_RISE} * bank + bank * relief + grain * (0.22 + 1.35 * bank + 0.75 * shore);
 float reach = smoothstep(6.0, 90.0, abs(p.y));
 float channel = p.x - sin(p.y * 0.058) * 2.5 - sin(p.y * 0.018) * 3.0 - sin(p.y * 0.008) * 8.0 * reach;
 float width = 1.45 + 0.45 * (0.5 + 0.5 * cos(p.y * 0.047)) + reach * (5.5 + abs(p.y) * 0.035);
@@ -170,7 +178,7 @@ float bankWidth = 1.4 + reach * (4.5 + abs(p.y) * 0.025);
 float inlet = smoothstep(1.25, 4.45, abs(p.y)) * (1.0 - smoothstep(width, width + bankWidth, abs(channel)));
 return mix(ground, ${WATER_LEVEL - 0.65}, inlet);
 `;
-  const terrain = makeSceneTerrain({
+  const terrain = makeSceneTerrain({ follow: false,
     name: 'pondBed', seed: ctx.seed, colorA: bedSilt, colorB: bedDeep, segments: 160, height: bedHeight,
     detail: `float submerged = 1.0 - smoothstep(${WATER_LEVEL - 0.55}, ${WATER_LEVEL}, p.y); float dry = smoothstep(${WATER_LEVEL}, ${WATER_LEVEL + 0.5}, p.y); color = mix(mix(uLandA, uLandB, submerged), vec3(${bankMoss.r}, ${bankMoss.g}, ${bankMoss.b}), dry * 0.85);`,
   }, bed, { rimColor: palette.hemiSky, rimStrength: 0.18, toonSteps: 3, toonSoftness: 0.34, toonFloor: 0.18 });
@@ -260,9 +268,11 @@ return mix(ground, ${WATER_LEVEL - 0.65}, inlet);
   const propMaterial: OakMaterial = oakMaterial({
     vertexColors: true,
     flatShading: true,
-    roughness: 0.88,
-    rimColor: blendTokens(palette.sun, palette.hemiSky, 0.45),
-    rimStrength: 0.36,
+    roughness: slip ? 0.35 : 0.88,
+    rimColor: slip ? 0xcdf4ff : blendTokens(palette.sun, palette.hemiSky, 0.45),
+    rimStrength: slip ? 0.85 : 0.36,
+    rimPower: slip ? 2.2 : 3,
+    metalness: slip ? 0.1 : 0,
     toonSteps: 3,
     toonSoftness: 0.32,
     toonFloor: 0.18,
@@ -281,7 +291,7 @@ return mix(ground, ${WATER_LEVEL - 0.65}, inlet);
   const deepCool = blendTokens(palette.skyTop, palette.fog, 0.35);
   const deepWarm = blendTokens(deepCool, accent, 0.006);
   const pond = makeWaterSurface(palette, sky.sunDirection, accent);
-  pond.handle.material.fragmentShader = `${WORLD_NOISE}\nfloat moonlitPondBed(vec2 p) {${bedHeight}}\n${pond.handle.material.fragmentShader}`;
+  pond.handle.material.fragmentShader = `${WORLD_NOISE}\nfloat moonlitPondBed(vec2 p) {\nfloat landSpacing = 0.0;\n${bedHeight}}\n${pond.handle.material.fragmentShader}`;
   w.add(pond.handle.mesh);
   w.own(pond.handle);
   const liveShallow = new THREE.Color();
@@ -373,7 +383,7 @@ return mix(ground, ${WATER_LEVEL - 0.65}, inlet);
   }));
   for (const mesh of [...meadow.meshes, ...stones.meshes]) w.add(mesh);
 
-  const fireflyColor = blendTokens(accent, TOKENS.accents['t-maze'] ?? accent, 0.42);
+  const fireflyColor = blendTokens(accent, TOKENS.accents['tmaze'] ?? accent, 0.42);
   const fireflies: AmbientParticlesHandle = makeAmbientParticles({
     preset: 'fireflies',
     count: 260,
@@ -661,7 +671,7 @@ function buildLotusPads(
   geometry.rotateX(-Math.PI / 2);
   geometry.name = 'lotusPad';
   const material = oakMaterial({
-    color: blendTokens(palette.groundA, TOKENS.accents['four-rooms'] ?? palette.groundB, 0.3),
+    color: blendTokens(palette.groundA, TOKENS.accents['hall'] ?? palette.groundB, 0.3),
     flatShading: true,
     side: THREE.DoubleSide,
     roughness: 0.72,

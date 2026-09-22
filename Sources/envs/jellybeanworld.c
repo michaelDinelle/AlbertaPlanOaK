@@ -285,16 +285,6 @@ void jbw_observe(uint32_t instance, uint32_t seed, const uint32_t *words, const 
     jbw_observeWords(&JBW_KNOBS[instance], seed, words, extra + 1, extra[0], step, obs, shared);
 }
 
-void jbw_pose(uint32_t instance, const uint32_t *words, const float *ctrl, float *pose) {
-    (void)instance;
-    (void)ctrl;
-    poseZero(pose);
-    pose[0] = (float)(int)words[0];
-    pose[1] = (float)(int)words[1];
-    pose[2] = (float)words[2];
-    for (uint32_t i = 0u; i < 4u; i++) pose[3u + i] = (float)words[4u + i];
-}
-
 uint32_t jbw_sharedWords(void) { return 2u * JBW_RESPONSE_WORDS; }
 
 void jbw_buildShared(float *shared) {

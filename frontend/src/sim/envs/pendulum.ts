@@ -1,4 +1,5 @@
 import { NO_EVENTS, type EnvDecoder, type EnvFrame, type EnvGeometry, type SimEvent } from '../types';
+import { wordFloat } from '../words';
 
 export const PD_MAX_SPEED = 8;
 export const PD_MAX_TORQUE = 2;
@@ -25,6 +26,9 @@ const GEOMETRY: EnvGeometry = Object.freeze({
 });
 
 export const pendulumDecoder: EnvDecoder = {
+  slots: 3,
+  wrap: 0b1,
+  decode(frame, out) { out[PENDULUM_TH] = wordFloat(frame.words[0]!); out[PENDULUM_THDOT] = wordFloat(frame.words[1]!); out[PENDULUM_TORQUE] = Math.max(-PD_MAX_TORQUE, Math.min(PD_MAX_TORQUE, 2 * frame.actions[0]!)); },
   geometry(): EnvGeometry {
     return GEOMETRY;
   },

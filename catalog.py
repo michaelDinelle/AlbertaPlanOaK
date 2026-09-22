@@ -15,7 +15,8 @@ def emit(text):
 
 def generate():
     blocks = []
-    families = set(re.findall(r'^    F\((\w+)\)', (ROOT / 'Sources/env.c').read_text(), re.M))
+    families = set(re.findall(r'^    F\((\w+), \w+\)', (ROOT / 'Sources/env.c').read_text(), re.M))
+    number = re.compile(r'^-?\d+(?:\.\d+)?(?:[eE]-?\d+)?[uUfF]?$')
     for path in sorted((ROOT / 'Sources/envs').glob('*.c')):
         source = path.read_text()
         family = re.search(r'void (\w+)_reset\(', source).group(1)
@@ -49,6 +50,14 @@ def generate():
         if family == 'jbw':
             period = re.search(r'step / (\d+u)', source)[1]
             lines += [emit(',\"polarityPeriod\":'), f'fprintf(out, \"%u\", {period});']
+        lines.append(emit('}'))
+        lines.append(emit(',"constants":{'))
+        constants = [key for key, value in defines if number.match(value.strip())]
+        for i, key in enumerate(constants):
+            lines += [emit((',' if i else '') + literal(key) + ':'), f'fprintf(out, "%.9g", (double)({key}));']
+        for declaration, name, count in re.findall(r'^(static const (?:int|uint32_t|float) (\w+)\[(\w+)\] = \{[^;]*\};)', source, re.M | re.S):
+            lines += [declaration, emit((',' if constants else '') + literal(name) + ':['), f'for (uint32_t j = 0u; j < (uint32_t)({count}); j++) fprintf(out, "%s%.9g", j ? "," : "", (double){name}[j]);', emit(']')]
+            constants.append(name)
         lines.append(emit('}'))
         if family == 'hall':
             walls = re.search(r'static const GridWalls HALL_WALLS = .*?;', source)[0]

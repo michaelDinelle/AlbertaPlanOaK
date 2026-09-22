@@ -3,7 +3,7 @@ import { GPUComputationRenderer } from 'three/addons/misc/GPUComputationRenderer
 import type { WaterHandle } from './water';
 
 export function simulateWater(renderer: THREE.WebGLRenderer, water: WaterHandle, bedHeight: (x: number, z: number) => number, bounds: THREE.Vector4, flow = new THREE.Vector2()) {
-  const resolution = 256, gravity = 9.81;
+  const resolution = 128, gravity = 9.81;
   const dx = bounds.z / resolution, dz = bounds.w / resolution;
   const gpu = new GPUComputationRenderer(resolution, resolution, renderer);
   gpu.setDataType(THREE.HalfFloatType);

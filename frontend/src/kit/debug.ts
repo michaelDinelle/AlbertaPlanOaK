@@ -26,7 +26,8 @@ export interface GroundTruthOptions {
   goalCell?(state: FrameState): GridCell | null;
   keyCells?(state: FrameState): readonly GridCell[] | null;
   doorStates?(state: FrameState): readonly boolean[] | null;
-  agentPos?(state: FrameState): readonly [number, number, number] | null;
+  agentPos?(state: FrameState): THREE.Vector3Like | null;
+  floor?: readonly [number, number];
   profileRange?: readonly [number, number];
   maxKeys?: number;
   frame?(state: FrameState): DebugFrame | null;
@@ -38,7 +39,7 @@ export interface DebugFrame {
   originX: number;
   originY: number;
   originZ: number;
-  agent: Vec3Tuple;
+  agent: THREE.Vector3Like;
   cone: Float32Array;
   coneCount: number;
 }
@@ -237,6 +238,10 @@ export class GroundTruthOverlay {
       this.buildMarkers(main, goal);
     }
     if (this.grid) this.buildGrid(this.grid, main, wall, goal);
+    else if (opts.floor) {
+      this.buildLattice(opts.floor[0], opts.floor[1], wall);
+      if (!this.anchored) this.buildMarkers(main, goal);
+    }
     if (geometry.classic) this.buildClassic(main, goal);
 
     applyDebugLayer(this.group);
@@ -292,7 +297,8 @@ export class GroundTruthOverlay {
 
   setState(state: FrameState): void {
     if (this.anchored) this.updateFrame(state);
-    if (this.grid) this.updateGrid(state, this.grid);
+    else if (this.grid) this.updateGrid(state, this.grid);
+    else if (this.opts.floor) this.updateCross(null, null, this.opts.agentPos?.(state) ?? null);
     if (this.classicMarker) this.updateClassic(state);
   }
 
@@ -312,25 +318,7 @@ export class GroundTruthOverlay {
     goalMat: THREE.LineBasicMaterial,
   ): void {
     const y = 0.02;
-    const lattice = segments(grid.w + 1 + grid.h + 1, wallMat, 'oakDebugLattice');
-    {
-      const p = lattice.positions;
-      let o = 0;
-      const x0 = -grid.w / 2;
-      const z0 = -grid.h / 2;
-      for (let i = 0; i <= grid.w; i++) {
-        const x = x0 + i;
-        p[o++] = x; p[o++] = y; p[o++] = z0;
-        p[o++] = x; p[o++] = y; p[o++] = z0 + grid.h;
-      }
-      for (let j = 0; j <= grid.h; j++) {
-        const z = z0 + j;
-        p[o++] = x0; p[o++] = y; p[o++] = z;
-        p[o++] = x0 + grid.w; p[o++] = y; p[o++] = z;
-      }
-      lattice.attr.needsUpdate = true;
-    }
-    this.add(lattice.object);
+    this.buildLattice(grid.w, grid.h, wallMat);
 
     let walls = 0;
     for (let i = 0; i < grid.w * grid.h; i++) if ((grid.walls[i] ?? 0) !== 0) walls++;
@@ -392,6 +380,29 @@ export class GroundTruthOverlay {
     this.buildMarkers(main, goalMat);
   }
 
+  private buildLattice(width: number, height: number, material: THREE.LineBasicMaterial): void {
+    const w = Math.ceil(width);
+    const h = Math.ceil(height);
+    const y = 0.02;
+    const lattice = segments(w + 1 + h + 1, material, 'oakDebugLattice');
+    const p = lattice.positions;
+    let o = 0;
+    const x0 = -w / 2;
+    const z0 = -h / 2;
+    for (let i = 0; i <= w; i++) {
+      const x = x0 + i;
+      p[o++] = x; p[o++] = y; p[o++] = z0;
+      p[o++] = x; p[o++] = y; p[o++] = z0 + h;
+    }
+    for (let j = 0; j <= h; j++) {
+      const z = z0 + j;
+      p[o++] = x0; p[o++] = y; p[o++] = z;
+      p[o++] = x0 + w; p[o++] = y; p[o++] = z;
+    }
+    lattice.attr.needsUpdate = true;
+    this.add(lattice.object);
+  }
+
   private buildMarkers(main: THREE.LineBasicMaterial, goalMat: THREE.LineBasicMaterial): void {
     const cross = segments(3, main, 'oakDebugAgentCross');
     this.agentCross = cross.object;
@@ -418,22 +429,22 @@ export class GroundTruthOverlay {
     this.add(doors.object);
   }
 
-  private updateCross(grid: GridGeometry | null, cell: GridCell | null, at: Vec3Tuple | null): void {
+  private updateCross(grid: GridGeometry | null, cell: GridCell | null, at: THREE.Vector3Like | null): void {
     const cp = this.agentCrossPos;
     if (!cp || !this.agentCross || !this.agentCrossAttr) return;
-    if (grid && !cell) {
+    if (grid ? !cell : !at) {
       this.agentCross.visible = false;
       this.agentCrossAttr.needsUpdate = true;
       return;
     }
-    let cx = at ? at[0] : 0;
-    let cz = at ? at[2] : 0;
+    let cx = at ? at.x : 0;
+    let cz = at ? at.z : 0;
     if (grid && cell) {
       cellToWorld(cell.x, cell.y, grid, this.scratch);
       cx = this.scratch[0];
       cz = this.scratch[2];
     }
-    const y = (at ? at[1] : 0) + 0.03;
+    const y = (at ? at.y : 0) + 0.03;
     const r = 0.38;
     let o = 0;
     cp[o++] = cx - r; cp[o++] = y; cp[o++] = cz - r;
@@ -596,10 +607,10 @@ export class GroundTruthOverlay {
     }
     const r = 0.14;
     let o = 0;
-    p[o++] = pos[0] - r; p[o++] = pos[1]; p[o++] = pos[2];
-    p[o++] = pos[0] + r; p[o++] = pos[1]; p[o++] = pos[2];
-    p[o++] = pos[0]; p[o++] = pos[1] - r; p[o++] = pos[2];
-    p[o++] = pos[0]; p[o++] = pos[1] + r; p[o++] = pos[2];
+    p[o++] = pos.x - r; p[o++] = pos.y; p[o++] = pos.z;
+    p[o++] = pos.x + r; p[o++] = pos.y; p[o++] = pos.z;
+    p[o++] = pos.x; p[o++] = pos.y - r; p[o++] = pos.z;
+    p[o++] = pos.x; p[o++] = pos.y + r; p[o++] = pos.z;
     this.classicMarker.visible = true;
     this.classicMarkerAttr.needsUpdate = true;
   }

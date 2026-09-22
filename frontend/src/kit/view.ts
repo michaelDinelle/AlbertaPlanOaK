@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { WORLD_NOISE } from './heightfield';
 import { oakUniforms } from './materials';
 import { DEFAULT_ORBIT_LIMITS, type OrbitRig, type OrbitRigOptions, type OrbitState } from './rigs';
 import { makeTileBank, type TileBankOptions } from './tiles';
@@ -99,7 +100,7 @@ export function trackPose(frame: FrameUpdate, slot: number): number {
   let sum = 0, weight = 0;
   for (let i = centre - half; i <= centre + half + 1; i++) {
     const w = 1 + Math.cos(Math.PI * Math.min(1, Math.abs(i - frame.position) / (half + 1)));
-    sum += w * (frame.frameAt(Math.min(hi, Math.max(lo, i))).pose[slot] ?? 0);
+    sum += w * (frame.poseAt(Math.min(hi, Math.max(lo, i)))[slot] ?? 0);
     weight += w;
   }
   return sum / weight;
@@ -117,6 +118,8 @@ export interface ContinuousSurfaceOptions {
   emissive?: THREE.ColorRepresentation;
   segments?: number;
   radius?: number;
+  follow?: boolean;
+  anchor?: readonly [number, number];
 }
 
 export interface ContinuousSurface {
@@ -128,6 +131,7 @@ export interface ContinuousSurface {
 }
 
 const SURFACE_NOISE = `
+${WORLD_NOISE}
 float landHash(vec2 p) {
   return fract(sin(dot(p, vec2(127.1, 311.7)) + uLandSeed) * 43758.5453123);
 }
@@ -144,9 +148,11 @@ export function makeContinuousSurface(opts: ContinuousSurfaceOptions): Continuou
   const segments = opts.segments ?? 96;
   const geometry = new THREE.PlaneGeometry(2, 2, segments, segments);
   geometry.rotateX(-Math.PI / 2);
+  const follow = opts.follow ?? true, anchor = opts.anchor ?? [0, 0];
   const uniforms = {
-    uLandCenter: { value: new THREE.Vector2() },
+    uLandCenter: { value: new THREE.Vector2(anchor[0], anchor[1]) },
     uLandRadius: { value: opts.radius ?? DEFAULT_ORBIT_LIMITS.maxDistance * 16 },
+    uLandSegments: { value: segments },
     uLandSeed: { value: (opts.seed ?? 0) % 65536 },
     uLandTime: { value: 0 },
     uLandA: { value: new THREE.Color(opts.colorA) },
@@ -156,15 +162,20 @@ export function makeContinuousSurface(opts: ContinuousSurfaceOptions): Continuou
   const declarations = `
 uniform vec2 uLandCenter;
 uniform float uLandRadius;
+uniform float uLandSegments;
 uniform float uLandSeed;
 uniform float uLandTime;
 varying vec3 vLandPosition;
+float landSpacing = 0.0;
 ${SURFACE_NOISE}
 float landHeight(vec2 p) {
   ${height}
 }
 float landOffset(float p) {
   return sign(p) * (exp(abs(p) * log(1.0 + uLandRadius)) - 1.0);
+}
+float landSpacingAt(vec2 offset) {
+  return log(1.0 + uLandRadius) * (max(abs(offset.x), abs(offset.y)) + 1.0) * 2.0 / uLandSegments;
 }
 `;
   const material = new THREE.MeshStandardMaterial({
@@ -182,9 +193,10 @@ float landOffset(float p) {
       .replace('#include <common>', `#include <common>\n${declarations}`)
       .replace('#include <beginnormal_vertex>', `
 vec2 landP = uLandCenter + vec2(landOffset(position.x), landOffset(position.z));
-vec2 sampleStep = vec2(0.15, 0.0);
+landSpacing = landSpacingAt(landP - uLandCenter);
+vec2 sampleStep = vec2(max(0.15, landSpacing * 0.5), 0.0);
 vec3 objectNormal = normalize(vec3(
-  landHeight(landP - sampleStep.xy) - landHeight(landP + sampleStep.xy), 0.3,
+  landHeight(landP - sampleStep.xy) - landHeight(landP + sampleStep.xy), 2.0 * sampleStep.x,
   landHeight(landP - sampleStep.yx) - landHeight(landP + sampleStep.yx)));
 `)
       .replace('#include <begin_vertex>', `
@@ -217,6 +229,7 @@ diffuseColor.rgb *= color;
     mesh,
     material,
     setView(coverage) {
+      if (!follow) return;
       const spacing = Math.expm1(2 * Math.log1p(uniforms.uLandRadius.value) / segments);
       uniforms.uLandCenter.value.set(
         Math.round(coverage.x / spacing) * spacing,

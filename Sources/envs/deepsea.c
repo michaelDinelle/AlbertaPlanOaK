@@ -71,12 +71,6 @@ void deepsea_observe(uint32_t instance, uint32_t seed, const uint32_t *words, co
     deepsea_obs(&DEEPSEA_KNOBS[instance], words[0], words[1], words[2], obs);
 }
 
-void deepsea_pose(uint32_t instance, const uint32_t *words, const float *ctrl, float *pose) {
-    const deepseaKnobs *k = &DEEPSEA_KNOBS[instance];
-    poseZero(pose);
-    pose[0] = (float)words[0]; pose[1] = (float)words[1]; pose[2] = (float)k->extent; pose[3] = (float)k->extent; pose[4] = ctrl[0];
-}
-
 void deepsea_oracle(uint32_t instance, uint32_t seed, uint32_t step, const uint32_t *words, const uint32_t *extra, const float *obs, float *ctrl, const float *shared) {
     (void)shared;
     (void)seed; (void)step; (void)extra; (void)obs;

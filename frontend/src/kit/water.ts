@@ -250,7 +250,7 @@ void main() {`).replace('vec3 n = normalize( vNormalW );', `
     reflection.rotation.x = -Math.PI / 2;
     const capture = reflection.onBeforeRender, size = new THREE.Vector2(), normal = new THREE.Vector3(), target = reflection.getRenderTarget();
     reflection.onBeforeRender = function (renderer, scene, camera, geometry, material, group) {
-      renderer.getDrawingBufferSize(size);
+      renderer.getDrawingBufferSize(size).multiplyScalar(0.5).ceil();
       if (target.width !== size.x || target.height !== size.y) target.setSize(size.x, size.y);
       normal.set(0, 1, 0).transformDirection(camera.matrixWorldInverse);
       const projection = camera.projectionMatrix.elements;

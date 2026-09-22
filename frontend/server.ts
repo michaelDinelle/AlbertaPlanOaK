@@ -54,14 +54,24 @@ async function engine() {
   return engineLoad;
 }
 
+const metas = new Map<string, { stamp: number; meta: Promise<Meta> }>();
+async function cachedMeta(root: string): Promise<Meta | null> {
+  const stamp = await stat(join(root, ENGINE_FILES.meta)).then(info => info.mtimeMs, error => { if (missing(error)) return null; throw error; });
+  if (stamp === null) return null;
+  const hit = metas.get(root);
+  if (hit?.stamp === stamp) return hit.meta;
+  const pending = meta(root);
+  metas.set(root, { stamp, meta: pending });
+  pending.catch(() => { if (metas.get(root)?.meta === pending) metas.delete(root); });
+  return pending;
+}
+
 async function runs(): Promise<RunIndexEntry[]> {
   const best = (await readFile(BEST, 'utf8')).trim(), horizon = (await meta(join(BENCH, best))).steps;
   const entries = await Promise.all((await readdir(BENCH, { withFileTypes: true })).filter(entry => entry.isDirectory() && !entry.name.startsWith('.')).map(async directory => {
     const id = directory.name;
-    const root = join(BENCH, id);
-    if (!(await present(join(root, ENGINE_FILES.meta)))) return null;
-    const m = await meta(root);
-    if (m.policy !== 'oak' || m.steps !== horizon || m.timingOnly) return null;
+    const m = await cachedMeta(join(BENCH, id));
+    if (!m || m.policy !== 'oak' || m.steps !== horizon || m.timingOnly) return null;
     return { id, envIds: m.envSchedule.map(e => e.envId), steps: m.steps, startedAt: m.startedAt, inFlight: m.finishedAt === undefined, policy: m.policy, preset: m.preset, role: id === best ? 'best' : null } satisfies RunIndexEntry;
   }));
   return entries.filter((entry): entry is NonNullable<typeof entry> => entry !== null).sort((a, b) => b.startedAt.localeCompare(a.startedAt) || b.id.localeCompare(a.id));
@@ -159,7 +169,7 @@ async function replay(req: Request, id: string, laneText: string): Promise<Respo
   if (!m.finishedAt) throw new HttpError(409, 'Recording is still in progress');
   const seed = m.seeds[lane]!, entry = m.envSchedule.find(e => seed >= e.seedStart && seed <= e.seedEnd)!;
   const built = await engine(), descriptor = built.catalog.find(e => e.envId === entry.envId);
-  if (!descriptor?.replay) throw new HttpError(422, 'Visualization unavailable');
+  if (!descriptor) throw new HttpError(422, 'Environment is not in the catalog');
   const hashes = await readFile(join(root, ENGINE_FILES.hash));
   if (hashes.length !== m.batch * 8) throw new HttpError(500, 'Recording hashes are incomplete');
   const expected = hashes.readBigUInt64LE(lane * 8);
@@ -167,9 +177,7 @@ async function replay(req: Request, id: string, laneText: string): Promise<Respo
   const path = join(root, 'replay', `${lane}-${key}.tape`);
   const headers = { 'Content-Type': 'application/octet-stream', 'Cache-Control': 'no-store', 'Accept-Ranges': 'bytes' };
   if (await present(path)) {
-    let size: number;
-    try { size = await verify(path, expected); }
-    catch (error) { await rm(path, { force: true }); throw error; }
+    const size = (await stat(path)).size;
     const range = req.headers.get('Range');
     let first = 0, last = size - 1;
     if (range !== null) {
@@ -223,7 +231,7 @@ async function replay(req: Request, id: string, laneText: string): Promise<Respo
   return new Response(body, { headers: { ...headers, 'X-Oak-Cached': '0' } });
 }
 
-const workerBuild = await Bun.build({ entrypoints: ['src/scenes/jelly-bean-world/scentfield.worker.ts', 'src/theater/tape.worker.ts'].map(path => resolve(import.meta.dir, path)), target: 'browser', naming: { entry: '[name].[ext]' }, splitting: true, minify: true });
+const workerBuild = await Bun.build({ entrypoints: ['src/scenes/jbw/scentfield.worker.ts', 'src/theater/tape.worker.ts'].map(path => resolve(import.meta.dir, path)), target: 'browser', naming: { entry: '[name].[ext]' }, splitting: true, minify: true });
 if (!workerBuild.success) throw new AggregateError(workerBuild.logs, 'Worker bundle failed');
 const workers = new Map(workerBuild.outputs.map(output => [output.path.split('/').at(-1)!, output]));
 
@@ -235,6 +243,7 @@ async function publicFile(req: Request): Promise<Response> {
 }
 
 const server = Bun.serve({
+  port: Number(process.env.PORT ?? 3000),
   development: { hmr: true, console: true },
   idleTimeout: 0,
   routes: {
@@ -244,7 +253,7 @@ const server = Bun.serve({
     '/api/runs/:id': async req => new Response(await snapshot(await runRoot(req.params.id))),
     '/api/runs/:id/replay/:lane': req => replay(req, req.params.id, req.params.lane),
     '/workers/:name': req => { const file = workers.get(req.params.name); return file ? new Response(file) : new Response('Unknown worker', { status: 404 }); },
-    '/posters/*': publicFile,
+    '/posters/*': async req => publicFile(req).catch(error => { if (error instanceof HttpError && error.status === 404) return new Response(null, { status: 204 }); throw error; }),
     '/terrain/*': publicFile,
     '/textures/*': publicFile,
   },

@@ -2,6 +2,7 @@ import type { ReplayDescriptor } from '../data/replay';
 
 export type SimEvent =
   | { type: 'goal' }
+  | { type: 'harm' }
   | { type: 'done' }
   | { type: 'key'; index: number }
   | { type: 'door'; index: number; open: boolean }
@@ -20,6 +21,7 @@ export const NO_EVENTS: SimEvent[] = Object.freeze([]) as unknown as SimEvent[];
 
 export const SIM_EVENT_TYPES = [
   'goal',
+  'harm',
   'done',
   'key',
   'door',
@@ -54,7 +56,7 @@ export const EMPTY_EVENT_STREAM = emptyStream();
 export interface EnvFrame {
   step: number;
   done: number;
-  pose: Float32Array;
+  words: Uint32Array;
   observations: Float32Array;
   actions: Float32Array;
   reward: number;
@@ -86,6 +88,11 @@ export interface EnvGeometry {
 }
 
 export interface EnvDecoder {
+  slots: number;
+  wrap?: number;
+  discrete?: boolean;
+  sequential?: boolean;
+  decode(frame: EnvFrame, out: Float32Array): void;
   geometry(descriptor: ReplayDescriptor, initial: EnvFrame): EnvGeometry;
   deriveEvents(prev: EnvFrame, next: EnvFrame): SimEvent[];
 }

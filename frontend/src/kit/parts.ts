@@ -5,6 +5,16 @@ export interface ColoredPart {
   color: THREE.ColorRepresentation;
 }
 
+export function gradedGeometry(name: string, vertices: readonly (readonly [number, number, number, number])[]): THREE.BufferGeometry {
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices.flatMap(([x, y, z]) => [x, y, z]), 3));
+  geometry.setAttribute('color', new THREE.Float32BufferAttribute(vertices.flatMap(([, , , grade]) => [grade, grade, grade]), 3));
+  geometry.computeVertexNormals();
+  geometry.computeBoundingSphere();
+  geometry.name = name;
+  return geometry;
+}
+
 export function mergeColoredParts(parts: readonly ColoredPart[], name: string): THREE.BufferGeometry {
   let total = 0;
   for (const p of parts) {

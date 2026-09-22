@@ -5,7 +5,7 @@ import type { Palette } from './tokens';
 export { paletteSunDirection };
 
 export const MAX_POINT_LIGHTS = 4;
-export const SHADOW_MAP_SIZE = 2048;
+export const SHADOW_MAP_SIZE = 1024;
 const SHADOW_BIAS = -0.0006;
 const SHADOW_BIAS_RANGE = 104;
 

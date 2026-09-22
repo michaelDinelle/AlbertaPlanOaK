@@ -1,4 +1,5 @@
 import { NO_EVENTS, type EnvDecoder, type EnvFrame, type EnvGeometry, type SimEvent } from '../types';
+import { wordFloat } from '../words';
 
 export const AB_L1 = 1;
 export const AB_L2 = 1;
@@ -31,6 +32,12 @@ const GEOMETRY: EnvGeometry = Object.freeze({
 });
 
 export const acrobotDecoder: EnvDecoder = {
+  slots: 5,
+  wrap: 0b11,
+  decode(frame, out) {
+    for (let i = 0; i < 4; i++) out[i] = wordFloat(frame.words[i]!);
+    out[ACROBOT_ACTION] = frame.actions[0]!;
+  },
   geometry(): EnvGeometry {
     return GEOMETRY;
   },

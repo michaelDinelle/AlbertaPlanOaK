@@ -13,7 +13,7 @@ export interface Meta {
   finishedAt?: string;
   timingOnly?: boolean;
   stepsPerSecond?: number;
-  envSchedule: { envId: string; seedStart: number; seedEnd: number; obs?: number; actions?: number; box?: number; pose?: number }[];
+  envSchedule: { envId: string; seedStart: number; seedEnd: number; obs?: number; actions?: number; box?: number }[];
 }
 
 export type Baselines = Partial<Record<Baseline, Record<string, string>>>;

@@ -110,8 +110,8 @@ static void writeMeta(const char *root, Run *run, const char *started, const cha
     fprintf(f, "],\n \"envSchedule\": [\n");
     for (uint32_t i = 0u; i < run->laneCount; i += run->specs[i]->seeds) {
         const EnvSpec *env = run->specs[i];
-        fprintf(f, "  {\"envId\": \"%s\", \"seedStart\": %u, \"seedEnd\": %u, \"obs\": %u, \"actions\": %u, \"box\": %u, \"pose\": %u}%s\n",
-                env->name, run->lanes[i].seed, run->lanes[i].seed + env->seeds - 1u, env->obs, env->actions, env->box, env->poseLen,
+        fprintf(f, "  {\"envId\": \"%s\", \"seedStart\": %u, \"seedEnd\": %u, \"obs\": %u, \"actions\": %u, \"box\": %u}%s\n",
+                env->name, run->lanes[i].seed, run->lanes[i].seed + env->seeds - 1u, env->obs, env->actions, env->box,
                 i + env->seeds < run->laneCount ? "," : "");
     }
     fprintf(f, " ]\n}\n");
@@ -198,9 +198,9 @@ static int record(int argc, char **argv) {
 }
 
 static void catalogEntry(FILE *out, const EnvSpec *env) {
-    fprintf(out, "{\"envId\":\"%s\",\"family\":\"%s\",\"instance\":%u,\"obs\":%u,\"actions\":%u,\"box\":%u,\"seedStart\":%u,\"seedEnd\":%u,\"pose\":%u,\"replay\":%s",
-            env->name, env->family, env->instance, env->obs, env->actions, env->box, env->seedStart,
-            env->seedStart + env->seeds - 1u, env->poseLen, env->poseLen ? "true" : "false");
+    fprintf(out, "{\"envId\":\"%s\",\"family\":\"%s\",\"category\":\"%s\",\"instance\":%u,\"obs\":%u,\"actions\":%u,\"box\":%u,\"seedStart\":%u,\"seedEnd\":%u,\"words\":%u",
+            env->name, env->family, env->category, env->instance, env->obs, env->actions, env->box, env->seedStart,
+            env->seedStart + env->seeds - 1u, env->words);
     catalogDetails(out, env);
     fputc('}', out);
 }
@@ -216,14 +216,16 @@ static void replayWrite(const void *data, size_t bytes) {
 }
 
 static void replayFrame(const EnvSpec *spec, const Lane *lane, const float *ctrl) {
-    float row[OAK_POSE_LEN + OAK_ENV_OBS_MAX + OAK_ENV_ACT_MAX + 2u] = {0};
-    env_pose(lane->env, lane->words, ctrl, row);
-    uint32_t at = spec->poseLen, controls = spec->box ? spec->actions : 1u;
-    for (uint32_t k = 0u; k < spec->obs; k++) row[at++] = lane->obs[k];
-    for (uint32_t k = 0u; k < controls; k++) row[at++] = ctrl[k];
-    row[at++] = lane->reward;
-    row[at++] = (float)lane->done;
-    replayWrite(row, at * sizeof(float));
+    for (uint32_t k = spec->words; k < OAK_ENV_WORDS_MAX; k++)
+        if (lane->words[k]) { fprintf(stderr, "%s writes state word %u beyond its declared width of %u\n", spec->name, k, spec->words); exit(1); }
+    uint32_t row[OAK_ENV_WORDS_MAX + OAK_ENV_OBS_MAX + OAK_ENV_ACT_MAX + 2u];
+    uint32_t at = 0u, controls = spec->box ? spec->actions : 1u;
+    for (uint32_t k = 0u; k < spec->words; k++) row[at++] = lane->words[k];
+    for (uint32_t k = 0u; k < spec->obs; k++) row[at++] = floatWord(lane->obs[k]);
+    for (uint32_t k = 0u; k < controls; k++) row[at++] = floatWord(ctrl[k]);
+    row[at++] = floatWord(lane->reward);
+    row[at++] = floatWord((float)lane->done);
+    replayWrite(row, at * sizeof(uint32_t));
 }
 
 static int replay(int argc, char **argv) {
@@ -264,7 +266,7 @@ static int replay(int argc, char **argv) {
         }
         base += count;
     }
-    if (!spec || !spec->poseLen) die("lane has no replay geometry");
+    if (!spec) die("lane environment is not in the table");
     free(meta);
     snprintf(path, sizeof path, "%s/hash.u64", root);
     FILE *h = fopen(path, "rb");
@@ -286,20 +288,12 @@ static int replay(int argc, char **argv) {
     catalogEntry(header, spec);
     fprintf(header, ",\"seed\":%u,\"horizon\":%u,\"policy\":\"%s\",\"preset\":\"%s\",\"lane\":%ld,\"controls\":%u",
             seed, run.steps, policyName, preset, laneIndex, spec->box ? spec->actions : 1u);
-    if (strcmp(spec->family, "deepsea") == 0) {
-        float pose[OAK_POSE_LEN], ctrl[OAK_ENV_ACT_MAX] = {0};
-        env_pose(lane.env, lane.words, ctrl, pose);
-        uint32_t side = (uint32_t)pose[2] + 1u;
-        fputs(",\"actionMap\":[", header);
-        for (uint32_t i = 0u; i < side * side; i++) fprintf(header, "%s%u", i ? "," : "", (lane.words[3u + (i >> 5u)] >> (i & 31u)) & 1u);
-        fputc(']', header);
-    }
     fputc('}', header);
     fclose(header);
     uint32_t prefix[8] = {0};
     memcpy(prefix, "OAKTAPE", 8);
     prefix[2] = (uint32_t)descriptorSize;
-    prefix[3] = spec->poseLen + spec->obs + (spec->box ? spec->actions : 1u) + 2u;
+    prefix[3] = spec->words + spec->obs + (spec->box ? spec->actions : 1u) + 2u;
     prefix[4] = run.steps + 1u;
     prefix[5] = 256u;
     replayWrite(prefix, sizeof prefix);

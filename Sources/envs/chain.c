@@ -38,15 +38,6 @@ void walk_observe(uint32_t instance, uint32_t seed, const uint32_t *words, const
     walk_obs(&WALK_KNOBS[instance], words[0], words[1], obs);
 }
 
-void walk_pose(uint32_t instance, const uint32_t *words, const float *ctrl, float *pose) {
-    (void)ctrl;
-    const walkKnobs *k = &WALK_KNOBS[instance];
-    poseZero(pose);
-    pose[0] = (float)words[0];
-    pose[1] = (float)k->limit;
-    pose[2] = k->lastActionObs ? (float)words[1] : 0.0f;
-}
-
 void walk_oracle(uint32_t instance, uint32_t seed, uint32_t step, const uint32_t *words, const uint32_t *extra, const float *obs, float *ctrl, const float *shared) {
     (void)shared;
     (void)instance; (void)seed; (void)step; (void)words; (void)extra; (void)obs;

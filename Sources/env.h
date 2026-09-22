@@ -6,7 +6,6 @@
 #define OAK_ENV_ACT_MAX 6u
 #define OAK_ENV_WORDS_MAX 40u
 #define OAK_ENV_TABLE_MAX 256u
-#define OAK_POSE_LEN 9u
 
 static inline float wrapPi(float angle) {
     return angle - 2.0f * OAK_PI * floorf((angle + OAK_PI) / (2.0f * OAK_PI));
@@ -84,7 +83,6 @@ static inline int gridFirstStep(const GridWalls *g, int x, int y, int goalX, int
 void env_reset(uint32_t env, uint32_t seed, uint32_t *words, uint32_t *extra, uint32_t steps);
 float env_step(uint32_t env, uint32_t seed, uint32_t step, const float *ctrl, uint32_t *words, uint32_t *extra, float *obs, uint32_t *done, const float *shared);
 void env_observe(uint32_t env, uint32_t seed, const uint32_t *words, const uint32_t *extra, uint32_t step, float *obs, const float *shared);
-void env_pose(uint32_t env, const uint32_t *words, const float *ctrl, float *pose);
 void env_oracle(uint32_t env, uint32_t seed, uint32_t step, const uint32_t *words, const uint32_t *extra, const float *obs, float *ctrl, const float *shared);
 uint32_t env_extraWords(uint32_t env, uint32_t steps);
 uint32_t env_obs(uint32_t env);
@@ -94,15 +92,13 @@ uint32_t jbw_sharedWords(void);
 void jbw_buildShared(float *shared);
 
 typedef struct {
-    const char *name, *family;
+    const char *name, *family, *category;
     uint32_t instance;
-    uint32_t id, obs, actions, box, seedStart, seeds, poseLen;
+    uint32_t id, obs, actions, box, seedStart, seeds, words;
 } EnvSpec;
 extern const uint32_t OAK_ENV_TABLE_COUNT;
 const EnvSpec *env_at(uint32_t index);
 const EnvSpec *env_named(const char *name);
 void env_checkTable(void);
-
-static inline void poseZero(float *pose) { for (uint32_t i = 0u; i < OAK_POSE_LEN; i++) pose[i] = 0.0f; }
 
 #endif

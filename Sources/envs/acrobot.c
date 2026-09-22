@@ -81,13 +81,6 @@ void acrobot_observe(uint32_t instance, uint32_t seed, const uint32_t *words, co
     acrobot_obs(&ACROBOT_KNOBS[instance], wordFloat(words[0]), wordFloat(words[1]), wordFloat(words[2]), wordFloat(words[3]), obs);
 }
 
-void acrobot_pose(uint32_t instance, const uint32_t *words, const float *ctrl, float *pose) {
-    (void)instance;
-    poseZero(pose);
-    for (int i = 0; i < 4; i++) pose[i] = wordFloat(words[i]);
-    pose[4] = ctrl[0];
-}
-
 void acrobot_oracle(uint32_t instance, uint32_t seed, uint32_t step, const uint32_t *words, const uint32_t *extra, const float *obs, float *ctrl, const float *shared) {
     (void)shared;
     (void)instance;

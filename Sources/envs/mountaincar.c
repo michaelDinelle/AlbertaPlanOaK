@@ -58,12 +58,6 @@ void mountainCar_observe(uint32_t instance, uint32_t seed, const uint32_t *words
     mountainCar_obs(&MOUNTAINCAR_KNOBS[instance], seed, step, wordFloat(words[0]), wordFloat(words[1]), obs);
 }
 
-void mountainCar_pose(uint32_t instance, const uint32_t *words, const float *ctrl, float *pose) {
-    (void)instance;
-    poseZero(pose);
-    pose[0] = wordFloat(words[0]); pose[1] = wordFloat(words[1]); pose[2] = 0.5f; pose[3] = ctrl[0];
-}
-
 void mountainCar_oracle(uint32_t instance, uint32_t seed, uint32_t step, const uint32_t *words, const uint32_t *extra, const float *obs, float *ctrl, const float *shared) {
     (void)shared;
     (void)instance;
