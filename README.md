@@ -146,9 +146,9 @@ Baseline throughput on the same schedule: PPO 4,165,658 steps/s, Random 157,764,
 
 Rewards match the reference recording (`019b414811583459f6931b87ecf61724d6e31d68`) bit for bit on all 4,915 lanes across three promotions and one adoption; throughput increased 28.7%, the product of three interleaved paired probes (1.2226, 1.0302, 1.0215). The last two probes timed each candidate against the source snapshot carried by the recording it replaced; the reference recording carries no snapshot, so the first probe's reference binary cannot be rebuilt from this repository. The adoption renamed MemoryChain to TMaze-32-1, DeepSea to DeepSea-8 and LargeDeepSea to DeepSea-16, moved the replay tape to the lane's raw state words, and refiled the baselines under the new environment digests; every refiled baseline matches its predecessor bit for bit. No unhealthy lanes.
 
-![Reward by category](oak-results.svg)
+![Policy comparison](oak-performance-radar.svg)
 
-Regenerate with `python3 results.py`.
+Regenerate with `python3 radar.py`.
 
 ## Setup and run
 
