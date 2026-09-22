@@ -2,6 +2,9 @@
 
 #define CLIFF_WIDTH 12u
 #define CLIFF_HEIGHT 4u
+#define CLIFF_STEP_COST -1.0f
+#define CLIFF_FALL -100.0f
+#define CLIFF_GOAL_REWARD 100.0f
 
 typedef struct { float slip; } cliffKnobs;
 
@@ -33,10 +36,10 @@ float cliff_step(uint32_t instance, uint32_t seed, uint32_t step, const float *c
     int x = (int)words[0] + dx, y = (int)words[1] - dy;
     if (x < 0) x = 0; if (x >= (int)CLIFF_WIDTH) x = (int)CLIFF_WIDTH - 1;
     if (y < 0) y = 0; if (y >= (int)CLIFF_HEIGHT) y = (int)CLIFF_HEIGHT - 1;
-    float reward = -1.0f;
+    float reward = CLIFF_STEP_COST;
     *done = 0u;
-    if (y == 0 && x > 0 && x < (int)CLIFF_WIDTH - 1) { reward = -100.0f; x = 0; y = 0; *done = 1u; }
-    else if (y == 0 && x == (int)CLIFF_WIDTH - 1) { reward = 0.0f; x = 0; y = 0; *done = 1u; }
+    if (y == 0 && x > 0 && x < (int)CLIFF_WIDTH - 1) { reward = CLIFF_FALL; x = 0; y = 0; *done = 1u; }
+    else if (y == 0 && x == (int)CLIFF_WIDTH - 1) { reward = CLIFF_GOAL_REWARD; x = 0; y = 0; *done = 1u; }
     words[0] = (uint32_t)x; words[1] = (uint32_t)y;
     cliff_obs(words[0], words[1], obs);
     return reward;

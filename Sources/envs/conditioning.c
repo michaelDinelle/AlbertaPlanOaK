@@ -1,5 +1,8 @@
 #include "../env.h"
 
+#define CONDITIONING_BLINK_REWARD 1.0f
+#define CONDITIONING_FALSE_BLINK -0.05f
+
 typedef struct { uint32_t interval, pattern; } conditioningKnobs;
 
 static const conditioningKnobs CONDITIONING_KNOBS[3] = {
@@ -11,11 +14,11 @@ static const conditioningKnobs CONDITIONING_KNOBS[3] = {
 
 static uint32_t conditioning_predicts(const conditioningKnobs *k, uint32_t cues) { return k->pattern ? (cues & 3u) == 3u && (cues & 4u) == 0u : cues != 0u; }
 
-static void conditioning_obs(const conditioningKnobs *k, uint32_t cues, uint32_t countdown, float *obs) {
+static void conditioning_obs(const conditioningKnobs *k, uint32_t cues, uint32_t stimulus, float *obs) {
     obs[0] = (float)(cues & 1u);
     obs[1] = k->pattern ? (float)((cues >> 1u) & 1u) : 0.0f;
     obs[2] = k->pattern ? (float)((cues >> 2u) & 1u) : 0.0f;
-    obs[3] = countdown == 1u ? 1.0f : 0.0f;
+    obs[3] = (float)stimulus;
     obs[4] = 1.0f;
 }
 
@@ -27,8 +30,8 @@ float conditioning_step(uint32_t instance, uint32_t seed, uint32_t step, const f
     const conditioningKnobs *k = &CONDITIONING_KNOBS[instance];
     uint32_t countdown = words[0];
     *done = 0u;
-    uint32_t blink = (uint32_t)ctrl[0] & 1u;
-    float reward = countdown == 1u ? (blink ? 1.0f : 0.0f) : (blink ? -0.05f : 0.0f);
+    uint32_t blink = (uint32_t)ctrl[0] & 1u, stimulus = countdown == 1u;
+    float reward = stimulus ? (blink ? CONDITIONING_BLINK_REWARD : 0.0f) : (blink ? CONDITIONING_FALSE_BLINK : 0.0f);
     if (countdown > 0u) countdown -= 1u;
     uint32_t cues = 0u;
     u4 r = philox4x32(seed, ENV_RNG_STREAM, step, 0u, 0u, 0u);
@@ -36,15 +39,15 @@ float conditioning_step(uint32_t instance, uint32_t seed, uint32_t step, const f
         cues = k->pattern ? 1u + (r.y % 7u) : 1u;
         if (conditioning_predicts(k, cues)) countdown = k->interval + 1u;
     }
-    words[0] = countdown; words[1] = cues;
-    conditioning_obs(k, cues, countdown, obs);
+    words[0] = countdown; words[1] = cues; words[2] = stimulus;
+    conditioning_obs(k, cues, stimulus, obs);
     return reward;
 }
 
 void conditioning_observe(uint32_t instance, uint32_t seed, const uint32_t *words, const uint32_t *extra, uint32_t step, float *obs, const float *shared) {
     (void)shared;
     (void)seed; (void)extra; (void)step;
-    conditioning_obs(&CONDITIONING_KNOBS[instance], words[1], words[0], obs);
+    conditioning_obs(&CONDITIONING_KNOBS[instance], words[1], words[2], obs);
 }
 
 void conditioning_oracle(uint32_t instance, uint32_t seed, uint32_t step, const uint32_t *words, const uint32_t *extra, const float *obs, float *ctrl, const float *shared) {

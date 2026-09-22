@@ -45,9 +45,6 @@ export const acrobotDecoder: EnvDecoder = {
 
   deriveEvents(_prev: EnvFrame, next: EnvFrame): SimEvent[] {
     if (next.done === 0) return NO_EVENTS;
-    const out: SimEvent[] = [];
-    if (next.done !== 0) out.push({ type: 'goal' }, { type: 'done' });
-    if (next.done !== 0) out.push({ type: 'teleport' });
-    return out;
+    return next.reward > 0 ? [{ type: 'goal' }, { type: 'done' }, { type: 'teleport' }] : [{ type: 'harm' }, { type: 'done' }, { type: 'teleport' }];
   },
 };

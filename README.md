@@ -12,20 +12,20 @@ Recorded on a binned M4 Max.
 
 ## Base
 
-Geometry starts at 32 percepts, 480 features (96 active per step); 3,360 parameters (6 action dimensions). 4,428,931 SPS on the 123-environment schedule.
+Geometry starts at 32 percepts, 480 features (96 active per step); 3,360 parameters (6 action dimensions). 4,536,488 SPS on the 123-environment schedule.
 
-Reward per step over the final 100,928 steps of the 1,000,000-step best recording (`a906780c85d3844fc4fa42a115c5be9a382ba364`), all 123 environments with their declared seed counts (4,915 lanes), with the Oracle, Random and PPO baselines on the same seeds. Mean over seeds; Score = (OaK − Random) / (Oracle − Random), unclipped.
+Reward per step over the final 100,928 steps of the 1,000,000-step best recording (`4262868f4bce5ea25ac4905e60742f75d11be371`), all 123 environments with their declared seed counts (4,915 lanes), with the Oracle, Random and PPO baselines on the same seeds. Mean over seeds; Score = (OaK − Random) / (Oracle − Random), unclipped.
 
 | Environment | Category | OaK | Oracle | Random | PPO | Score |
 |---|---|---:|---:|---:|---:|---:|
-| AccessControl-cont-v0 | decision | 2.7283 | 2.6678 | 1.6979 | 2.7417 | 1.0624 |
-| AccessControl-drift-cont-v0 | decision | 1.5419 | 1.7032 | 0.9601 | 1.5957 | 0.7830 |
-| Acrobot-cont-v0 | control | 0.0073 | 0.0110 | 0.0003917 | 0.0091 | 0.6483 |
-| Acrobot-slip-cont-v0 | control | 0.0053 | 0.0062 | 0.0003861 | 0.0080 | 0.8471 |
-| Acrobot-position-cont-v0 | control | 0.0017 | 0.0110 | 0.0003897 | 0.0011 | 0.1213 |
-| AliasedRing-8-cont-v0 | memory | 0.9981 | 1.0000 | 0.0183 | 0.1418 | 0.9980 |
-| AliasedRing-32-cont-v0 | memory | 0.8592 | 1.0000 | -0.0329 | -4.629e-06 | 0.8636 |
-| AliasedRing-128-cont-v0 | memory | 0.2538 | 1.0000 | -0.0457 | -5.836e-06 | 0.2864 |
+| AccessControl-cont-v0 | decision | 2.7283 | 2.7482 | 1.6979 | 2.7417 | 0.9811 |
+| AccessControl-drift-cont-v0 | decision | 1.5419 | 1.7143 | 0.9601 | 1.5957 | 0.7714 |
+| Acrobot-cont-v0 | control | 0.0073 | 0.0110 | 0.0003926 | 0.0091 | 0.6478 |
+| Acrobot-slip-cont-v0 | control | 0.0053 | 0.0077 | 0.0003863 | 0.0081 | 0.6753 |
+| Acrobot-position-cont-v0 | control | 0.0016 | 0.0110 | 0.0003884 | 0.0009646 | 0.1156 |
+| AliasedRing-8-cont-v0 | memory | 0.1561 | 0.1861 | -0.0056 | 0.0177 | 0.8437 |
+| AliasedRing-32-cont-v0 | memory | 0.0273 | 0.0572 | -0.0386 | -3.39e-06 | 0.6877 |
+| AliasedRing-128-cont-v0 | memory | 0.0015 | 0.0153 | -0.0471 | -6.038e-06 | 0.7796 |
 | Bandit-3-cont-v0 | decision | 0.8299 | 0.8314 | -0.0610 | 0.8312 | 0.9983 |
 | Bandit-6-cont-v0 | decision | 1.3209 | 1.3262 | 0.0451 | 1.3254 | 0.9958 |
 | Bandit-3-drift-cont-v0 | decision | 0.8791 | 0.9785 | -0.1495 | 0.9619 | 0.9119 |
@@ -34,21 +34,21 @@ Reward per step over the final 100,928 steps of the 1,000,000-step best recordin
 | ShortcutMaze-cont-v0 | navigation | 0.0721 | 0.0997 | 0.0029 | 0.0640 | 0.7154 |
 | Calibration-30-cont-v0 | decision | -0.000417 | -2.983e-05 | -0.0419 | -2.052e-05 | 0.9908 |
 | Calibration-80-cont-v0 | decision | -0.0007859 | -4.131e-05 | -0.0920 | -0.0080 | 0.9919 |
-| CartPoleSwingUp-cont-v0 | control | -0.5616 | 0.3343 | -0.8162 | -0.6067 | 0.2213 |
-| CartPoleSwingUp-slip-cont-v0 | control | -0.5402 | 0.3404 | -0.8150 | -0.6692 | 0.2379 |
+| CartPoleSwingUp-cont-v0 | control | -0.5616 | 1.0000 | -0.8162 | -0.6067 | 0.1402 |
+| CartPoleSwingUp-slip-cont-v0 | control | -0.5402 | 0.9998 | -0.8150 | -0.6692 | 0.1514 |
 | Catch-5x10-cont-v0 | control | 0.0656 | 0.1111 | -0.0666 | 0.1109 | 0.7440 |
 | Catch-10x20-cont-v0 | control | -0.0329 | 0.0526 | -0.0422 | 0.0520 | 0.0985 |
 | Catch-noise-cont-v0 | control | 0.0593 | 0.1113 | -0.0665 | 0.1104 | 0.7073 |
 | Catch-scale-cont-v0 | control | -2.9920 | 11.1119 | -6.6658 | 11.0875 | 0.2067 |
 | Cellular-cont-v0 | prediction | 0.9999 | 1.0000 | 0.5846 | 0.9998 | 0.9998 |
 | Chain-cont-v0 | navigation | 0.0665 | 0.0667 | 0.0041 | 0.0667 | 0.9981 |
-| CliffWalk-cont-v0 | navigation | -21.2238 | -0.9231 | -10.1391 | -35.5717 | -1.2028 |
-| CliffWalk-slip-cont-v0 | navigation | -6.6704 | -1.1001 | -10.1443 | -23.4225 | 0.3841 |
+| CliffWalk-cont-v0 | navigation | -30.4170 | 6.7695 | -10.1237 | -23.1424 | -1.2013 |
+| CliffWalk-slip-cont-v0 | navigation | -6.5393 | 4.0658 | -10.1291 | -22.1353 | 0.2529 |
 | CoinSwap-slow-cont-v0 | decision | 0.5958 | 0.9001 | 0.5002 | 0.5987 | 0.2390 |
 | CoinSwap-fast-cont-v0 | decision | 0.6080 | 0.8998 | 0.5001 | 0.5019 | 0.2701 |
-| TraceConditioning-10-cont-v0 | prediction | 0.0314 | 0.0334 | -0.0075 | 0.0333 | 0.9526 |
-| TraceConditioning-100-cont-v0 | prediction | 0.0030 | 0.0033 | -0.0233 | 0.0032 | 0.9867 |
-| TracePatterning-cont-v0 | prediction | 0.0063 | 0.0066 | -0.0215 | 0.0055 | 0.9893 |
+| TraceConditioning-10-cont-v0 | prediction | 0.0209 | 0.0334 | -0.0075 | -0.0001121 | 0.6946 |
+| TraceConditioning-100-cont-v0 | prediction | -0.0002174 | 0.0033 | -0.0233 | -0.0002492 | 0.8674 |
+| TracePatterning-cont-v0 | prediction | -0.0002131 | 0.0066 | -0.0215 | -0.0011 | 0.7573 |
 | Contextual-8-cont-v0 | decision | 0.9724 | 0.9947 | -0.0003318 | 0.9823 | 0.9776 |
 | Contextual-16-cont-v0 | decision | 1.0182 | 1.0439 | -0.0013 | 1.0255 | 0.9755 |
 | Contextual-8-drift-cont-v0 | decision | 2.7745 | 2.9734 | -0.0015 | 2.8938 | 0.9331 |
@@ -67,14 +67,14 @@ Reward per step over the final 100,928 steps of the 1,000,000-step best recordin
 | Forager-16-1-switch-cont-v0 | world | 0.0176 | 0.0291 | -0.0001827 | 0.0239 | 0.6063 |
 | FourRoomsHall-cont-v0 | navigation | 0.1139 | 0.1252 | 0.0028 | 0.1220 | 0.9080 |
 | FourRoomsHall-moving-cont-v0 | navigation | 0.0110 | 0.1262 | 0.0027 | 0.0168 | 0.0670 |
-| Garnet-10-2-2-cont-v0 | decision | 0.2076 | 0.1791 | 0.0200 | 0.2050 | 1.1789 |
-| Garnet-50-4-3-cont-v0 | decision | 0.3338 | 0.3854 | 0.0015 | 0.3290 | 0.8655 |
-| Garnet-10-2-2-resample-cont-v0 | decision | 0.0876 | 0.1363 | 0.0052 | 0.0526 | 0.6288 |
-| Garnet-50-4-3-resample-cont-v0 | decision | 0.0448 | 0.3383 | -0.0022 | 0.0434 | 0.1379 |
-| HashedMDP-8-local-cont-v0 | decision | 0.7022 | 0.2910 | -0.0001721 | 0.6657 | 2.4122 |
-| HashedMDP-16-local-cont-v0 | decision | 0.0075 | 0.2977 | 6.23e-05 | 0.1209 | 0.0249 |
-| HashedMDP-8-global-cont-v0 | decision | 0.5365 | 0.3452 | 1.154e-05 | 0.5185 | 1.5541 |
-| HashedMDP-16-global-cont-v0 | decision | 0.0039 | 0.2451 | -0.0001035 | 0.0050 | 0.0162 |
+| Garnet-10-2-2-cont-v0 | decision | 0.8336 | 0.8499 | 0.0207 | 0.7866 | 0.9804 |
+| Garnet-50-4-3-cont-v0 | decision | 1.0297 | 1.2132 | 0.0152 | 0.9300 | 0.8468 |
+| Garnet-10-2-2-resample-cont-v0 | decision | 0.3047 | 0.6907 | 0.0056 | 0.1316 | 0.4366 |
+| Garnet-50-4-3-resample-cont-v0 | decision | 0.2403 | 1.1765 | 0.0057 | 0.1971 | 0.2004 |
+| HashedMDP-8-local-cont-v0 | decision | 0.7022 | 0.9457 | -0.0001721 | 0.6657 | 0.7426 |
+| HashedMDP-16-local-cont-v0 | decision | 0.0075 | 1.8590 | 6.23e-05 | 0.1209 | 0.0040 |
+| HashedMDP-8-global-cont-v0 | decision | 0.5365 | 0.7261 | 1.154e-05 | 0.5185 | 0.7389 |
+| HashedMDP-16-global-cont-v0 | decision | 0.0039 | 0.7730 | -0.0001035 | 0.0050 | 0.0051 |
 | HiddenMode-slow-cont-v0 | decision | 0.6492 | 1.0000 | 0.5007 | 0.5147 | 0.2974 |
 | HiddenMode-fast-cont-v0 | decision | 0.6102 | 1.0000 | 0.5000 | 0.5047 | 0.2204 |
 | JellyBeanWorld-cont-v0 | world | -2.462e-05 | 0.0374 | 2.787e-06 | 2.941e-05 | -0.0007334 |
@@ -108,7 +108,7 @@ Reward per step over the final 100,928 steps of the 1,000,000-step best recordin
 | Pendulum-position-cont-v0 | control | -0.5242 | 0 | -3.8806 | -2.6680 | 0.8649 |
 | Permuted-fixed-cont-v0 | prediction | 0.9997 | 1.0000 | 0.2501 | 0.9998 | 0.9996 |
 | Permuted-recode-cont-v0 | prediction | 0.4189 | 1.0000 | 0.2500 | 0.4476 | 0.2253 |
-| PuddleWorld-cont-v0 | control | -1.0000 | -1.5145 | -4.7240 | -1.9835 | 1.1603 |
+| PuddleWorld-cont-v0 | control | -0.4681 | 3.7153 | -4.6782 | 2.9221 | 0.5016 |
 | Recite-4-cont-v0 | memory | 0.2618 | 0.5000 | 0.1253 | 0.1250 | 0.3644 |
 | Recite-16-cont-v0 | memory | 0.1674 | 0.5000 | 0.1250 | 0.1252 | 0.1131 |
 | Regression-8-cont-v0 | prediction | 0.5962 | 1.0000 | 0.1997 | 0.8196 | 0.4955 |
@@ -121,16 +121,16 @@ Reward per step over the final 100,928 steps of the 1,000,000-step best recordin
 | RiverSwim-24-cont-v0 | navigation | 0.0047 | 0.1999 | 0.0018 | 0.0578 | 0.0147 |
 | RockPaperScissors-10-cont-v0 | decision | 0.8757 | 1.0000 | 0.0002198 | 0.6841 | 0.8757 |
 | RockPaperScissors-100-cont-v0 | decision | 0.8916 | 1.0000 | -5.326e-05 | 0.9609 | 0.8916 |
-| ScentPuck-cont-v0 | control | -1.5164 | -0.5743 | -1.2021 | -0.5225 | -0.5006 |
-| ScentPuck-competing-cont-v0 | control | -1.3984 | -0.6208 | -1.2365 | -0.5008 | -0.2630 |
+| ScentPuck-cont-v0 | control | -1.4474 | 3.2899 | -1.1858 | -0.5597 | -0.0585 |
+| ScentPuck-competing-cont-v0 | control | -1.4944 | 3.2418 | -1.2196 | -0.4810 | -0.0616 |
 | Sokoban-cont-v0 | navigation | 0.0011 | 0.1482 | 0.0007612 | 0.0006754 | 0.0020 |
 | SubsetParity-8-1-cont-v0 | prediction | 0.9998 | 1.0000 | 0.4997 | 0.9998 | 0.9995 |
 | SubsetParity-16-1-cont-v0 | prediction | 0.9997 | 1.0000 | 0.4998 | 0.9999 | 0.9995 |
 | SubsetParity-8-2-cont-v0 | prediction | 0.8232 | 1.0000 | 0.5005 | 0.7858 | 0.6460 |
 | SubsetParity-16-2-cont-v0 | prediction | 0.7557 | 1.0000 | 0.4998 | 0.7966 | 0.5116 |
 | Taxi-cont-v0 | navigation | -1.0007 | 0.5721 | -3.9529 | -1.0011 | 0.6524 |
-| Tiger-85-cont-v0 | decision | -0.1216 | 1.0000 | -3.0344 | -0.3726 | 0.7220 |
-| Tiger-60-cont-v0 | decision | -0.1358 | 1.0000 | -3.0328 | -1.7254 | 0.7184 |
+| Tiger-85-cont-v0 | decision | -0.1216 | 0.1081 | -3.0344 | -0.3726 | 0.9269 |
+| Tiger-60-cont-v0 | decision | -0.1358 | -0.0814 | -3.0328 | -1.7254 | 0.9816 |
 | Tracking-99-cont-v0 | control | -0.6027 | -0.0201 | -3.9784 | -0.4167 | 0.8528 |
 | Tracking-999-cont-v0 | control | -0.3439 | -0.0024 | -4.0023 | -1.7480 | 0.9146 |
 | Umbrella-4-cont-v0 | memory | 0.2506 | 0.2508 | 0.0008954 | 0.2504 | 0.9993 |
@@ -142,7 +142,7 @@ Reward per step over the final 100,928 steps of the 1,000,000-step best recordin
 | WalkBet-cont-v0 | prediction | 0.8733 | 1.0000 | 0.5004 | 0.9944 | 0.7464 |
 | WalkBet-drift-cont-v0 | prediction | 0.7135 | 1.0000 | 0.4998 | 0.9028 | 0.4272 |
 
-Baseline throughput on the same schedule: PPO 4,165,658 steps/s, Random 157,764,380 steps/s, Oracle 24,010,487 steps/s.
+Baseline throughput on the same schedule: PPO 4,527,081 steps/s, Random 130,648,945 steps/s, Oracle 24,373,675 steps/s.
 
 Rewards match the reference recording (`019b414811583459f6931b87ecf61724d6e31d68`) bit for bit on all 4,915 lanes across three promotions and one adoption; throughput increased 28.7%, the product of three interleaved paired probes (1.2226, 1.0302, 1.0215). The last two probes timed each candidate against the source snapshot carried by the recording it replaced; the reference recording carries no snapshot, so the first probe's reference binary cannot be rebuilt from this repository. The adoption renamed MemoryChain to TMaze-32-1, DeepSea to DeepSea-8 and LargeDeepSea to DeepSea-16, moved the replay tape to the lane's raw state words, and refiled the baselines under the new environment digests; every refiled baseline matches its predecessor bit for bit. No unhealthy lanes.
 

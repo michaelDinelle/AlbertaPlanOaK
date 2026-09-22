@@ -51,8 +51,8 @@
     F(walkbet, prediction)
 
 #define OAK_ENV_LIST(X) \
-    X(ACCESS_FIXED, access, 0u, "AccessControl-cont-v0", 6u, 2u, 0u, 6144u, 16u, 2u, noExtra) \
-    X(ACCESS_DRIFT, access, 1u, "AccessControl-drift-cont-v0", 6u, 2u, 0u, 6208u, 16u, 2u, noExtra) \
+    X(ACCESS_FIXED, access, 0u, "AccessControl-cont-v0", 6u, 2u, 0u, 6144u, 16u, 2u, access_extraWords) \
+    X(ACCESS_DRIFT, access, 1u, "AccessControl-drift-cont-v0", 6u, 2u, 0u, 6208u, 16u, 2u, access_extraWords) \
     X(ACROBOT, acrobot, 0u, "Acrobot-cont-v0", 7u, 3u, 0u, 256u, 32u, 4u, noExtra) \
     X(ACROBOT_SLIP, acrobot, 1u, "Acrobot-slip-cont-v0", 7u, 3u, 0u, 8320u, 64u, 4u, noExtra) \
     X(ACROBOT_POSITION, acrobot, 2u, "Acrobot-position-cont-v0", 7u, 3u, 0u, 8384u, 64u, 4u, noExtra) \
@@ -67,8 +67,8 @@
     X(SHORTCUTMAZE, blocking, 1u, "ShortcutMaze-cont-v0", 8u, 4u, 0u, 3904u, 64u, 2u, noExtra) \
     X(CALIBRATION_30, calibration, 0u, "Calibration-30-cont-v0", 2u, 2u, 0u, 2112u, 64u, 1u, noExtra) \
     X(CALIBRATION_80, calibration, 1u, "Calibration-80-cont-v0", 2u, 2u, 0u, 2176u, 64u, 1u, noExtra) \
-    X(CARTPOLE, cartpole, 0u, "CartPoleSwingUp-cont-v0", 6u, 3u, 0u, 7168u, 32u, 4u, noExtra) \
-    X(CARTPOLE_SLIP, cartpole, 1u, "CartPoleSwingUp-slip-cont-v0", 6u, 3u, 0u, 7232u, 64u, 4u, noExtra) \
+    X(CARTPOLE, cartpole, 0u, "CartPoleSwingUp-cont-v0", 6u, 3u, 0u, 7168u, 32u, 4u, cartpole_extraWords) \
+    X(CARTPOLE_SLIP, cartpole, 1u, "CartPoleSwingUp-slip-cont-v0", 6u, 3u, 0u, 7232u, 64u, 4u, cartpole_extraWords) \
     X(CATCH_5_10, catch, 0u, "Catch-5x10-cont-v0", 4u, 3u, 0u, 3136u, 27u, 3u, noExtra) \
     X(CATCH_10_20, catch, 1u, "Catch-10x20-cont-v0", 4u, 3u, 0u, 3200u, 16u, 3u, noExtra) \
     X(CATCH_NOISE, catch, 2u, "Catch-noise-cont-v0", 4u, 3u, 0u, 3264u, 41u, 3u, noExtra) \
@@ -79,9 +79,9 @@
     X(CLIFF_SLIP, cliff, 1u, "CliffWalk-slip-cont-v0", 7u, 4u, 0u, 6528u, 64u, 2u, noExtra) \
     X(COINSWAP_SLOW, coinswap, 0u, "CoinSwap-slow-cont-v0", 1u, 2u, 0u, 1344u, 25u, 1u, noExtra) \
     X(COINSWAP_FAST, coinswap, 1u, "CoinSwap-fast-cont-v0", 1u, 2u, 0u, 1408u, 17u, 1u, noExtra) \
-    X(TRACE_10, conditioning, 0u, "TraceConditioning-10-cont-v0", 5u, 2u, 0u, 4672u, 16u, 2u, noExtra) \
-    X(TRACE_100, conditioning, 1u, "TraceConditioning-100-cont-v0", 5u, 2u, 0u, 4736u, 16u, 2u, noExtra) \
-    X(PATTERNING, conditioning, 2u, "TracePatterning-cont-v0", 5u, 2u, 0u, 4800u, 16u, 2u, noExtra) \
+    X(TRACE_10, conditioning, 0u, "TraceConditioning-10-cont-v0", 5u, 2u, 0u, 4672u, 16u, 3u, noExtra) \
+    X(TRACE_100, conditioning, 1u, "TraceConditioning-100-cont-v0", 5u, 2u, 0u, 4736u, 16u, 3u, noExtra) \
+    X(PATTERNING, conditioning, 2u, "TracePatterning-cont-v0", 5u, 2u, 0u, 4800u, 16u, 3u, noExtra) \
     X(CONTEXTUAL_8, contextual, 0u, "Contextual-8-cont-v0", 9u, 4u, 0u, 1472u, 32u, 0u, contextual_extraWords) \
     X(CONTEXTUAL_16, contextual, 1u, "Contextual-16-cont-v0", 17u, 4u, 0u, 1536u, 16u, 0u, contextual_extraWords) \
     X(CONTEXTUAL_8_DRIFT, contextual, 2u, "Contextual-8-drift-cont-v0", 9u, 4u, 0u, 1600u, 39u, 0u, contextual_extraWords) \
@@ -104,10 +104,10 @@
     X(GARNET_LARGE, garnet, 1u, "Garnet-50-4-3-cont-v0", 7u, 4u, 0u, 6848u, 64u, 1u, garnet_extraWords) \
     X(GARNET_SMALL_RESAMPLE, garnet, 2u, "Garnet-10-2-2-resample-cont-v0", 5u, 2u, 0u, 6912u, 64u, 1u, garnet_extraWords) \
     X(GARNET_LARGE_RESAMPLE, garnet, 3u, "Garnet-50-4-3-resample-cont-v0", 7u, 4u, 0u, 6976u, 64u, 1u, garnet_extraWords) \
-    X(HASHED_8_LOCAL, hashed, 0u, "HashedMDP-8-local-cont-v0", 9u, 4u, 0u, 7552u, 64u, 1u, noExtra) \
-    X(HASHED_16_LOCAL, hashed, 1u, "HashedMDP-16-local-cont-v0", 17u, 4u, 0u, 7616u, 64u, 1u, noExtra) \
-    X(HASHED_8_GLOBAL, hashed, 2u, "HashedMDP-8-global-cont-v0", 9u, 4u, 0u, 7680u, 64u, 1u, noExtra) \
-    X(HASHED_16_GLOBAL, hashed, 3u, "HashedMDP-16-global-cont-v0", 17u, 4u, 0u, 7744u, 64u, 1u, noExtra) \
+    X(HASHED_8_LOCAL, hashed, 0u, "HashedMDP-8-local-cont-v0", 9u, 4u, 0u, 7552u, 64u, 1u, hashed_extraWords) \
+    X(HASHED_16_LOCAL, hashed, 1u, "HashedMDP-16-local-cont-v0", 17u, 4u, 0u, 7616u, 64u, 1u, hashed_extraWords) \
+    X(HASHED_8_GLOBAL, hashed, 2u, "HashedMDP-8-global-cont-v0", 9u, 4u, 0u, 7680u, 64u, 1u, hashed_extraWords) \
+    X(HASHED_16_GLOBAL, hashed, 3u, "HashedMDP-16-global-cont-v0", 17u, 4u, 0u, 7744u, 64u, 1u, hashed_extraWords) \
     X(HIDDENMODE_SLOW, hiddenmode, 0u, "HiddenMode-slow-cont-v0", 1u, 2u, 0u, 6016u, 38u, 1u, noExtra) \
     X(HIDDENMODE_FAST, hiddenmode, 1u, "HiddenMode-fast-cont-v0", 1u, 2u, 0u, 6080u, 52u, 1u, noExtra) \
     X(JELLYBEANWORLD, jbw, 0u, "JellyBeanWorld-cont-v0", 16u, 3u, 0u, 1024u, 64u, 9u, jbw_extraWords) \
@@ -141,7 +141,7 @@
     X(PENDULUM_POSITION, pendulum, 2u, "Pendulum-position-cont-v0", 4u, 1u, 1u, 8512u, 64u, 2u, noExtra) \
     X(PERMUTED_FIXED, permuted, 0u, "Permuted-fixed-cont-v0", 9u, 4u, 0u, 4416u, 16u, 1u, noExtra) \
     X(PERMUTED_RECODE, permuted, 1u, "Permuted-recode-cont-v0", 9u, 4u, 0u, 4480u, 64u, 1u, noExtra) \
-    X(PUDDLE, puddle, 0u, "PuddleWorld-cont-v0", 3u, 4u, 0u, 6400u, 16u, 2u, noExtra) \
+    X(PUDDLE, puddle, 0u, "PuddleWorld-cont-v0", 3u, 4u, 0u, 6400u, 16u, 2u, puddle_extraWords) \
     X(RECITE_4, recite, 0u, "Recite-4-cont-v0", 7u, 4u, 0u, 5568u, 16u, 2u, noExtra) \
     X(RECITE_16, recite, 1u, "Recite-16-cont-v0", 7u, 4u, 0u, 5632u, 16u, 2u, noExtra) \
     X(REGRESSION_8, regression, 0u, "Regression-8-cont-v0", 9u, 5u, 0u, 4032u, 64u, 8u, noExtra) \
@@ -162,8 +162,8 @@
     X(SUBSETPARITY_8_2, subsetparity, 2u, "SubsetParity-8-2-cont-v0", 9u, 2u, 0u, 4288u, 21u, 2u, noExtra) \
     X(SUBSETPARITY_16_2, subsetparity, 3u, "SubsetParity-16-2-cont-v0", 17u, 2u, 0u, 4352u, 16u, 2u, noExtra) \
     X(TAXI, taxi, 0u, "Taxi-cont-v0", 16u, 6u, 0u, 6720u, 16u, 4u, noExtra) \
-    X(TIGER_85, tiger, 0u, "Tiger-85-cont-v0", 3u, 3u, 0u, 5696u, 64u, 3u, noExtra) \
-    X(TIGER_60, tiger, 1u, "Tiger-60-cont-v0", 3u, 3u, 0u, 5760u, 64u, 3u, noExtra) \
+    X(TIGER_85, tiger, 0u, "Tiger-85-cont-v0", 3u, 3u, 0u, 5696u, 64u, 4u, noExtra) \
+    X(TIGER_60, tiger, 1u, "Tiger-60-cont-v0", 3u, 3u, 0u, 5760u, 64u, 4u, noExtra) \
     X(TRACKING_99, tracking, 0u, "Tracking-99-cont-v0", 2u, 1u, 1u, 1856u, 27u, 1u, noExtra) \
     X(TRACKING_999, tracking, 1u, "Tracking-999-cont-v0", 2u, 1u, 1u, 1920u, 53u, 1u, noExtra) \
     X(UMBRELLA_4, umbrella, 0u, "Umbrella-4-cont-v0", 4u, 2u, 0u, 2240u, 16u, 3u, noExtra) \
@@ -183,10 +183,14 @@
 OAK_FAMILY_LIST(OAK_FAMILY_PROTOTYPES)
 #define OAK_FAMILY_CATEGORY(family, category) static const char *const CATEGORY_##family = #category;
 OAK_FAMILY_LIST(OAK_FAMILY_CATEGORY)
+uint32_t access_extraWords(uint32_t instance, uint32_t steps);
+uint32_t cartpole_extraWords(uint32_t instance, uint32_t steps);
 uint32_t contextual_extraWords(uint32_t instance, uint32_t steps);
 uint32_t forager_extraWords(uint32_t instance, uint32_t steps);
 uint32_t garnet_extraWords(uint32_t instance, uint32_t steps);
+uint32_t hashed_extraWords(uint32_t instance, uint32_t steps);
 uint32_t jbw_extraWords(uint32_t instance, uint32_t steps);
+uint32_t puddle_extraWords(uint32_t instance, uint32_t steps);
 
 static inline uint32_t noExtra(uint32_t instance, uint32_t steps) { (void)instance; (void)steps; return 0u; }
 

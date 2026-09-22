@@ -3,6 +3,8 @@
 #define ACROBOT_DT 0.2f
 #define ACROBOT_OMEGA1_MAX 12.566371f
 #define ACROBOT_OMEGA2_MAX 28.274334f
+#define ACROBOT_ENERGY_TOP 19.6f
+#define ACROBOT_GOAL_REWARD 1.0f
 
 typedef struct { float slip; uint32_t positionOnly; } acrobotKnobs;
 
@@ -58,14 +60,15 @@ float acrobot_step(uint32_t instance, uint32_t seed, uint32_t step, const float 
     theta2 += sixthDt * (k1[1] + 2.0f * k2[1] + 2.0f * k3[1] + k4[1]);
     omega1 += sixthDt * (k1[2] + 2.0f * k2[2] + 2.0f * k3[2] + k4[2]);
     omega2 += sixthDt * (k1[3] + 2.0f * k2[3] + 2.0f * k3[3] + k4[3]);
-    omega1 = oak_clamp(omega1, -ACROBOT_OMEGA1_MAX, ACROBOT_OMEGA1_MAX);
-    omega2 = oak_clamp(omega2, -ACROBOT_OMEGA2_MAX, ACROBOT_OMEGA2_MAX);
     theta1 = wrapPi(theta1);
     theta2 = wrapPi(theta2);
     float reward = 0.0f;
     uint32_t done = 0u;
-    if (-oak_cos(theta1) - oak_cos(theta1 + theta2) > 1.0f) {
-        reward = 1.0f;
+    if (fabsf(omega1) > ACROBOT_OMEGA1_MAX || fabsf(omega2) > ACROBOT_OMEGA2_MAX) {
+        done = 1u;
+        theta1 = 0.0f; theta2 = 0.0f; omega1 = 0.0f; omega2 = 0.0f;
+    } else if (-oak_cos(theta1) - oak_cos(theta1 + theta2) > 1.0f) {
+        reward = ACROBOT_GOAL_REWARD;
         done = 1u;
         theta1 = 0.0f; theta2 = 0.0f; omega1 = 0.0f; omega2 = 0.0f;
     }
@@ -81,10 +84,18 @@ void acrobot_observe(uint32_t instance, uint32_t seed, const uint32_t *words, co
     acrobot_obs(&ACROBOT_KNOBS[instance], wordFloat(words[0]), wordFloat(words[1]), wordFloat(words[2]), wordFloat(words[3]), obs);
 }
 
+static float acrobot_energy(float theta1, float theta2, float omega1, float omega2) {
+    float cosTheta2 = oak_cos(theta2);
+    float inertia1 = 3.5f + cosTheta2, inertia2 = 1.25f + 0.5f * cosTheta2, inertia3 = 1.25f;
+    float kinetic = 0.5f * (inertia1 * omega1 * omega1 + 2.0f * inertia2 * omega1 * omega2 + inertia3 * omega2 * omega2);
+    return kinetic - 14.7f * oak_cos(theta1) - 4.9f * oak_cos(theta1 + theta2);
+}
+
 void acrobot_oracle(uint32_t instance, uint32_t seed, uint32_t step, const uint32_t *words, const uint32_t *extra, const float *obs, float *ctrl, const float *shared) {
     (void)shared;
     (void)instance;
     (void)seed; (void)step; (void)extra; (void)obs;
-    float omega2 = wordFloat(words[3]);
-    ctrl[0] = omega2 < 0.0f ? 0.0f : 2.0f;
+    float theta1 = wordFloat(words[0]), theta2 = wordFloat(words[1]), omega1 = wordFloat(words[2]), omega2 = wordFloat(words[3]);
+    if (acrobot_energy(theta1, theta2, omega1, omega2) > ACROBOT_ENERGY_TOP) ctrl[0] = omega1 > 0.0f ? 0.0f : 2.0f;
+    else ctrl[0] = omega2 < 0.0f ? 0.0f : 2.0f;
 }

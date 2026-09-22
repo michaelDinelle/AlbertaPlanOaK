@@ -10,5 +10,5 @@ export const aliasedDecoder: EnvDecoder = {
   discrete: true,
   decode(frame, out) { out[ALIASED_POS] = frame.words[0]!; out[ALIASED_TARGET] = frame.words[1]!; out[ALIASED_ACTION] = frame.actions[0]!; out[ALIASED_COLOUR] = frame.observations[0]!; },
   geometry: () => ({}),
-  deriveEvents: (_prev, next) => next.reward > 0 ? [{ type: 'goal' }] : NO_EVENTS,
+  deriveEvents: (_prev, next) => next.done !== 0 ? [{ type: 'goal' }, { type: 'done' }, { type: 'teleport' }] : NO_EVENTS,
 };

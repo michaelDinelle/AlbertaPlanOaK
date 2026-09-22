@@ -16,6 +16,6 @@ export const cliffDecoder: EnvDecoder = {
   },
   deriveEvents(_prev, next) {
     if (!next.done) return NO_EVENTS;
-    return next.reward === 0 ? [{ type: 'goal' }, { type: 'teleport' }, { type: 'done' }] : [{ type: 'teleport' }, { type: 'done' }];
+    return next.reward > 0 ? [{ type: 'goal' }, { type: 'teleport' }, { type: 'done' }] : [{ type: 'harm' }, { type: 'teleport' }, { type: 'done' }];
   },
 };

@@ -1,5 +1,7 @@
 #include "../env.h"
 
+#define SCENTPUCK_GOAL_REWARD 100.0f
+
 typedef struct { uint32_t competing; } scentpuckKnobs;
 
 static const scentpuckKnobs SCENTPUCK_KNOBS[2] = {
@@ -59,7 +61,7 @@ float scentpuck_step(uint32_t instance, uint32_t seed, uint32_t step, const floa
         reward -= oak_exp(-16.0f * (bx * bx + by * by));
     }
     if (dx * dx + dy * dy < 0.0025f) {
-        reward += 1.0f;
+        reward += SCENTPUCK_GOAL_REWARD;
         scentpuck_place(seed, step, 0u, words);
         if (k->competing) scentpuck_place(seed, step, 1u, words);
         *done = 1u;
