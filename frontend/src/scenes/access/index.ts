@@ -9,7 +9,7 @@ import { StageScene, type Stage } from '@kit/stage';
 import type { FrameUpdate, LegendSpec, SceneContext, SceneFactory, ScenePost, SceneSize } from '@kit/types';
 import { makeSceneView, type SceneView } from '@kit/view';
 import type { WorldCore } from '@kit/world';
-import { ACCESS_ACTION, ACCESS_FREE, ACCESS_PRIORITY } from '@sim/envs/access';
+import { ACCESS_ACTION, ACCESS_FREE, ACCESS_PRIORITY, accessFreeRate, accessPolicy } from '@sim/envs/access';
 import { constant, constantList, parameter } from '../../data/envs';
 import { formatCount, formatPercent, formatSigned } from '../../format';
 
@@ -80,7 +80,21 @@ class GatehouseQueueScene extends StageScene<GatehouseWorld> {
     this.view = makeSceneView(ctx, { min: [-7, -0.5, -4], max: [7, 3.5, 4] }, [0, 0.9, -0.6], { distance: 12, azimuth: -0.5, polar: 1.1 });
     return this.view.options;
   }
-  protected overlayOptions(): GroundTruthOptions { return { floor: [14, 8], agentPos: () => this.world!.courier.group.position }; }
+  protected overlayOptions(): GroundTruthOptions {
+    let solvedBucket = -1, policy = new Uint8Array(0);
+    return {
+      floor: [14, 8], agentPos: () => this.world!.courier.group.position,
+      debug: (frame, kit) => {
+        const world = this.world!, env = this.ctx!.environment, gold = this.ctx!.tokens.celebrationGold, cyan = this.ctx!.tokens.uiCyan, blue = this.ctx!.tokens.failureBlue;
+        const bucket = world.drift ? Math.floor(frame.state.step / (world.period / 256)) : 0;
+        if (bucket !== solvedBucket) { solvedBucket = bucket; policy = accessPolicy(world.servers, world.rewards, accessFreeRate(world.drift !== 0, frame.state.step, world.period), constant(env, 'ACCESS_SOLVE_ITERATIONS'), constant(env, 'ACCESS_SOLVE_TOLERANCE')); }
+        const free = this.ledger.free, priority = this.ledger.priority, admit = policy[priority * (world.servers + 1) + free] === 1;
+        const rooms = kit.bars('rooms', world.servers);
+        for (let i = 0; i < world.servers; i++) rooms.set((i - (world.servers - 1) / 2) * 0.34, 0.05, GATE_Z + 2.0, i < free ? 0.55 : 0.12, i < free ? cyan : 0x3a4a5a, 0.16);
+        kit.marks('verdict', 1).set(0, 2.6, GATE_Z, 0.14, admit ? gold : blue);
+      },
+    };
+  }
   protected start(_ctx: SceneContext, world: GatehouseWorld): void { if (world.drift) { this.legend.note = () => `snow tide ${formatPercent(0.5 + 0.5 * this.ledger.tide, 0)}`; this.legend.bar = () => 0.5 + 0.5 * this.ledger.tide; } }
   protected tick(frame: FrameUpdate, { world, pool, rig, time }: Stage<GatehouseWorld>): void {
     const step = frame.state.step, free = Math.round(frame.state.pose[ACCESS_FREE]!), priority = Math.round(frame.state.pose[ACCESS_PRIORITY]!);

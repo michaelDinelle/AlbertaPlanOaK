@@ -56,7 +56,10 @@ class RiverCrossingScene extends StageScene<WorldHandle> {
   }
 
   protected overlayOptions(): GroundTruthOptions {
-    return { agentCell: state => { this.cell.x = Math.round(state.pose[CHAIN_POS]!); return this.cell; }, goalCell: () => this.grid.goal! };
+    return {
+      agentCell: state => { this.cell.x = Math.round(state.pose[CHAIN_POS]!); return this.cell; },
+      goalCell: () => this.grid.goal!,
+    };
   }
 
   protected start(): void {

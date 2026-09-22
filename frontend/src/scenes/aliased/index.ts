@@ -88,7 +88,18 @@ class AliasedScene extends StageScene<RingWorld> {
     this.view = makeSceneView(ctx, { min: [-r, -0.5, -r], max: [r, 3, r] }, [0, 0.3, 0], { distance: Math.max(9, world.radius * 2), azimuth: 0.4, polar: 0.8 });
     return this.view.options;
   }
-  protected overlayOptions(): GroundTruthOptions { return { floor: [this.world!.radius * 2 + 4, this.world!.radius * 2 + 4], agentPos: () => this.world!.wisp.group.position }; }
+  protected overlayOptions(): GroundTruthOptions {
+    const at = new THREE.Vector3();
+    return {
+      floor: [this.world!.radius * 2 + 4, this.world!.radius * 2 + 4], agentPos: () => this.world!.wisp.group.position,
+      debug: (_frame, kit) => {
+        const world = this.world!;
+        world.at(this.ledger.target, at);
+        kit.marks('target', 1).set(at.x, 0.9, at.z, 0.16, this.ctx!.tokens.celebrationGold);
+        kit.trail('path', 64, this.ctx!.tokens.uiCyan).push(world.wisp.group.position.x, 0.5, world.wisp.group.position.z);
+      },
+    };
+  }
   protected start(): void {}
   protected tick(frame: FrameUpdate, { ctx, world, pool, rig, time }: Stage<RingWorld>): void {
     const pos = Math.round(frame.state.pose[ALIASED_POS]!), claim = (Math.trunc(frame.state.pose[ALIASED_ACTION]!) & 1) === 1;

@@ -11,6 +11,7 @@ import type { FrameUpdate, LegendSpec, SceneContext, SceneFactory, ScenePost, Sc
 import { makeSceneView, type SceneView } from '@kit/view';
 import type { WorldCore } from '@kit/world';
 import { PERMUTED_ACTION } from '@sim/envs/permuted';
+import { philox4x32_10, STREAM_RESET } from '@sim/philox';
 import { constant, parameter } from '../../data/envs';
 import { formatCount, formatSigned } from '../../format';
 
@@ -112,7 +113,16 @@ class CipherWheelScene extends StageScene<WheelWorld> {
     this.view = makeSceneView(ctx, { min: [-4, -0.5, -3.5], max: [4, 2.5, 4] }, [0, 0.6, 0.6], { distance: 9.5, azimuth: 0.2, polar: 0.95 });
     return this.view.options;
   }
-  protected overlayOptions(): GroundTruthOptions { return { floor: [8, 8] }; }
+  protected overlayOptions(): GroundTruthOptions {
+    const lookup = Array.from({ length: constant(this.ctx!.environment, 'PERMUTED_STATES') }, (_, state) => philox4x32_10(this.ctx!.seed, STREAM_RESET, 0xffff, state, 0, 0)[0] % constant(this.ctx!.environment, 'PERMUTED_ACTIONS'));
+    return {
+      floor: [8, 8],
+      debug: (frame, kit) => {
+        const world = this.world!, answer = lookup[frame.frameAt(frame.state.step).words[0]!]!;
+        kit.marks('answer', 1).set((answer - (world.actions - 1) / 2) * 0.7, 1.3, world.answerZ, 0.11, this.ctx!.tokens.celebrationGold);
+      },
+    };
+  }
   protected start(_ctx: SceneContext, world: WheelWorld): void {
     if (world.recodePeriod > 0) { this.legend.note = () => `wheel recodes in ${formatCount(world.recodePeriod - this.step % world.recodePeriod)} steps`; this.legend.bar = () => (Math.max(0, this.step) % world.recodePeriod) / world.recodePeriod; }
   }

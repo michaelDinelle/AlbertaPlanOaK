@@ -114,7 +114,24 @@ class WeatherStationScene extends StageScene<StationWorld> {
     this.view = makeSceneView(ctx, { min: [-5, -0.5, -3.5], max: [5, 3, 3.5] }, [0, 0.9, 0], { distance: 10.5, azimuth: 0.36, polar: 1.1 });
     return this.view.options;
   }
-  protected overlayOptions(): GroundTruthOptions { return { floor: [10, 8] }; }
+  protected overlayOptions(): GroundTruthOptions {
+    return {
+      floor: [10, 8],
+      debug: (frame, kit) => {
+        const pose = frame.state.pose, obs = frame.state.observations, gold = this.ctx!.tokens.celebrationGold, cyan = this.ctx!.tokens.cueCyan;
+        const inputs = kit.bars('inputs', 4), weights = kit.bars('weights', 5);
+        let sum = pose[COVARIATE_WEIGHTS + 4]!;
+        for (let j = 0; j < 4; j++) {
+          const x = [-3, -1, 1, 3][j]!, value = obs[j] ?? 0, w = pose[COVARIATE_WEIGHTS + j]!;
+          sum += w * value;
+          inputs.set(x - 0.35, STATION_Y + 1.2, STATION_Z, value * 0.35, 0xdcf4ff, 0.1);
+          weights.set((j - 2) * 0.45, 0.4, -2.4, w * 0.45, w >= 0 ? gold : cyan, 0.1);
+        }
+        weights.set(2 * 0.45, 0.4, -2.4, pose[COVARIATE_WEIGHTS + 4]! * 0.45, 0xffffff, 0.1);
+        kit.marks('truth', 1).set(sum > 0 ? 0.8 : -0.8, 1.6, 2.3, 0.14, sum > 0 ? gold : cyan);
+      },
+    };
+  }
   protected start(_ctx: SceneContext, world: StationWorld): void {
     world.weightRods.forEach(rod => { rod.scale.y = 1; });
     if (world.shift !== 0) { this.legend.note = () => `front turns in ${formatCount(world.period - Math.max(0, this.step) % world.period)} steps`; this.legend.bar = () => (Math.max(0, this.step) % world.period) / world.period; }

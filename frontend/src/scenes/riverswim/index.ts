@@ -119,7 +119,10 @@ class RiverFordScene extends StageScene<FordWorld> {
     return this.view.options;
   }
   protected overlayOptions(): GroundTruthOptions {
-    return { agentCell: state => { this.cell.x = Math.round(state.pose[RIVERSWIM_POS]!); return this.cell; }, goalCell: () => this.world!.grid.goal! };
+    return {
+      agentCell: state => { this.cell.x = Math.round(state.pose[RIVERSWIM_POS]!); return this.cell; },
+      goalCell: () => this.world!.grid.goal!,
+    };
   }
   protected start(_ctx: SceneContext, world: FordWorld): void { world.wisp.setCell(0, 0, world.grid); }
   protected tick(frame: FrameUpdate, { ctx, world, pool, rig, time }: Stage<FordWorld>): void {

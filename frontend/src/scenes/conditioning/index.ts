@@ -115,7 +115,15 @@ class BellPoleScene extends StageScene<BellWorld> {
     this.view = makeSceneView(ctx, { min: [-5, -0.5, -4], max: [5, 3.8, 3.5] }, [0, 1.1, -0.2], { distance: 11, azimuth: 0.28, polar: 1.05 });
     return this.view.options;
   }
-  protected overlayOptions(): GroundTruthOptions { return { floor: [10, 8], agentPos: () => this.world!.sentinel.group.position }; }
+  protected overlayOptions(): GroundTruthOptions {
+    return {
+      floor: [10, 8], agentPos: () => this.world!.sentinel.group.position,
+      debug: (_frame, kit) => {
+        const world = this.world!, remaining = this.ledger.remaining;
+        if (remaining > 0) { ribbonPoint(world.interval + 1 - remaining, world.interval + 1, world.ribbonHead); kit.marks('rung', 1).set(world.ribbonHead.x, 0.85, world.ribbonHead.z, 0.1, this.ctx!.tokens.celebrationGold); }
+      },
+    };
+  }
   protected start(): void {}
   protected tick(frame: FrameUpdate, { world, pool, rig, time }: Stage<BellWorld>): void {
     const { state } = frame, remaining = Math.trunc(state.pose[CONDITIONING_COUNTDOWN]!);

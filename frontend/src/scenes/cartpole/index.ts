@@ -5,7 +5,7 @@ import { slipDraw } from '@kit/props/ice';
 import { StageScene, type Stage } from '@kit/stage';
 import type { FrameUpdate, LegendSpec, SceneContext, SceneFactory, ScenePost, SceneSize } from '@kit/types';
 import { makeSceneView, type SceneView } from '@kit/view';
-import { CARTPOLE_ACTION, CARTPOLE_THETA, CARTPOLE_X, CARTPOLE_XDOT, cartpoleForce, CP_SPEED_SCALE, CP_TRACK_HALF } from '@sim/envs/cartpole';
+import { CARTPOLE_ACTION, CARTPOLE_THETA, CARTPOLE_THETADOT, CARTPOLE_X, CARTPOLE_XDOT, cartpoleForce, CP_SPEED_SCALE, CP_TRACK_HALF } from '@sim/envs/cartpole';
 import { constant, parameter } from '../../data/envs';
 import { formatPercent, formatSigned } from '../../format';
 import { buildCart } from './actors';
@@ -53,7 +53,20 @@ class PrairieRailScene extends StageScene<PrairieWorld> {
   }
 
   protected overlayOptions(): GroundTruthOptions {
-    return { floor: [COURT_HALF_X * 2, COURT_HALF_Z * 2], profileRange: [-CP_TRACK_HALF, CP_TRACK_HALF], agentPos: (state) => this.overlayPos.set(state.pose[CARTPOLE_X] ?? 0, RAIL_Y, 0) };
+    return {
+      floor: [COURT_HALF_X * 2, COURT_HALF_Z * 2],
+      profileRange: [-CP_TRACK_HALF, CP_TRACK_HALF],
+      agentPos: (state) => this.overlayPos.set(state.pose[CARTPOLE_X] ?? 0, RAIL_Y, 0),
+      debug: (frame, kit) => {
+        const pose = frame.state.pose, x = pose[CARTPOLE_X] ?? 0, xDot = pose[CARTPOLE_XDOT] ?? 0, thetaDot = pose[CARTPOLE_THETADOT] ?? 0;
+        const gold = this.ctx!.tokens.celebrationGold, cyan = this.ctx!.tokens.uiCyan, red = 0xff6b57;
+        kit.bars('motion', 2).set(x - 0.16, RAIL_Y + 0.06, 0.25, xDot * 0.25, cyan, 0.05);
+        kit.bars('motion', 2).set(x + 0.16, RAIL_Y + 0.06, 0.25, thetaDot * 0.08, gold, 0.05);
+        kit.marks('edges', 2).set(-CP_TRACK_HALF, RAIL_Y, 0, 0.08, red);
+        kit.marks('edges', 2).set(CP_TRACK_HALF, RAIL_Y, 0, 0.08, red);
+        kit.trail('tip', 120, gold).push(this.cart.tipWorld.x, this.cart.tipWorld.y, this.cart.tipWorld.z + 0.02);
+      },
+    };
   }
 
   protected start(ctx: SceneContext): void { this.cart.setState(0, Math.PI, 0, 0, 0); this.cart.setPixelRatio(ctx.size.dpr); }

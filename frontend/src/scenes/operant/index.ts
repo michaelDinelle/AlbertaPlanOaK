@@ -96,7 +96,14 @@ class BellTowerScene extends StageScene<TowerWorld> {
     this.view = makeSceneView(ctx, { min: [-5, -0.5, -4], max: [5, top, 4] }, [0.3, top * 0.45, -0.8], { distance: 8.5 + top * 1.1, azimuth: 0.6, polar: 1.12 });
     return this.view.options;
   }
-  protected overlayOptions(): GroundTruthOptions { return { floor: [10, 8], agentPos: () => this.world!.sentinel.group.position }; }
+  protected overlayOptions(): GroundTruthOptions {
+    return {
+      floor: [10, 8], agentPos: () => this.world!.sentinel.group.position,
+      debug: (_frame, kit) => {
+        kit.marks('cue', 1).set(-1.4, 1.6, TOWER_Z + 1.6, this.ledger.cue ? 0.14 : 0.07, this.ledger.cue ? this.ctx!.tokens.cueCyan : 0x33404f);
+      },
+    };
+  }
   protected start(): void {}
   protected tick(frame: FrameUpdate, { world, pool, rig, time }: Stage<TowerWorld>): void {
     const step = frame.state.step, cue = Math.round(frame.state.pose[OPERANT_CUE]!) === 1, press = Math.round(frame.state.pose[OPERANT_ACTION]!) === 1;

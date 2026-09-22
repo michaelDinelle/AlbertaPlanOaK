@@ -109,7 +109,14 @@ class UmbrellaScene extends StageScene<UmbrellaWorld> {
     this.view = makeSceneView(ctx, { min: [-5, -0.5, -world.halfL - 4], max: [5, 3.5, world.halfL + 3] }, [0, 0.6, -world.halfL * 0.1], { distance: 11, azimuth: 0.45, polar: 1.05 });
     return this.view.options;
   }
-  protected overlayOptions(): GroundTruthOptions { return { floor: [10, this.world!.halfL * 2 + 8], agentPos: () => this.world!.sentinel.group.position }; }
+  protected overlayOptions(): GroundTruthOptions {
+    return {
+      floor: [10, this.world!.halfL * 2 + 8], agentPos: () => this.world!.sentinel.group.position,
+      debug: (_frame, kit) => {
+        kit.bars('phase', 1).set(1.6, 0.05, this.z, 0.04 + 1.0 * this.ledger.phase / (this.world!.length - 1), this.ctx!.tokens.uiCyan, 0.1);
+      },
+    };
+  }
   protected start(_ctx: SceneContext, world: UmbrellaWorld): void { this.z = world.halfL; world.post.lit(0.7); }
   protected tick(frame: FrameUpdate, { world, pool, rig, time }: Stage<UmbrellaWorld>): void {
     const pose = frame.state.pose, phase = Math.round(pose[UMBRELLA_PHASE]!), need = pose[UMBRELLA_NEED]! > 0.5, have = pose[UMBRELLA_HAVE]! > 0.5;

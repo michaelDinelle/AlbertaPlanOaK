@@ -15,7 +15,6 @@ class FrozenLakeScene extends StageScene<FrozenLakeWorld> {
   protected readonly stageName = 'frozenLake';
   private view!: SceneView;
   private wisp!: Wisp;
-  private readonly overlayPos = new THREE.Vector3();
   private readonly ledger = { target: 0, observed: 0, estimate: 0, reward: 0 };
   override legend: LegendSpec = {
     title: 'TRACK',
@@ -42,7 +41,20 @@ class FrozenLakeScene extends StageScene<FrozenLakeWorld> {
   }
 
   protected overlayOptions(): GroundTruthOptions {
-    return { floor: [LAKE_HALF_X * 2, LAKE_HALF_Z * 2], profileRange: [-LAKE_HALF_X, LAKE_HALF_X], agentPos: (state) => this.overlayPos.set((state.pose[TRACK_ESTIMATE] ?? 0) * TRACK_SCALE, ICE_LEVEL, WISP_Z) };
+    const at = new THREE.Vector3();
+    return {
+      floor: [LAKE_HALF_X * 2, LAKE_HALF_Z * 2], profileRange: [-LAKE_HALF_X, LAKE_HALF_X], agentPos: (state) => at.set((state.pose[TRACK_ESTIMATE] ?? 0) * TRACK_SCALE, ICE_LEVEL, WISP_Z),
+      debug: (_frame, kit) => {
+        const gold = this.ctx!.tokens.celebrationGold, cyan = this.ctx!.tokens.uiCyan;
+        const target = this.ledger.target, estimate = this.ledger.estimate;
+        kit.marks('track', 3).set(target * TRACK_SCALE, ICE_LEVEL + 0.35, WISP_Z - 1.2, 0.12, gold);
+        kit.marks('track', 3).set(this.ledger.observed * TRACK_SCALE, ICE_LEVEL + 0.35, WISP_Z - 0.6, 0.09, this.ctx!.tokens.cueMagenta);
+        kit.marks('track', 3).set(estimate * TRACK_SCALE, ICE_LEVEL + 0.35, WISP_Z, 0.1, cyan);
+        const line = kit.curve('miss', 2, cyan);
+        line.point(estimate * TRACK_SCALE, ICE_LEVEL + 0.35, WISP_Z); line.point(target * TRACK_SCALE, ICE_LEVEL + 0.35, WISP_Z - 1.2);
+        kit.trail('star', 120, gold).push(target * TRACK_SCALE, ICE_LEVEL + 0.35, WISP_Z - 1.2);
+      },
+    };
   }
 
   protected start(_ctx: SceneContext, world: FrozenLakeWorld): void {

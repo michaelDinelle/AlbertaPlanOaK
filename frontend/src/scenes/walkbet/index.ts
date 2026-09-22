@@ -91,7 +91,26 @@ class CanyonWalkwayScene extends StageScene<CanyonWorld> {
     this.view = makeSceneView(ctx, { min: [-edge - 3, -0.5, -4], max: [edge + 3, 3.5, 3] }, [0, 1, -0.2], { distance: edge * 1.9, azimuth: 0.12, polar: 1.12 });
     return this.view.options;
   }
-  protected overlayOptions(): GroundTruthOptions { return { floor: [this.world!.edge * 2 + 6, 8], agentPos: () => this.world!.sentinel.group.position }; }
+  protected overlayOptions(): GroundTruthOptions {
+    const absorbRight = (p: number, position: number, cells: number): number => {
+      if (Math.abs(p - 0.5) < 1e-6) return position / cells;
+      const ratio = (1 - p) / p;
+      return (1 - ratio ** position) / (1 - ratio ** cells);
+    };
+    return {
+      floor: [this.world!.edge * 2 + 6, 8], agentPos: () => this.world!.sentinel.group.position,
+      debug: (frame, kit) => {
+        const world = this.world!, gold = this.ctx!.tokens.celebrationGold, cyan = this.ctx!.tokens.uiCyan;
+        const p = world.drift ? 0.5 + 0.2 * Math.sin(2 * Math.PI * ((frame.state.step + 1) % world.period) / world.period) : 0.5;
+        const curve = kit.curve('absorb', world.cells + 1, gold);
+        let threshold = -1;
+        for (let i = 0; i <= world.cells; i++) { const q = absorbRight(p, i, world.cells); curve.point(world.xOf(i), DECK_Y + 0.5 + q * 1.4, -0.9); if (threshold < 0 && q > 0.5) threshold = i; }
+        const here = absorbRight(p, this.ledger.position, world.cells);
+        kit.marks('here', 2).set(world.xOf(this.ledger.position), DECK_Y + 0.5 + here * 1.4, -0.9, 0.1, cyan);
+        if (threshold >= 0) kit.marks('here', 2).set(world.xOf(threshold), DECK_Y + 0.5 + 0.7, -0.9, 0.08, gold);
+      },
+    };
+  }
   protected start(_ctx: SceneContext, world: CanyonWorld): void { this.from = this.to = world.xOf(world.half); }
   protected tick(frame: FrameUpdate, { world, pool, rig, time }: Stage<CanyonWorld>): void {
     const { state } = frame, position = Math.trunc(state.pose[WALKBET_POSITION]!);

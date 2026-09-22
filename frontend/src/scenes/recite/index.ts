@@ -90,7 +90,15 @@ class ReciteScene extends StageScene<ReciteWorld> {
     this.view = makeSceneView(ctx, { min: [-world.radius - 2, -0.5, -world.radius - 3], max: [world.radius + 2, 3, 3] }, [0, 0.8, -world.radius * 0.35], { distance: Math.max(11, world.radius * 2.6), azimuth: 0.05, polar: 1.0 });
     return this.view.options;
   }
-  protected overlayOptions(): GroundTruthOptions { return { floor: [this.world!.radius * 2 + 4, this.world!.radius + 6], agentPos: () => this.world!.sentinel.group.position }; }
+  protected overlayOptions(): GroundTruthOptions {
+    return {
+      floor: [this.world!.radius * 2 + 4, this.world!.radius + 6], agentPos: () => this.world!.sentinel.group.position,
+      debug: (frame, kit) => {
+        const world = this.world!, phase = Math.round(frame.state.pose[RECITE_PHASE]!), index = phase < world.length ? phase : phase - world.length;
+        if (index >= 0 && index < world.length) kit.marks('seat', 1).set(world.seats[index]!.x, world.seats[index]!.y + 0.3, world.seats[index]!.z, 0.1, this.ctx!.tokens.celebrationGold);
+      },
+    };
+  }
   protected start(_ctx: SceneContext, world: ReciteWorld): void { this.symbols = new Uint8Array(world.length); }
   protected tick(frame: FrameUpdate, { ctx, world, pool, rig, time }: Stage<ReciteWorld>): void {
     const sequence = Math.round(frame.state.pose[RECITE_SEQUENCE]!), phase = Math.round(frame.state.pose[RECITE_PHASE]!), action = Math.trunc(frame.state.pose[RECITE_ACTION]!) % world.symbols;

@@ -52,7 +52,13 @@ class WinterCandyScene extends StageScene<ParklandWorld> {
     return this.view.options;
   }
   protected overlayOptions(): GroundTruthOptions {
-    return { floor: [9, 9], frame: () => ({ originX: this.x, originY: this.position.y, originZ: this.y, agent: this.cellOrigin, cone: this.noCone, coneCount: 0 }) };
+    return {
+      floor: [9, 9],
+      frame: () => ({ originX: this.x, originY: this.position.y, originZ: this.y, agent: this.cellOrigin, cone: this.noCone, coneCount: 0 }),
+      debug: (_frame, kit) => {
+        kit.trail('walk', 80, this.ctx!.tokens.uiCyan).push(this.position.x, this.position.y + 0.1, this.position.z);
+      },
+    };
   }
   protected start(ctx: SceneContext): void { this.period = parameter(ctx.environment, 'polarityPeriod'); this.resize(ctx.size); }
 

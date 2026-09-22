@@ -7,7 +7,7 @@ import { type OrbitRigOptions } from '@kit/rigs';
 import { makeSceneView, type SceneView } from '@kit/view';
 import { StageScene, type Stage } from '@kit/stage';
 import type { FrameState, FrameUpdate, LegendSpec, SceneContext, SceneFactory, ScenePost, SceneSize } from '@kit/types';
-import { MC_GOAL_POS, MC_START_POS, MOUNTAINCAR_ACTION, MOUNTAINCAR_POS, MOUNTAINCAR_VEL, mountainCarForce, mountainCarSlope } from '@sim/envs/mountainCar';
+import { MC_GOAL_POS, MC_MAX_SPEED, MC_START_POS, MOUNTAINCAR_ACTION, MOUNTAINCAR_POS, MOUNTAINCAR_VEL, mountainCarForce, mountainCarSlope } from '@sim/envs/mountainCar';
 import { parameter } from '../../data/envs';
 import { buildCart, type CartHandle } from './actors';
 import { buildWorld, heightResolver, type WorldHandle } from './world';
@@ -109,6 +109,14 @@ class AlpineValleyScene extends StageScene<WorldHandle> {
       agentPos: (state) => {
         const x = state.pose[MOUNTAINCAR_POS] ?? 0;
         return this.overlayPos.set(x, this.heightAt(x), 0);
+      },
+      debug: (frame, kit) => {
+        const pos = frame.state.pose[MOUNTAINCAR_POS] ?? 0, vel = frame.state.pose[MOUNTAINCAR_VEL] ?? 0, force = forceOf(frame.state), gold = this.gold, cyan = this.ctx!.tokens.uiCyan;
+        const y = this.heightAt(pos);
+        kit.bars('motion', 2).set(pos, y + 0.05, 0.08, vel / MC_MAX_SPEED * 0.3, cyan, 0.02);
+        kit.bars('motion', 2).set(pos + 0.04, y + 0.05, 0.08, force * 0.12, gold, 0.02);
+        kit.marks('goal', 1).set(MC_GOAL_POS, this.heightAt(MC_GOAL_POS) + 0.08, 0, 0.03, gold);
+        kit.trail('cart', 160, cyan).push(pos, y + 0.02, 0.02);
       },
     };
   }

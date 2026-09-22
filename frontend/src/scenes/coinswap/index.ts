@@ -75,7 +75,15 @@ class TwoLanternsScene extends StageScene<LanternWorld> {
     this.view = makeSceneView(ctx, { min: [-5, -0.5, -4], max: [5, 3.5, 3] }, [0, 1, -0.4], { distance: 9, azimuth: 0.3, polar: 1.1 });
     return this.view.options;
   }
-  protected overlayOptions(): GroundTruthOptions { return { floor: [10, 8], agentPos: () => this.world!.sentinel.group.position }; }
+  protected overlayOptions(): GroundTruthOptions {
+    return {
+      floor: [10, 8], agentPos: () => this.world!.sentinel.group.position,
+      debug: (_frame, kit) => {
+        const lamp = this.world!.lamps[this.ledger.coin]!;
+        kit.marks('coin', 1).set(lamp.x, 2.75, LAMP_Z, 0.16, this.ctx!.tokens.celebrationGold);
+      },
+    };
+  }
   protected start(): void {}
   protected tick(frame: FrameUpdate, { world, pool, time }: Stage<LanternWorld>): void {
     const step = frame.state.step, coin = Math.round(frame.state.pose[COINSWAP_COIN]!) & 1, guess = Math.round(frame.state.pose[COINSWAP_ACTION]!) & 1;

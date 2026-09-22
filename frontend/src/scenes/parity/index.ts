@@ -90,7 +90,18 @@ class ParityScene extends StageScene<LoomWorld> {
     this.view = makeSceneView(ctx, { min: [-6.5, -0.5, -3], max: [6.5, 3.5, 3.5] }, [0, 1.1, 0.3], { distance: 12, azimuth: 0.25, polar: 1.15 });
     return this.view.options;
   }
-  protected overlayOptions(): GroundTruthOptions { return { floor: [14, 8], agentPos: () => this.world!.sentinel.group.position }; }
+  protected overlayOptions(): GroundTruthOptions {
+    return {
+      floor: [14, 8], agentPos: () => this.world!.sentinel.group.position,
+      debug: (frame, kit) => {
+        const world = this.world!, pose = frame.state.pose, gold = this.ctx!.tokens.celebrationGold, cyan = this.ctx!.tokens.uiCyan, x0 = -(PARITY_REGISTER - 1) * SPACING / 2;
+        const a = pose[world.delay]! > 0.5 ? 1 : 0, b = pose[world.delay + 1]! > 0.5 ? 1 : 0, marks = kit.marks('pair', 3);
+        marks.set(x0 + world.delay * SPACING, THREAD_Y + 1.25, 0, 0.09, a ? gold : 0x33404f);
+        marks.set(x0 + (world.delay + 1) * SPACING, THREAD_Y + 1.25, 0, 0.09, b ? gold : 0x33404f);
+        marks.set(x0, THREAD_Y + 1.25, 0, 0.08, pose[0]! > 0.5 ? cyan : 0x33404f);
+      },
+    };
+  }
   protected start(): void {}
   protected tick(frame: FrameUpdate, { world, pool, rig, time }: Stage<LoomWorld>): void {
     const pose = frame.state.pose, action = Math.trunc(pose[PARITY_ACTION]!) & 1;

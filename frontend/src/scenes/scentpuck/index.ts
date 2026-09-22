@@ -6,7 +6,7 @@ import { blendTokens } from '@kit/mix';
 import { StageScene, type Stage } from '@kit/stage';
 import type { FrameUpdate, LegendSpec, SceneContext, SceneFactory, ScenePost, SceneSize } from '@kit/types';
 import { makeSceneView, type SceneView } from '@kit/view';
-import { SCENT_ACTION, SCENT_DECOY_X, SCENT_DECOY_Y, SCENT_GOAL_X, SCENT_GOAL_Y, SCENT_X, SCENT_Y, SP_STEP } from '@sim/envs/scentpuck';
+import { SCENT_ACTION, SCENT_DECOY_X, SCENT_DECOY_Y, SCENT_GOAL_X, SCENT_GOAL_Y, SCENT_X, SCENT_Y, SP_STEP, scentAt } from '@sim/envs/scentpuck';
 import { formatPercent, formatRate, formatSigned } from '../../format';
 import { buildWorld, DECOY_TINT, HALF, SCALE, toWorldX, toWorldZ, type BadlandsWorld } from './world';
 
@@ -25,7 +25,6 @@ class BadlandsScene extends StageScene<BadlandsWorld> {
   private readonly at = new THREE.Vector3();
   private readonly last = new THREE.Vector3();
   private yaw = 0;
-  private readonly overlayPos = new THREE.Vector3();
   private readonly ledger = { scent: 0, decoy: 0, distance: 0, move: 4, reward: 0 };
   override legend: LegendSpec = {
     title: 'SCENT',
@@ -59,7 +58,23 @@ class BadlandsScene extends StageScene<BadlandsWorld> {
   }
 
   protected overlayOptions(): GroundTruthOptions {
-    return { floor: [HALF * 2 + 1, HALF * 2 + 1], agentPos: (state) => this.overlayPos.set(toWorldX(state.pose[SCENT_X] ?? 0), 0, toWorldZ(state.pose[SCENT_Y] ?? 0)) };
+    const samples = 17;
+    return {
+      floor: [HALF * 2 + 1, HALF * 2 + 1], agentPos: () => this.at,
+      debug: (frame, kit) => {
+        const world = this.world!, pose = frame.state.pose, gold = this.ctx!.tokens.celebrationGold;
+        const gx = pose[SCENT_GOAL_X] ?? 0, gy = pose[SCENT_GOAL_Y] ?? 0, field = kit.marks('scent', samples * samples);
+        for (let j = 0; j < samples; j++) for (let i = 0; i < samples; i++) {
+          const sx = -1 + 2 * i / (samples - 1), sy = -1 + 2 * j / (samples - 1), scent = scentAt(sx - gx, sy - gy);
+          if (scent > 0.02) field.set(toWorldX(sx), 0.12 + scent * 0.8, toWorldZ(sy), 0.02 + scent * 0.12, gold);
+        }
+        kit.marks('goal', 2).set(toWorldX(gx), 1.1, toWorldZ(gy), 0.16, gold);
+        if (world.competing) kit.marks('goal', 2).set(toWorldX(pose[SCENT_DECOY_X] ?? 0), 1.1, toWorldZ(pose[SCENT_DECOY_Y] ?? 0), 0.13, DECOY_TINT);
+        kit.trail('walked', 120, this.ctx!.tokens.uiCyan).push(this.at.x, this.at.y + 0.08, this.at.z);
+        const line = kit.curve('bearing', 2, gold);
+        line.point(this.at.x, this.at.y + 0.3, this.at.z); line.point(toWorldX(gx), 0.3, toWorldZ(gy));
+      },
+    };
   }
 
   protected start(_ctx: SceneContext, world: BadlandsWorld): void {

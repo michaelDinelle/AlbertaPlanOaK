@@ -86,7 +86,21 @@ class LampObservatoryScene extends StageScene<ObservatoryWorld> {
     this.view = makeSceneView(ctx, { min: [-6, -0.5, -6], max: [6, 7, 6] }, [0, 1.6, 0], { distance: 13, azimuth: 0.55, polar: 1.05 });
     return this.view.options;
   }
-  protected overlayOptions(): GroundTruthOptions { return { floor: [12, 12], agentPos: () => this.world!.sentinel.group.position }; }
+  protected overlayOptions(): GroundTruthOptions {
+    return {
+      floor: [12, 12], agentPos: () => this.world!.sentinel.group.position,
+      debug: (_frame, kit) => {
+        const world = this.world!, gold = this.ctx!.tokens.celebrationGold, cyan = this.ctx!.tokens.uiCyan;
+        let lo = Infinity, hi = -Infinity;
+        for (let a = 0; a < world.arms; a++) { lo = Math.min(lo, this.values[a]!); hi = Math.max(hi, this.values[a]!); }
+        const span = hi - lo || 1, bars = kit.bars('values', world.arms);
+        world.lamps.forEach((l, a) => {
+          const value = this.values[a]!, height = 0.15 + 1.2 * (value - lo) / span, tint = a === this.ledger.best ? gold : a === this.ledger.pulled ? cyan : 0x8fa6c4;
+          bars.set(l.x, 2.2, l.z, height, tint, 0.14);
+        });
+      },
+    };
+  }
   protected start(_ctx: SceneContext, world: ObservatoryWorld): void { this.checkpoints.set(0, world.weights.slice()); }
 
   private advanceWeights(world: ObservatoryWorld, seed: number, target: number): void {

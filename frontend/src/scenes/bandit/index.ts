@@ -71,7 +71,20 @@ class BrazierHallScene extends StageScene<HallWorld> {
     this.view = makeSceneView(ctx, { min: [-7, -0.5, -5], max: [7, 3, 4] }, [0, 0.8, -0.6], { distance: 12, azimuth: 0.32, polar: 1.12 });
     return this.view.options;
   }
-  protected overlayOptions(): GroundTruthOptions { return { floor: [14, 10], agentPos: () => this.world!.sentinel.group.position }; }
+  protected overlayOptions(): GroundTruthOptions {
+    return {
+      floor: [14, 10], agentPos: () => this.world!.sentinel.group.position,
+      debug: (frame, kit) => {
+        const world = this.world!, raw = frame.frameAt(frame.state.step), gold = this.ctx!.tokens.celebrationGold, cyan = this.ctx!.tokens.uiCyan;
+        const means = world.braziers.map((_, i) => banditMean(raw, i)), lo = Math.min(...means), hi = Math.max(...means), span = hi - lo || 1;
+        const bars = kit.bars('means', means.length);
+        means.forEach((mean, i) => {
+          const b = world.braziers[i]!, height = 0.15 + 1.2 * (mean - lo) / span, tint = i === this.ledger.best ? gold : i === this.ledger.pulled ? cyan : 0x8fa6c4;
+          bars.set(b.x, 1.7, b.z, height, tint, 0.14);
+        });
+      },
+    };
+  }
   protected start(): void {}
   protected tick(frame: FrameUpdate, { world, pool, rig, time }: Stage<HallWorld>): void {
     const step = frame.state.step, raw = frame.frameAt(step), arms = world.braziers.length;

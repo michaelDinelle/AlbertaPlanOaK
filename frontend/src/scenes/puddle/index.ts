@@ -5,7 +5,8 @@ import { envelope } from '@kit/mix';
 import { StageScene, type Stage } from '@kit/stage';
 import type { FrameUpdate, LegendSpec, SceneContext, SceneFactory, ScenePost, SceneSize } from '@kit/types';
 import { makeSceneView, type SceneView } from '@kit/view';
-import { PUDDLE_ACTION, PUDDLE_PENALTY, PUDDLE_STEP, PUDDLE_X, PUDDLE_Y } from '@sim/envs/puddle';
+import { PUDDLE_ACTION, PUDDLE_DELTA, PUDDLE_PENALTY, PUDDLE_STEP, PUDDLE_X, PUDDLE_Y, puddleBestAction, puddleDepth, puddlePlan } from '@sim/envs/puddle';
+import { constant } from '../../data/envs';
 import { formatCount, formatSigned } from '../../format';
 import { buildWorld, COURT, HALF, toWorldX, toWorldZ, type MarshWorld } from './world';
 
@@ -50,7 +51,30 @@ class MarshFlatsScene extends StageScene<MarshWorld> {
   }
 
   protected overlayOptions(): GroundTruthOptions {
-    return { floor: [HALF * 2 + 1, HALF * 2 + 1], agentPos: (state) => this.overlayPos.set(toWorldX(state.pose[PUDDLE_X] ?? 0), 0, toWorldZ(state.pose[PUDDLE_Y] ?? 0)) };
+    const env = this.ctx!.environment, side = constant(env, 'PUDDLE_PLAN_SIDE'), goal = constant(env, 'PUDDLE_GOAL'), penalty = constant(env, 'PUDDLE_PENALTY');
+    const plan = puddlePlan(side, goal, penalty, constant(env, 'PUDDLE_PLAN_SWEEPS'));
+    const samples = 21;
+    return {
+      floor: [HALF * 2 + 1, HALF * 2 + 1], agentPos: (state) => this.overlayPos.set(toWorldX(state.pose[PUDDLE_X] ?? 0), 0, toWorldZ(state.pose[PUDDLE_Y] ?? 0)),
+      debug: (frame, kit) => {
+        const gold = this.ctx!.tokens.celebrationGold, depths = kit.marks('depths', samples * samples);
+        for (let j = 0; j < samples; j++) for (let i = 0; i < samples; i++) {
+          const x = i / (samples - 1), y = j / (samples - 1), depth = puddleDepth(x, y);
+          if (depth > 0) depths.set(toWorldX(x), 0.15 + depth * 6, toWorldZ(y), 0.03 + depth * 0.8, 0x5f9bb4);
+        }
+        const gx = toWorldX(goal), gz = toWorldZ(goal), corner = kit.curve('goal', 5, gold);
+        corner.point(gx, 0.08, gz); corner.point(toWorldX(1), 0.08, gz); corner.point(toWorldX(1), 0.08, toWorldZ(1)); corner.point(gx, 0.08, toWorldZ(1)); corner.point(gx, 0.08, gz);
+        let x = frame.state.pose[PUDDLE_X] ?? 0, y = frame.state.pose[PUDDLE_Y] ?? 0;
+        const path = kit.curve('plan', 80, this.ctx!.tokens.uiCyan);
+        path.point(toWorldX(x), 0.25, toWorldZ(y));
+        for (let k = 0; k < 79 && !(x >= goal && y >= goal); k++) {
+          const [dx, dy] = PUDDLE_DELTA[puddleBestAction(plan, side, goal, penalty, x, y)]!;
+          x = Math.min(1, Math.max(0, x + PUDDLE_STEP * dx)); y = Math.min(1, Math.max(0, y - PUDDLE_STEP * dy));
+          path.point(toWorldX(x), 0.25, toWorldZ(y));
+        }
+        kit.trail('walked', 120, 0xffffff).push(this.at.x, this.at.y + 0.1, this.at.z);
+      },
+    };
   }
 
   protected start(_ctx: SceneContext, world: MarshWorld): void {

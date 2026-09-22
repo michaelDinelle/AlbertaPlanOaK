@@ -115,7 +115,19 @@ class TownSquareScene extends StageScene<SquareWorld> {
     return this.view.options;
   }
   protected overlayOptions(): GroundTruthOptions {
-    return { agentCell: state => { this.cell.x = Math.round(state.pose[TAXI_X]!); this.cell.y = Math.round(state.pose[TAXI_Y]!); return this.cell; }, goalCell: state => this.world!.depots[Math.round(state.pose[TAXI_DESTINATION]!)] ?? null, keyCells: () => this.world!.grid.keys ?? null, maxKeys: 4 };
+    return {
+      agentCell: state => { this.cell.x = Math.round(state.pose[TAXI_X]!); this.cell.y = Math.round(state.pose[TAXI_Y]!); return this.cell; },
+      goalCell: state => this.world!.depots[Math.round(state.pose[TAXI_DESTINATION]!)] ?? null,
+      keyCells: () => this.world!.grid.keys ?? null,
+      maxKeys: 4,
+      debug: (_frame, kit) => {
+        const world = this.world!, gold = this.ctx!.tokens.celebrationGold, cyan = this.ctx!.tokens.uiCyan, riding = this.ledger.passenger >= world.depots.length;
+        const pickup = riding ? world.taxi.group.position : world.depotPos[this.ledger.passenger]!, drop = world.depotPos[this.ledger.destination]!;
+        kit.marks('fare', 2).set(pickup.x, 1.3, pickup.z, 0.11, 0xfff1c8);
+        kit.marks('fare', 2).set(drop.x, 1.3, drop.z, 0.12, gold);
+        kit.trail('taxi', 60, cyan).push(world.taxi.group.position.x, 0.4, world.taxi.group.position.z);
+      },
+    };
   }
   protected start(): void { this.passengerTo(this.world!, true); }
   private passengerTo(world: SquareWorld, snap: boolean, k = 1): void {

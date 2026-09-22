@@ -91,7 +91,15 @@ class LampLoomScene extends StageScene<LoomWorld> {
     this.view = makeSceneView(ctx, { min: [-half - 2, -0.5, -3], max: [half + 2, 3.4, 3.5] }, [0, 1.3, 0.4], { distance: Math.max(9, half * 2.6), azimuth: 0.3, polar: 1.15 });
     return this.view.options;
   }
-  protected overlayOptions(): GroundTruthOptions { return { floor: [this.world!.half * 2 + 4, 8] }; }
+  protected overlayOptions(): GroundTruthOptions {
+    return {
+      floor: [this.world!.half * 2 + 4, 8],
+      debug: (frame, kit) => {
+        const world = this.world!, mask = Math.trunc(frame.state.pose[SUBSETPARITY_MASK]!), marks = kit.marks('mask', world.inputs);
+        for (let j = 0; j < world.inputs; j++) if ((mask >>> j) & 1) marks.set(world.slot(j), LAMP_Y + 0.5, 0, 0.1, this.ctx!.tokens.celebrationGold);
+      },
+    };
+  }
   protected start(): void {}
   protected tick(frame: FrameUpdate, { world, pool, rig, time }: Stage<LoomWorld>): void {
     const { state } = frame;

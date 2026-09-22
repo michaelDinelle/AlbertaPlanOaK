@@ -89,7 +89,14 @@ class PatienceScene extends StageScene<SeedlingWorld> {
     this.view = makeSceneView(ctx, { min: [-3, -0.5, -3], max: [3, 3.5, 3] }, [0, 1.1, 0], { distance: 7.5, azimuth: 0.5, polar: 1.1 });
     return this.view.options;
   }
-  protected overlayOptions(): GroundTruthOptions { return { floor: [6, 6], agentPos: () => this.world!.sentinel.group.position }; }
+  protected overlayOptions(): GroundTruthOptions {
+    return {
+      floor: [6, 6], agentPos: () => this.world!.sentinel.group.position,
+      debug: (_frame, kit) => {
+        kit.bars('growth', 1).set(1.4, 0.88, 0, 0.05 + 1.7 * this.ledger.pos / this.world!.length, this.ctx!.tokens.uiCyan, 0.14);
+      },
+    };
+  }
   protected start(): void {}
   protected tick(frame: FrameUpdate, { world, pool, rig, time }: Stage<SeedlingWorld>): void {
     const pos = Math.round(frame.state.pose[PATIENCE_POS]!);

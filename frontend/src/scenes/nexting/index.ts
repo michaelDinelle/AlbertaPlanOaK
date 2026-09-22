@@ -103,7 +103,19 @@ class SignalTowerScene extends StageScene<TowerWorld> {
     this.view = makeSceneView(ctx, { min: [-4.5, -0.5, -5], max: [4.5, 5.2, 4] }, [0, 1.9, -0.9], { distance: 12.5, azimuth: 0.5, polar: 1.12 });
     return this.view.options;
   }
-  protected overlayOptions(): GroundTruthOptions { return { floor: [10, 10] }; }
+  protected overlayOptions(): GroundTruthOptions {
+    return {
+      floor: [10, 10],
+      debug: (frame, kit) => {
+        const world = this.world!, phase = frame.state.pose[NEXTING_PHASE]!, gold = this.ctx!.tokens.celebrationGold;
+        const angle = Math.PI * 2 * phase / world.period, observed = Math.atan2(frame.state.observations[0] ?? 0, frame.state.observations[1] ?? 1);
+        const marks = kit.marks('dial', 2 + world.horizon);
+        marks.set(-Math.sin(angle) * DIAL_RADIUS, 0.55, 0.9 + Math.cos(angle) * DIAL_RADIUS, 0.12, gold);
+        marks.set(-Math.sin(observed) * (DIAL_RADIUS - 0.42), 0.55, 0.9 + Math.cos(observed) * (DIAL_RADIUS - 0.42), 0.09, this.ctx!.tokens.cueMagenta);
+        for (let k = 1; k <= world.horizon; k++) { const a = Math.PI * 2 * ((world.period - k) / world.period); marks.set(-Math.sin(a) * (DIAL_RADIUS + 0.3), 0.4, 0.9 + Math.cos(a) * (DIAL_RADIUS + 0.3), 0.07, gold); }
+      },
+    };
+  }
   protected start(): void {}
   protected tick(frame: FrameUpdate, { world, pool, rig, time }: Stage<TowerWorld>): void {
     const { state } = frame, phase = state.pose[NEXTING_PHASE]!, predicted = state.pose[NEXTING_ACTION]! >= 0.5;

@@ -89,6 +89,14 @@ class LanternBellScene extends StageScene<WorldHandle> {
         const th = state.pose[PENDULUM_TH] ?? 0;
         return this.overlayPos.set(this.pivot[0] + PD_L * Math.sin(th), this.pivot[1] - PD_L * Math.cos(th), this.pivot[2]);
       },
+      debug: (frame, kit) => {
+        const pose = frame.state.pose, th = wrapPi(pose[PENDULUM_TH] ?? 0), thDot = pose[PENDULUM_THDOT] ?? 0, torque = torqueOf(frame.state), gold = this.ctx!.tokens.celebrationGold, cyan = this.ctx!.tokens.uiCyan;
+        const [px, py, pz] = this.pivot;
+        kit.marks('upright', 1).set(px, py + PD_L, pz, 0.08, gold);
+        kit.bars('spin', 2).set(px + 1.7, py - 1.2, pz, thDot / PD_MAX_SPEED * 1.2, cyan, 0.08);
+        kit.bars('spin', 2).set(px + 2.0, py - 1.2, pz, torque * 2 / PD_MAX_TORQUE * 1.2, gold, 0.08);
+        kit.trail('bob', 90, cyan).push(px + PD_L * Math.sin(th), py - PD_L * Math.cos(th), pz + 0.02);
+      },
     };
   }
 

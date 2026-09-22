@@ -141,7 +141,16 @@ class CanyonRimScene extends StageScene<RimWorld> {
     return this.view.options;
   }
   protected overlayOptions(): GroundTruthOptions {
-    return { agentCell: state => { this.cell.x = Math.round(state.pose[CLIFF_X]!); this.cell.y = Math.round(state.pose[CLIFF_Y]!); return this.cell; }, goalCell: () => this.world!.grid.goal! };
+    const at = new THREE.Vector3();
+    return {
+      agentCell: state => { this.cell.x = Math.round(state.pose[CLIFF_X]!); this.cell.y = Math.round(state.pose[CLIFF_Y]!); return this.cell; },
+      goalCell: () => this.world!.grid.goal!,
+      debug: (_frame, kit) => {
+        const world = this.world!, grid = world.grid, cliff = kit.marks('cliff', grid.w);
+        for (let x = 1; x < grid.w - 1; x++) { cellToWorldVec(x, 0, grid, at); cliff.set(at.x, 0.35, at.z, 0.14, 0xff6b57); }
+        kit.trail('walk', 80, this.ctx!.tokens.uiCyan).push(world.robot.group.position.x, 0.3, world.robot.group.position.z);
+      },
+    };
   }
   protected start(): void {}
   protected tick(frame: FrameUpdate, { ctx, world, pool, rig, time }: Stage<RimWorld>): void {

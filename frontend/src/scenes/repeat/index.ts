@@ -89,7 +89,17 @@ class RepeatScene extends StageScene<EchoWorld> {
     this.view = makeSceneView(ctx, { min: [-11, -0.5, -4], max: [11, 4, 4] }, [0, 1.2, 0.3], { distance: 20, azimuth: 0.25, polar: 1.15 });
     return this.view.options;
   }
-  protected overlayOptions(): GroundTruthOptions { return { floor: [22, 8], agentPos: () => this.world!.sentinel.group.position }; }
+  protected overlayOptions(): GroundTruthOptions {
+    const x0 = -(REPEAT_REGISTER - 1) * SPACING / 2;
+    return {
+      floor: [22, 8], agentPos: () => this.world!.sentinel.group.position,
+      debug: (_frame, kit) => {
+        const world = this.world!;
+        kit.marks('due', 2).set(x0 + world.lag * SPACING, RAIL_Y + 0.6, 0, 0.1, world.glyphs.tints[this.ledger.due]!);
+        kit.marks('due', 2).set(x0, RAIL_Y + 0.6, 0, 0.08, this.ctx!.tokens.uiCyan);
+      },
+    };
+  }
   protected start(): void {}
   protected tick(frame: FrameUpdate, { world, pool, rig, time }: Stage<EchoWorld>): void {
     const pose = frame.state.pose, action = Math.trunc(pose[REPEAT_ACTION]!) % world.symbols;

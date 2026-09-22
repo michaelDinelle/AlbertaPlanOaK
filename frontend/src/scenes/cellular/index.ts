@@ -102,7 +102,17 @@ class LampRibbonScene extends StageScene<RibbonWorld> {
     this.view = makeSceneView(ctx, { min: [-4.5, -0.5, -4.5], max: [4.5, 2.5, 4.5] }, [0, 0.7, 0], { distance: 10, azimuth: 0.15, polar: 0.95 });
     return this.view.options;
   }
-  protected overlayOptions(): GroundTruthOptions { return { floor: [10, 10] }; }
+  protected overlayOptions(): GroundTruthOptions {
+    const at = new THREE.Vector3();
+    return {
+      floor: [10, 10],
+      debug: (frame, kit) => {
+        const world = this.world!, gold = this.ctx!.tokens.celebrationGold;
+        const keep = cellularNext(Math.trunc(frame.state.pose[CELLULAR_STATE]!) >>> 0, world.cells, world.rule), marks = kit.marks('next', world.cells);
+        for (let i = 0; i < world.cells; i++) { world.cellAt(i, at, RING - 0.6); marks.set(at.x, LAMP_Y + 0.55, at.z, (keep >>> i) & 1 ? 0.11 : 0.05, (keep >>> i) & 1 ? gold : 0x3a4a5a); }
+      },
+    };
+  }
   protected start(): void {}
   protected tick(frame: FrameUpdate, { world, pool, rig, time }: Stage<RibbonWorld>): void {
     const { state } = frame, cells = Math.trunc(state.pose[CELLULAR_STATE]!) >>> 0;

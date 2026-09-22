@@ -84,7 +84,18 @@ class RingRoadScene extends StageScene<RoadWorld> {
     this.view = makeSceneView(ctx, { min: [-r, -0.5, -r], max: [r, 2.5, r] }, [0, 0.5, 0.4], { distance: r * 2.15, azimuth: 0.2, polar: 0.82 });
     return this.view.options;
   }
-  protected overlayOptions(): GroundTruthOptions { return { floor: [this.world!.radius * 2 + 4, this.world!.radius * 2 + 4], agentPos: () => this.world!.wisp.group.position }; }
+  protected overlayOptions(): GroundTruthOptions {
+    const at = new THREE.Vector3();
+    return {
+      floor: [this.world!.radius * 2 + 4, this.world!.radius * 2 + 4], agentPos: () => this.world!.wisp.group.position,
+      debug: (_frame, kit) => {
+        const world = this.world!, next = (this.ledger.position + 1) % world.cells;
+        world.stoneAt(next, at);
+        kit.marks('next', 1).set(at.x, 0.7, at.z, 0.11, Math.floor(next / world.arcLength) & 1 ? 0xf2a7c3 : 0x9ad8c0);
+        kit.trail('walk', 24, this.ctx!.tokens.uiCyan).push(world.wisp.group.position.x, 0.45, world.wisp.group.position.z);
+      },
+    };
+  }
   protected start(_ctx: SceneContext, world: RoadWorld): void { world.stoneAt(0, this.to); this.from.copy(this.to); }
   protected tick(frame: FrameUpdate, { world, pool, rig, time }: Stage<RoadWorld>): void {
     const { state } = frame, position = Math.trunc(state.pose[RING_POSITION]!), colour = Math.trunc(state.pose[RING_COLOUR]!) & 1, guess = Math.trunc(state.pose[RING_ACTION]!) & 1;

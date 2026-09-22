@@ -8,7 +8,7 @@ import type { FrameUpdate, LegendSpec, SceneContext, SceneFactory, ScenePost, Sc
 import { makeSceneView, type SceneView } from '@kit/view';
 import { Wisp } from '@kit/wisp';
 import type { WorldCore } from '@kit/world';
-import { HASHED_ACTION, HASHED_STATE, hashedReward } from '@sim/envs/hashed';
+import { HASHED_ACTION, HASHED_STATE, hashedNext, hashedReward } from '@sim/envs/hashed';
 import { constant, parameter } from '../../data/envs';
 import { formatCount, formatSigned } from '../../format';
 
@@ -90,7 +90,25 @@ class HashLabyrinthScene extends StageScene<LabyrinthWorld> {
     this.view = makeSceneView(ctx, { min: [-halfX, -0.5, -halfZ], max: [halfX, 3, halfZ] }, [0, 0.4, 0], { distance: Math.max(9, halfX * 2.1), azimuth: 0.35, polar: 0.95 });
     return this.view.options;
   }
-  protected overlayOptions(): GroundTruthOptions { return { floor: [this.world!.side * this.world!.cell, this.world!.rows * this.world!.cell], agentPos: () => this.world!.wisp.group.position }; }
+  protected overlayOptions(): GroundTruthOptions {
+    const at = new THREE.Vector3();
+    return {
+      floor: [this.world!.side * this.world!.cell, this.world!.rows * this.world!.cell], agentPos: () => this.world!.wisp.group.position,
+      debug: (_frame, kit) => {
+        const world = this.world!, seed = this.ctx!.seed, state = this.ledger.state, gold = this.ctx!.tokens.celebrationGold, cyan = this.ctx!.tokens.uiCyan, lift = world.cell * 1.2 + 0.4;
+        const marks = kit.marks('doors', world.actions);
+        let best = 0, bestReward = -Infinity;
+        for (let a = 0; a < world.actions; a++) { const r = hashedReward(seed, state, a); if (r > bestReward) { bestReward = r; best = a; } }
+        for (let a = 0; a < world.actions; a++) {
+          const reward = hashedReward(seed, state, a);
+          world.cellAt(hashedNext(seed, world.bits, world.local, state, a), at);
+          marks.set(at.x, lift * 0.5, at.z, world.cell * 0.18 + 0.04, a === best && reward > 0 ? gold : a === this.ledger.action ? cyan : 0x8fa6c4);
+        }
+        world.cellAt(state, at);
+        kit.trail('walk', 24, cyan).push(at.x, lift * 0.35, at.z);
+      },
+    };
+  }
   protected start(_ctx: SceneContext, world: LabyrinthWorld): void { world.wisp.snap(); }
   protected tick(frame: FrameUpdate, { ctx, world, pool, time }: Stage<LabyrinthWorld>): void {
     const step = frame.state.step, state = Math.round(frame.state.pose[HASHED_STATE]!), action = Math.round(frame.state.pose[HASHED_ACTION]!);

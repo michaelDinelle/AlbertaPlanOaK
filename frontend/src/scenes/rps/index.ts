@@ -112,7 +112,18 @@ class ArenaScene extends StageScene<ArenaWorld> {
     this.view = makeSceneView(ctx, { min: [-6, -0.5, -6], max: [6, 3, 6] }, [0, 0.6, -0.4], { distance: 12.5, azimuth: 0.7, polar: 1.02 });
     return this.view.options;
   }
-  protected overlayOptions(): GroundTruthOptions { return { floor: [12, 12], agentPos: () => this.world!.sentinel.group.position }; }
+  protected overlayOptions(): GroundTruthOptions {
+    return {
+      floor: [12, 12], agentPos: () => this.world!.sentinel.group.position,
+      debug: (frame, kit) => {
+        const counts = this.ledger.counts;
+        let frequent = 0;
+        for (let m = 1; m < 3; m++) if (counts[m]! > counts[frequent]!) frequent = m;
+        const token = this.world!.agent.tokens[rpsCounter(frame.state.pose[RPS_FILLED]! === 0 ? 0 : rpsCounter(frequent))]!;
+        kit.marks('beat', 1).set(token.position.x, 0.8, token.position.z + RING_Z, 0.1, this.ctx!.tokens.celebrationGold);
+      },
+    };
+  }
   protected start(): void {}
   protected tick(frame: FrameUpdate, { world, pool, rig, time }: Stage<ArenaWorld>): void {
     const step = frame.state.step, move = Math.round(frame.state.pose[RPS_ACTION]!) % 3, opponent = Math.round(frame.state.pose[RPS_OPPONENT]!) % 3, filled = frame.state.pose[RPS_FILLED]!;

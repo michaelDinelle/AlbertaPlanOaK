@@ -150,6 +150,10 @@ class FourSeasonsCourtyardScene extends StageScene<WorldHandle> {
         readCells(state, grid, overlayAgent, overlayGoal);
         return overlayGoal;
       },
+      debug: (_frame, kit) => {
+        const wisp = this.wisp;
+        if (wisp) kit.trail('walk', 120, this.ctx!.tokens.uiCyan).push(wisp.position.x, 0.35, wisp.position.z);
+      },
     };
   }
 

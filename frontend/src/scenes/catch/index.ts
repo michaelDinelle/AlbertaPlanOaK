@@ -22,8 +22,6 @@ class PergolaCourtScene extends StageScene<PergolaWorld> {
   private view!: SceneView;
   private caughtAt = -Infinity;
   private readonly landing = new THREE.Vector3();
-  private readonly agentCell = { x: 0, y: 0 };
-  private readonly seedCell = { x: 0, y: 0 };
   private readonly ledger = { column: 0, row: 0, paddle: 0, move: 1, reward: 0, last: '—' };
   override legend: LegendSpec = {
     title: 'CATCH',
@@ -46,7 +44,17 @@ class PergolaCourtScene extends StageScene<PergolaWorld> {
   }
 
   protected overlayOptions(): GroundTruthOptions {
-    return { agentCell: (state) => { this.agentCell.x = Math.round(state.pose[CATCH_PADDLE] ?? 0); this.agentCell.y = this.world!.height - 1; return this.agentCell; }, goalCell: (state) => { this.seedCell.x = Math.round(state.pose[CATCH_COLUMN] ?? 0); this.seedCell.y = Math.round(state.pose[CATCH_ROW] ?? 0); return this.seedCell; } };
+    const world = this.world!;
+    return {
+      lattice: { w: world.width, h: world.height, origin: [world.colX(0) - world.cell / 2, world.rowY(world.height - 1) - world.cell / 2, 0], u: [world.cell, 0, 0], v: [0, world.cell, 0] },
+      debug: (_frame, kit) => {
+        const gold = this.ctx!.tokens.celebrationGold, column = this.ledger.column, row = this.ledger.row;
+        kit.marks('seed', 2).set(world.colX(column), world.rowY(row), 0.05, world.cell * 0.28, gold);
+        kit.marks('seed', 2).set(world.colX(this.ledger.paddle), PADDLE_Y, 0.05, world.cell * 0.22, this.ctx!.tokens.uiCyan);
+        const drop = kit.curve('drop', 2, gold);
+        drop.point(world.colX(column), world.rowY(row), 0.05); drop.point(world.colX(column), PADDLE_Y, 0.05);
+      },
+    };
   }
 
   protected start(_ctx: SceneContext, world: PergolaWorld): void {

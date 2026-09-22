@@ -90,7 +90,15 @@ class PasswordScene extends StageScene<VaultWorld> {
     this.view = makeSceneView(ctx, { min: [-5, -0.5, -3.5], max: [5, 4, 3] }, [0, 1.3, -0.8], { distance: 9, azimuth: 0.3, polar: 1.05 });
     return this.view.options;
   }
-  protected overlayOptions(): GroundTruthOptions { return { floor: [10, 8], agentPos: () => this.world!.sentinel.group.position }; }
+  protected overlayOptions(): GroundTruthOptions {
+    return {
+      floor: [10, 8], agentPos: () => this.world!.sentinel.group.position,
+      debug: (_frame, kit) => {
+        const world = this.world!, stone = world.stones[world.digits[this.ledger.phase]!]!;
+        kit.marks('stone', 1).set(stone.mesh.position.x, 1.35, stone.mesh.position.z, 0.11, this.ctx!.tokens.celebrationGold);
+      },
+    };
+  }
   protected start(): void {}
   protected tick(frame: FrameUpdate, { world, pool, rig, time }: Stage<VaultWorld>): void {
     const phase = Math.round(frame.state.pose[PASSWORD_PHASE]!), action = Math.trunc(frame.state.pose[PASSWORD_ACTION]!) % world.base;

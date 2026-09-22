@@ -72,7 +72,16 @@ class KeyDoorScene extends StageScene<KeyDoorWorld> {
     this.view = makeSceneView(ctx, { min: [-6, -0.5, -world.halfL - 4], max: [6, 3.5, world.halfL + 3] }, [0, 0.6, -world.halfL * 0.1], { distance: 12, azimuth: 0.5, polar: 1.05 });
     return this.view.options;
   }
-  protected overlayOptions(): GroundTruthOptions { return { floor: [12, this.world!.halfL * 2 + 8], agentPos: () => this.world!.sentinel.group.position }; }
+  protected overlayOptions(): GroundTruthOptions {
+    return {
+      floor: [12, this.world!.halfL * 2 + 8], agentPos: () => this.world!.sentinel.group.position,
+      debug: (_frame, kit) => {
+        const world = this.world!;
+        kit.marks('key', 1).set(1.3, 1.25, world.halfL + 0.4, 0.12, this.ctx!.tokens.celebrationGold);
+        kit.bars('phase', 1).set(0, 0.05, world.doorAt.z + 0.8, 0.04 + 1.2 * this.ledger.phase / (world.delay - 1), this.ctx!.tokens.uiCyan, 0.12);
+      },
+    };
+  }
   protected start(_ctx: SceneContext, world: KeyDoorWorld): void { this.z = world.halfL; }
   protected tick(frame: FrameUpdate, { world, pool, rig, time }: Stage<KeyDoorWorld>): void {
     const phase = Math.round(frame.state.pose[KEYDOOR_PHASE]!), hasKey = frame.state.pose[KEYDOOR_KEY]! > 0.5;

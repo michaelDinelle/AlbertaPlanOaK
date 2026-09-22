@@ -1,6 +1,5 @@
 import * as THREE from 'three';
 import { buildSentinel } from '@kit/cast/sentinel';
-import { envelope } from '@kit/mix';
 import { makeMistPlanes } from '@kit/particles';
 import { lamp, plinth } from '@kit/props';
 import { flameMaterial, makeTerrace } from '@kit/props/decision-terrace';
@@ -89,7 +88,16 @@ class WaterClockScene extends StageScene<ClockWorld> {
     this.view = makeSceneView(ctx, { min: [-5, -0.5, -4], max: [5, 4, 4] }, [0, 1.5, 0], { distance: 9.5, azimuth: 0.5, polar: 1.15 });
     return this.view.options;
   }
-  protected overlayOptions(): GroundTruthOptions { return { floor: [10, 8], agentPos: () => this.world!.sentinel.group.position }; }
+  protected overlayOptions(): GroundTruthOptions {
+    return {
+      floor: [10, 8], agentPos: () => this.world!.sentinel.group.position,
+      debug: (_frame, kit) => {
+        const world = this.world!, level = this.ledger.level, target = world.target, cyan = this.ctx!.tokens.uiCyan, gold = this.ctx!.tokens.celebrationGold;
+        kit.bars('level', 2).set(-1.9, 0.4, 0, level * BASIN_HEIGHT, cyan, 0.16);
+        kit.marks('target', 1).set(-1.9, 0.4 + target * BASIN_HEIGHT, 0, 0.12, gold);
+      },
+    };
+  }
   protected start(): void {}
   protected tick(frame: FrameUpdate, { world, pool, rig, time }: Stage<ClockWorld>): void {
     const step = frame.state.step, level = Math.max(0.01, frame.state.pose[CALIBRATION_FREQUENCY]!), up = Math.round(frame.state.pose[CALIBRATION_ACTION]!) === 1;

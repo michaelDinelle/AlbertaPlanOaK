@@ -3,6 +3,7 @@ import { CELL } from '@kit/grid';
 import { tokenRing } from '@kit/props';
 import { glyphSet, glyphStones, instanced, memoryCourt, outcomeGlow } from '@kit/props/memory-court';
 import { modelParts } from '@kit/robot';
+import type { GroundTruthOptions } from '@kit/debug';
 import { StageScene, type Stage } from '@kit/stage';
 import type { FrameUpdate, LegendSpec, SceneContext, SceneFactory, ScenePost, SceneSize } from '@kit/types';
 import { makeSceneView, type SceneView } from '@kit/view';
@@ -82,7 +83,15 @@ class CountScene extends StageScene<CountWorld> {
     this.view = makeSceneView(ctx, { min: [-world.halfW - 4, -0.5, -5], max: [world.halfW + 4, 3, 5] }, [0, 0.5, -0.4], { distance: Math.max(10, world.period * 0.7), azimuth: 0.25, polar: 1.0 });
     return this.view.options;
   }
-  protected overlayOptions() { return { agentCell: () => this.cell }; }
+  protected overlayOptions(): GroundTruthOptions {
+    return {
+      agentCell: () => this.cell,
+      debug: (_frame, kit) => {
+        const world = this.world!, stone = world.stones[this.ledger.count % world.modulus]!;
+        kit.marks('answer', 1).set(stone.mesh.position.x, 1.3, stone.mesh.position.z, 0.12, this.ctx!.tokens.celebrationGold);
+      },
+    };
+  }
   protected start(_ctx: SceneContext, world: CountWorld): void { this.lift = new Float32Array(world.period); world.wisp.setCell(0, 0, world.grid); }
   protected tick(frame: FrameUpdate, { world, pool, rig, time }: Stage<CountWorld>): void {
     const count = Math.round(frame.state.pose[COUNT_COUNT]!), phase = Math.round(frame.state.pose[COUNT_PHASE]!), event = frame.state.pose[COUNT_EVENT]! > 0.5;

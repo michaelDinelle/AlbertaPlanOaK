@@ -97,7 +97,16 @@ class WeatherVaneScene extends StageScene<VaneWorld> {
     this.view = makeSceneView(ctx, { min: [-5, -0.5, -4], max: [5, 5, 4] }, [0.4, 1.8, -0.6], { distance: 10, azimuth: 0.45, polar: 1.1 });
     return this.view.options;
   }
-  protected overlayOptions(): GroundTruthOptions { return { floor: [10, 8], agentPos: () => this.world!.sentinel.group.position }; }
+  protected overlayOptions(): GroundTruthOptions {
+    return {
+      floor: [10, 8], agentPos: () => this.world!.sentinel.group.position,
+      debug: (_frame, kit) => {
+        const gold = this.ctx!.tokens.celebrationGold;
+        kit.marks('mode', 2).set(0, 4.5, -2, 0.16, gold);
+        kit.marks('mode', 2).set(2.4, 2.1, 0.8, 0.12, this.ledger.guess === this.ledger.mode ? gold : this.ctx!.tokens.failureBlue);
+      },
+    };
+  }
   protected start(): void {}
   protected tick(frame: FrameUpdate, { world, pool, time }: Stage<VaneWorld>): void {
     const step = frame.state.step, mode = Math.round(frame.state.pose[HIDDENMODE_MODE]!) & 1, guess = Math.round(frame.state.pose[HIDDENMODE_ACTION]!) & 1;

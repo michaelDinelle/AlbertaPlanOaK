@@ -128,9 +128,25 @@ class StorehouseCourtScene extends StageScene<CourtWorld> {
     return this.view.options;
   }
   protected overlayOptions(): GroundTruthOptions {
+    const at = new THREE.Vector3();
     return {
       agentCell: state => { this.cell.x = Math.round(state.pose[SOKOBAN_X]!); this.cell.y = Math.round(state.pose[SOKOBAN_Y]!); return this.cell; },
       goalCell: state => { this.goal.x = Math.round(state.pose[SOKOBAN_TARGET_X]!); this.goal.y = Math.round(state.pose[SOKOBAN_TARGET_Y]!); return this.goal; },
+      debug: (frame, kit) => {
+        const grid = this.world!.grid, pose = frame.state.pose, red = 0xff6b57;
+        const bx = Math.round(pose[SOKOBAN_BOX_X]!), by = Math.round(pose[SOKOBAN_BOX_Y]!), tx = Math.round(pose[SOKOBAN_TARGET_X]!), ty = Math.round(pose[SOKOBAN_TARGET_Y]!);
+        const dead = kit.marks('dead', grid.w * grid.h);
+        let boxDead = false;
+        for (let y = 0; y < grid.h; y++) for (let x = 0; x < grid.w; x++) {
+          const edgeX = x === 0 || x === grid.w - 1, edgeY = y === 0 || y === grid.h - 1;
+          const stuck = (edgeX && x !== tx) || (edgeY && y !== ty) || (edgeX && edgeY && !(x === tx && y === ty));
+          if (!stuck) continue;
+          cellToWorldVec(x, y, grid, at); dead.set(at.x, 0.12, at.z, 0.07, red);
+          if (x === bx && y === by) boxDead = true;
+        }
+        cellToWorldVec(bx, by, grid, at);
+        kit.marks('crate', 1).set(at.x, 1.1, at.z, 0.12, boxDead ? red : 0xc9a27a);
+      },
     };
   }
   protected start(): void {}

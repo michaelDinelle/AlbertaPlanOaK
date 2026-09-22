@@ -10,7 +10,7 @@ import type { FrameUpdate, LegendSpec, SceneContext, SceneFactory, ScenePost, Sc
 import { scatterTrees } from '@kit/vegetation';
 import { makeSceneView, type SceneView } from '@kit/view';
 import type { WorldCore } from '@kit/world';
-import { TIGER_ACTION, TIGER_HEARD, TIGER_HINT, TIGER_LISTEN, TIGER_SIDE } from '@sim/envs/tiger';
+import { TIGER_ACTION, TIGER_HEARD, TIGER_HINT, TIGER_LISTEN, TIGER_SIDE, TIGER_TALLY } from '@sim/envs/tiger';
 import { parameter } from '../../data/envs';
 import { formatPercent, formatSigned } from '../../format';
 
@@ -91,7 +91,16 @@ class JungleDoorsScene extends StageScene<JungleWorld> {
     this.view = makeSceneView(ctx, { min: [-6, -0.5, -4], max: [6, 3.5, 4] }, [0, 1, -0.8], { distance: 10.5, azimuth: 0.2, polar: 1.15 });
     return this.view.options;
   }
-  protected overlayOptions(): GroundTruthOptions { return { floor: [12, 8], agentPos: () => this.world!.sentinel.group.position }; }
+  protected overlayOptions(): GroundTruthOptions {
+    return {
+      floor: [12, 8], agentPos: () => this.world!.sentinel.group.position,
+      debug: (frame, kit) => {
+        const tiger = this.world!.doors[this.ledger.tiger]!, tally = Math.round(frame.state.pose[TIGER_TALLY]!);
+        kit.marks('tiger', 1).set(tiger.x, 3.0, WALL_Z, 0.16, 0xff6b57);
+        kit.bars('tally', 1).set(0, 0.05, 1.4, tally * 0.25, tally > 0 ? this.ctx!.tokens.uiCyan : this.ctx!.tokens.celebrationGold, 0.14);
+      },
+    };
+  }
   protected start(): void {}
   protected tick(frame: FrameUpdate, { world, pool, rig, time }: Stage<JungleWorld>): void {
     const step = frame.state.step, action = Math.round(frame.state.pose[TIGER_ACTION]!);

@@ -104,7 +104,23 @@ class WeighingHallScene extends StageScene<HallWorld> {
     this.view = makeSceneView(ctx, { min: [-span / 2 - 1, -0.5, -4], max: [span / 2 + 1, 3.5, 3] }, [0, 0.9, -0.2], { distance: Math.max(9.5, span * 1.15), azimuth: 0.32, polar: 1.05 });
     return this.view.options;
   }
-  protected overlayOptions(): GroundTruthOptions { return { floor: [this.world!.slot(this.world!.inputs - 1) * 2 + 4, 8] }; }
+  protected overlayOptions(): GroundTruthOptions {
+    return {
+      floor: [this.world!.slot(this.world!.inputs - 1) * 2 + 4, 8],
+      debug: (frame, kit) => {
+        const world = this.world!, gold = this.ctx!.tokens.celebrationGold, cyan = this.ctx!.tokens.uiCyan, pose = frame.state.pose, obs = frame.state.observations;
+        const inputs = kit.bars('inputs', world.inputs), weights = kit.bars('weights', world.inputs);
+        let sum = 0;
+        for (let j = 0; j < world.inputs; j++) {
+          const x = obs[j] ?? 0, w = pose[REGRESSION_WEIGHTS + j]!;
+          sum += w * x;
+          inputs.set(world.slot(j) - 0.08, 0.62, -1.2, x * 0.3, 0xdcf4ff, 0.05);
+          weights.set(world.slot(j) + 0.08, 0.62, -1.2, w * 0.6, w >= 0 ? gold : cyan, 0.05);
+        }
+        kit.marks('needle', 1).set(-Math.sin(needleAngle(sum)) * DIAL_RADIUS * 0.7, 0.4, DIAL_Z - Math.cos(needleAngle(sum)) * DIAL_RADIUS * 0.7, 0.08, gold);
+      },
+    };
+  }
   protected start(): void {}
   protected tick(frame: FrameUpdate, { world, pool, rig, time }: Stage<HallWorld>): void {
     const { state } = frame;

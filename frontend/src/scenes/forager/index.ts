@@ -8,6 +8,7 @@ import { makeSceneView, type SceneView } from '@kit/view';
 import { FORAGER_X, FORAGER_Y } from '@sim/envs/forager';
 import { countEvents } from '@sim/events';
 import { wordInt } from '@sim/words';
+import { parameter } from '../../data/envs';
 import { formatCount } from '../../format';
 import { BERRY_TINT, BURR_TINT, buildWorld, MEMORY_STEPS, TRAIL, type PrairieWorld } from './world';
 
@@ -48,7 +49,20 @@ class PrairieScene extends StageScene<PrairieWorld> {
     return this.view.options;
   }
   protected overlayOptions(): GroundTruthOptions {
-    return { floor: [9, 9], frame: () => ({ originX: this.ux, originY: this.world!.heightAt(this.ux, this.uz), originZ: this.uz, agent: this.cellOrigin, cone: this.noCone, coneCount: 0 }) };
+    const fov = parameter(this.ctx!.environment, 'fov'), span = 2 * fov + 1;
+    return {
+      floor: [9, 9],
+      frame: () => ({ originX: this.ux, originY: this.world!.heightAt(this.ux, this.uz), originZ: this.uz, agent: this.cellOrigin, cone: this.noCone, coneCount: 0 }),
+      debug: (frame, kit) => {
+        const world = this.world!, obs = frame.state.observations, seen = kit.marks('seen', span * span);
+        for (let dy = 0; dy < span; dy++) for (let dx = 0; dx < span; dx++) {
+          const value = obs[dy * span + dx] ?? 0;
+          if (value === 0) continue;
+          const x = this.ux + dx - fov, z = this.uz + dy - fov;
+          seen.set(x, world.heightAt(x, z) + 0.6, z, 0.12, value > 0 ? BERRY_TINT : BURR_TINT);
+        }
+      },
+    };
   }
   protected start(_ctx: SceneContext, world: PrairieWorld): void {
     const spec: LegendSpec = {

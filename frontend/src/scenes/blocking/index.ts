@@ -126,7 +126,17 @@ class SandstoneMazeScene extends StageScene<MazeWorld> {
     return this.view.options;
   }
   protected overlayOptions(): GroundTruthOptions {
-    return { agentCell: state => { this.cell.x = Math.round(state.pose[BLOCKING_X]!); this.cell.y = Math.round(state.pose[BLOCKING_Y]!); return this.cell; }, goalCell: () => this.world!.grid.goal! };
+    const at = new THREE.Vector3();
+    return {
+      agentCell: state => { this.cell.x = Math.round(state.pose[BLOCKING_X]!); this.cell.y = Math.round(state.pose[BLOCKING_Y]!); return this.cell; },
+      goalCell: () => this.world!.grid.goal!,
+      debug: (frame, kit) => {
+        const world = this.world!, grid = world.grid, walls = world.phases[blockingPhase(this.ctx!.environment, frame.state.step)]!.walls;
+        const marks = kit.marks('walls', grid.w * grid.h);
+        for (let y = 0; y < grid.h; y++) for (let x = 0; x < grid.w; x++) if (walls[y * grid.w + x]) { cellToWorldVec(x, y, grid, at); marks.set(at.x, 0.55, at.z, 0.12, 0xff6b57); }
+        kit.trail('walk', 100, this.ctx!.tokens.uiCyan).push(world.sentinel.group.position.x, 0.35, world.sentinel.group.position.z);
+      },
+    };
   }
   protected start(ctx: SceneContext): void { this.period = constant(ctx.environment, 'BLOCKING_PERIOD'); }
   protected tick(frame: FrameUpdate, { ctx, world, pool, rig, time }: Stage<MazeWorld>): void {

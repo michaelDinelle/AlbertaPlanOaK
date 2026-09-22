@@ -53,7 +53,20 @@ class AlpineLakeScene extends StageScene<WorldHandle> {
   }
 
   protected overlayOptions(): GroundTruthOptions {
-    return { agentPos: () => this.arm?.tipWorld ?? null };
+    const env = this.ctx!.environment, top = constant(env, 'ACROBOT_ENERGY_TOP'), pivot = pivotAnchor(this.ctx!.geometry);
+    return {
+      agentPos: () => this.arm?.tipWorld ?? null,
+      debug: (frame, kit) => {
+        const arm = this.arm;
+        if (!arm) return;
+        const pose = frame.state.pose, th1 = pose[ACROBOT_TH1] ?? 0, th2 = pose[ACROBOT_TH2] ?? 0, w1 = pose[ACROBOT_W1] ?? 0, w2 = pose[ACROBOT_W2] ?? 0;
+        const c2 = Math.cos(th2), energy = 0.5 * ((3.5 + c2) * w1 * w1 + 2 * (1.25 + 0.5 * c2) * w1 * w2 + 1.25 * w2 * w2) - 14.7 * Math.cos(th1) - 4.9 * Math.cos(th1 + th2);
+        const gold = this.ctx!.tokens.celebrationGold, cyan = this.ctx!.tokens.uiCyan, red = 0xff6b57;
+        kit.bars('energy', 2).set(pivot[0] + 2.5, pivot[1] - 2.2, pivot[2], Math.max(0, energy + 19.6) / (2 * top) * 2.2, energy > top ? red : cyan, 0.14);
+        kit.marks('energyTop', 1).set(pivot[0] + 2.5, pivot[1] - 2.2 + 2.2, pivot[2], 0.1, gold);
+        kit.trail('tip', 90, cyan).push(arm.tipWorld.x, arm.tipWorld.y, arm.tipWorld.z + 0.02);
+      },
+    };
   }
 
   protected start(): void {

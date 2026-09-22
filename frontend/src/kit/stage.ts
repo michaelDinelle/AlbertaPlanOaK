@@ -93,7 +93,7 @@ export abstract class StageScene<W extends WorldCore> implements SceneModule {
     const rig = this.rig;
     if (!ctx || !world || !pool || !rig) return;
     this.tick(frame, { ctx, world, pool, rig, time: ctx.time() });
-    if (this.debugOn && this.overlay) this.overlay.setState(frame.state);
+    if (this.debugOn && this.overlay) this.overlay.update(frame);
   }
 
   resize(size: SceneSize): void {

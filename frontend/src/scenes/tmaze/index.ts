@@ -4,6 +4,7 @@ import { emissiveMaterial, setEmissiveIntensity } from '@kit/materials';
 import { gate, lamp, relief } from '@kit/props';
 import { glyphSet, instanced, memoryCourt, outcomeGlow } from '@kit/props/memory-court';
 import { modelParts } from '@kit/robot';
+import type { GroundTruthOptions } from '@kit/debug';
 import { StageScene, type Stage } from '@kit/stage';
 import type { FrameUpdate, LegendSpec, SceneContext, SceneFactory, ScenePost, SceneSize } from '@kit/types';
 import { excludeAny, excludeRect, scatterTrees } from '@kit/vegetation';
@@ -112,7 +113,15 @@ class TMazeScene extends StageScene<MazeWorld> {
     this.view = makeSceneView(ctx, { min: [-world.span - 3, -0.5, -world.half - 4], max: [world.span + 3, 3.2, world.half + 3] }, [0, 0.4, -world.half * 0.15], { distance: Math.max(12, world.span * 2.6), azimuth: 0.55, polar: 0.95 });
     return this.view.options;
   }
-  protected overlayOptions() { return { agentCell: () => this.cell, goalCell: () => ({ x: 0, y: 0 }) }; }
+  protected overlayOptions(): GroundTruthOptions {
+    return {
+      agentCell: () => this.cell,
+      debug: (_frame, kit) => {
+        const gate = this.world!.gates[this.ledger.cue]!;
+        kit.marks('gate', 1).set(gate.at.x, 2.9, gate.at.z, 0.12, gate.tint);
+      },
+    };
+  }
   protected start(ctx: SceneContext, world: MazeWorld): void { this.height = ctx.tokens.wispHeight; world.wisp.setCell(0, world.grid.h - 1, world.grid); }
   protected tick(frame: FrameUpdate, { world, pool, rig, time }: Stage<MazeWorld>): void {
     const pos = Math.round(frame.state.pose[TMAZE_POS]!), cue = Math.round(frame.state.pose[TMAZE_CUE]!);

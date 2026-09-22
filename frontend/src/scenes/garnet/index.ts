@@ -94,7 +94,21 @@ class StandingStonesScene extends StageScene<StoneWorld> {
     this.view = makeSceneView(ctx, { min: [-half, -0.5, -half], max: [half, 4, half] }, [0, 0.8, 0], { distance: half * 2.9, azimuth: 0.4, polar: 1.3 });
     return this.view.options;
   }
-  protected overlayOptions(): GroundTruthOptions { return { floor: [this.world!.states * 0.32 + 8, this.world!.states * 0.32 + 8], agentPos: () => this.world!.wisp.group.position }; }
+  protected overlayOptions(): GroundTruthOptions {
+    return {
+      floor: [this.world!.states * 0.32 + 8, this.world!.states * 0.32 + 8], agentPos: () => this.world!.wisp.group.position,
+      debug: (_frame, kit) => {
+        const world = this.world!, model = this.model, state = this.ledger.state, gold = this.ctx!.tokens.celebrationGold, cyan = this.ctx!.tokens.uiCyan;
+        if (!model) return;
+        const here = world.positions[state]!, marks = kit.marks('next', world.actions * world.branching);
+        for (let a = 0; a < world.actions; a++) {
+          const pair = state * world.actions + a, greedy = model.greedy[state] === a, tint = greedy ? gold : ACTION_TINTS[a]!;
+          for (let b = 0; b < world.branching; b++) { const to = world.positions[model.next[pair * world.branching + b]!]!; marks.set(to.x, 1.9, to.z, 0.05 + 0.14 * model.prob[pair * world.branching + b]!, tint); }
+        }
+        kit.trail('walk', 40, cyan).push(here.x, 1.65, here.z);
+      },
+    };
+  }
   protected start(_ctx: SceneContext, world: StoneWorld): void {
     world.wisp.snap();
     if (world.resample) { this.legend.note = () => `stones reshuffle in ${formatCount(world.period - this.step % world.period)} steps`; this.legend.bar = () => (this.step % world.period) / world.period; }
