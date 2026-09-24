@@ -10,7 +10,7 @@ import fleet
 AGENTS = ("OaK", "Oracle", "PPO", "Random")
 BASELINES = (("random", "Random"), ("oracle", "Oracle"), ("ppo", "PPO"))
 COLORS = {"OaK": "#5548b4", "Oracle": "#52a96a", "PPO": "#68a8cc", "Random": "#e88152"}
-CATEGORIES = ("control", "navigation", "memory", "decision", "prediction", "world")
+CATEGORIES = ("control", "navigation", "memory", "decision", "prediction", "world", "games", "puzzles")
 README = fleet.REPO / "README.md"
 CHART = fleet.REPO / "oak-performance-radar.svg"
 
@@ -36,7 +36,10 @@ def load():
         rows.append({"env": env, "category": category[env], "means": means})
     sps = {"OaK": oak.meta["stepsPerSecond"]}
     for policy, agent in BASELINES:
-        sps[agent] = recording(links[policy][oak.envs[0]]).meta["stepsPerSecond"]
+        lanes = {}
+        for env in oak.envs:
+            lanes[links[policy][env]] = lanes.get(links[policy][env], 0) + len(oak.seeds[env])
+        sps[agent] = sum(lanes.values()) / sum(count / recording(name).meta["stepsPerSecond"] for name, count in lanes.items())
     start = max(i for i, end in enumerate(oak.ends) if end <= oak.steps - fleet.TERMINAL)
     return best, oak, oak.ends[-1] - oak.ends[start], rows, sps
 
@@ -47,7 +50,8 @@ def normalized(row, agent):
 
 
 def axis_table(rows):
-    groups = [(name, [r for r in rows if r["category"] == name]) for name in CATEGORIES] + [("all", rows)]
+    assert all(r["category"] in CATEGORIES for r in rows), sorted({r["category"] for r in rows} - set(CATEGORIES))
+    groups = [(name, members) for name in CATEGORIES for members in [[r for r in rows if r["category"] == name]] if members] + [("all", rows)]
     return [(name, len(members), {agent: fleet.mean([normalized(r, agent) for r in members]) for agent in AGENTS}) for name, members in groups]
 
 
@@ -57,7 +61,7 @@ def chart(best, steps, window, rows, sps):
     lo, hi = -0.25, 1.0
     assert all(lo <= means[agent] <= hi for _, _, means in axes for agent in ("OaK", "PPO"))
     s = ['<svg xmlns="http://www.w3.org/2000/svg" width="1250" height="930" viewBox="0 0 1250 930" role="img" aria-labelledby="title desc">',
-         '<title id="title">OaK and PPO across the six environment categories</title>',
+         f'<title id="title">OaK and PPO across the {len(axes)} environment categories</title>',
          f'<desc id="desc">Mean normalized reward per step over the final {window:,} steps of the {steps:,}-step best recording, one axis per declared category with its environment count, Random at 0 and Oracle at 1. Outlines only: the polygon area is not the score. The overall ranking is the equal-weight mean over all {len(rows)} environments.</desc>',
          '<rect width="1250" height="930" fill="#ffffff"/>', '<g font-family="Arial, Helvetica, sans-serif" fill="#243044">']
 
@@ -116,9 +120,9 @@ def chart(best, steps, window, rows, sps):
         else:
             s.append(f'<path d="M 900 {y + 10} v 17" stroke="{COLORS[agent]}" stroke-width="2"/>')
         text(900, y + 46, f"{sps[agent]:,.0f} steps/s", 16, fill="#637084")
-    text(900, 621, "steps per second on the same schedule", 15, fill="#637084")
+    text(900, 621, "steps per second; baselines lane-weighted over their recordings", 15, fill="#637084")
     text(54, 745, "Axis scores", 17, weight="600")
-    columns = [330, 480, 630, 780, 930, 1080]
+    columns = [330 + i * 750 / (len(axes) - 1) for i in range(len(axes))]
     for i, (name, _, _) in enumerate(axes):
         text(columns[i], 745, name, 15, anchor="middle")
     for j, agent in enumerate(("OaK", "PPO")):
@@ -139,13 +143,13 @@ def readme(best, oak, window, rows, sps):
     text = re.sub(r"[\d,]+ SPS on the", f"{sps['OaK']:,.0f} SPS on the", text, count=1)
     lines = text.split("\n")
     first = next(i for i, line in enumerate(lines) if line.startswith("Reward per step over the final"))
-    last = next(i for i, line in enumerate(lines) if line.startswith("Baseline throughput on the same schedule"))
-    block = [f"Reward per step over the final {window:,} steps of the {oak.steps:,}-step best recording (`{best}`), all {len(rows)} environments with their declared seed counts ({oak.lanes:,} lanes), with the Oracle, Random and PPO baselines on the same seeds. Mean over seeds; Score = (OaK − Random) / (Oracle − Random), unclipped.", "",
+    last = next(i for i, line in enumerate(lines) if line.startswith("Baseline throughput"))
+    block = [f"Reward per step over the final {window:,} steps of the {oak.steps:,}-step best recording (`{best}`), all {len(rows)} environments with {oak.lanes // len(rows)} seeds each ({oak.lanes:,} lanes), with the Oracle, Random and PPO baselines on the same seeds. Mean over seeds; Score = (OaK − Random) / (Oracle − Random), unclipped.", "",
              "| Environment | Category | OaK | Oracle | Random | PPO | Score |", "|---|---|---:|---:|---:|---:|---:|"]
     for row in rows:
         m = row["means"]
         block.append(f"| {row['env']} | {row['category']} | {fleet.fmt(m['OaK'])} | {fleet.fmt(m['Oracle'])} | {fleet.fmt(m['Random'])} | {fleet.fmt(m['PPO'])} | {fleet.fmt(normalized(row, 'OaK'))} |")
-    block += ["", f"Baseline throughput on the same schedule: PPO {sps['PPO']:,.0f} steps/s, Random {sps['Random']:,.0f} steps/s, Oracle {sps['Oracle']:,.0f} steps/s."]
+    block += ["", f"Baseline throughput, lane-weighted over the recordings that hold each environment's baseline: PPO {sps['PPO']:,.0f} steps/s, Random {sps['Random']:,.0f} steps/s, Oracle {sps['Oracle']:,.0f} steps/s."]
     README.write_text("\n".join(lines[:first] + block + lines[last + 1:]))
 
 

@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/qos.h>
 #include <sys/stat.h>
 #include <sys/sysctl.h>
 #include <time.h>
@@ -40,7 +41,7 @@ static uint32_t policyNamed(const char *name) {
     return 0u;
 }
 
-static void allocateRun(Run *run, uint32_t width, int replay) {
+static void allocateRun(Run *run, uint32_t width) {
     run->windows = (run->steps + OAK_WINDOW - 1u) / OAK_WINDOW;
     size_t cacheLine = 0u, cacheLineSize = sizeof cacheLine;
     if (sysctlbyname("hw.cachelinesize", &cacheLine, &cacheLineSize, 0, 0) != 0 ||
@@ -58,11 +59,10 @@ static void allocateRun(Run *run, uint32_t width, int replay) {
     if (posix_memalign((void **)&run->state, cacheLine,
                       (size_t)(groups * width * run->stateWords + 1u) * sizeof(uint32_t)) != 0) die("out of memory");
     run->extra = calloc((size_t)extraTotal + 1u, sizeof(uint32_t));
-    int shared = !replay || strcmp(run->specs[0]->family, "jbw") == 0;
-    run->shared = calloc(shared ? jbw_sharedWords() : 1u, sizeof(float));
+    run->shared = calloc((size_t)env_sharedWords() + 1u, sizeof(float));
     run->rewardSum = calloc((size_t)run->windows * run->laneCount, sizeof(float));
     if (!run->state || !run->extra || !run->shared || !run->rewardSum) die("out of memory");
-    if (shared) jbw_buildShared(run->shared);
+    env_buildShared(run->shared, run->specs, run->laneCount);
 }
 
 static void runLane(Run *run, uint32_t laneIndex) {
@@ -71,11 +71,13 @@ static void runLane(Run *run, uint32_t laneIndex) {
     Lane working = run->lanes[laneIndex];
     Lane *l = &working;
     uint32_t *extra = run->extra + l->extraOffset;
-    lane_init(l, lane, run->steps, state, extra, run->shared, run->policy);
+    const float *shared = run->shared + env_sharedOffset(l->env);
+    float ctrl[OAK_ENV_ACT_MAX];
+    lane_init(l, lane, run->steps, state, extra, shared, run->policy);
     for (uint32_t window = 0u; window < run->windows; window++) {
         uint32_t end = (window + 1u) * OAK_WINDOW < run->steps ? (window + 1u) * OAK_WINDOW : run->steps;
-        lane_window(l, lane, state, extra, run->shared, run->policy, end);
-        run->rewardSum[(size_t)window * run->laneCount + laneIndex] = l->sum;
+        lane_window(l, lane, state, extra, shared, run->policy, end, ctrl);
+        run->rewardSum[(size_t)window * run->laneCount + laneIndex] = l->tally.sum;
     }
     run->lanes[laneIndex] = working;
 }
@@ -108,11 +110,11 @@ static void writeMeta(const char *root, Run *run, const char *started, const cha
     fprintf(f, " \"seeds\": [");
     for (uint32_t i = 0u; i < run->laneCount; i++) fprintf(f, "%s%u", i ? ", " : "", run->lanes[i].seed);
     fprintf(f, "],\n \"envSchedule\": [\n");
-    for (uint32_t i = 0u; i < run->laneCount; i += run->specs[i]->seeds) {
+    for (uint32_t i = 0u; i < run->laneCount; i += OAK_ENV_SEEDS) {
         const EnvSpec *env = run->specs[i];
         fprintf(f, "  {\"envId\": \"%s\", \"seedStart\": %u, \"seedEnd\": %u, \"obs\": %u, \"actions\": %u, \"box\": %u}%s\n",
-                env->name, run->lanes[i].seed, run->lanes[i].seed + env->seeds - 1u, env->obs, env->actions, env->box,
-                i + env->seeds < run->laneCount ? "," : "");
+                env->name, run->lanes[i].seed, run->lanes[i].seed + OAK_ENV_SEEDS - 1u, env->obs, env->actions, env->box,
+                i + OAK_ENV_SEEDS < run->laneCount ? "," : "");
     }
     fprintf(f, " ]\n}\n");
     fclose(f);
@@ -128,13 +130,12 @@ static void writeFile(const char *root, const char *name, const void *data, size
 }
 
 static void scheduleLanes(Run *run, const EnvSpec *const *envs, uint32_t envCount) {
-    run->laneCount = 0u;
-    for (uint32_t e = 0u; e < envCount; e++) run->laneCount += envs[e]->seeds;
+    run->laneCount = envCount * OAK_ENV_SEEDS;
     run->lanes = calloc(run->laneCount, sizeof(Lane));
     run->specs = calloc(run->laneCount, sizeof(const EnvSpec *));
     uint32_t lane = 0u;
     for (uint32_t e = 0u; e < envCount; e++)
-        for (uint32_t s = 0u; s < envs[e]->seeds; s++, lane++) {
+        for (uint32_t s = 0u; s < OAK_ENV_SEEDS; s++, lane++) {
             run->lanes[lane].env = envs[e]->id;
             run->lanes[lane].seed = envs[e]->seedStart + s;
             run->specs[lane] = envs[e];
@@ -165,7 +166,7 @@ static int record(int argc, char **argv) {
         for (uint32_t i = 0u; i < OAK_ENV_TABLE_COUNT; i++) envs[envCount++] = env_at(i);
     }
     scheduleLanes(&run, envs, envCount);
-    allocateRun(&run, OAK_LANES, 0);
+    allocateRun(&run, OAK_LANES);
     char started[32], finished[32];
     timestamp(started, sizeof started);
     char series[4096];
@@ -185,7 +186,7 @@ static int record(int argc, char **argv) {
     uint64_t *hash = calloc(run.laneCount, sizeof(uint64_t));
     uint32_t *health = calloc(run.laneCount, sizeof(uint32_t));
     for (uint32_t w = 0u; w < run.windows; w++) ends[w] = (w + 1u) * OAK_WINDOW < run.steps ? (w + 1u) * OAK_WINDOW : run.steps;
-    for (uint32_t i = 0u; i < run.laneCount; i++) { hash[i] = run.lanes[i].hash; health[i] = run.lanes[i].health; }
+    for (uint32_t i = 0u; i < run.laneCount; i++) { hash[i] = run.lanes[i].tally.hash; health[i] = run.lanes[i].tally.health; }
     writeFile(root, "ends.u32", ends, run.windows * sizeof(uint32_t));
     writeFile(root, "series/rewardSum.f32", run.rewardSum, (size_t)run.windows * run.laneCount * sizeof(float));
     writeFile(root, "hash.u64", hash, run.laneCount * sizeof(uint64_t));
@@ -198,9 +199,9 @@ static int record(int argc, char **argv) {
 }
 
 static void catalogEntry(FILE *out, const EnvSpec *env) {
-    fprintf(out, "{\"envId\":\"%s\",\"family\":\"%s\",\"category\":\"%s\",\"instance\":%u,\"obs\":%u,\"actions\":%u,\"box\":%u,\"seedStart\":%u,\"seedEnd\":%u,\"words\":%u",
+    fprintf(out, "{\"envId\":\"%s\",\"family\":\"%s\",\"category\":\"%s\",\"instance\":%u,\"obs\":%u,\"actions\":%u,\"box\":%u,\"seedStart\":%u,\"seedEnd\":%u,\"words\":%u,\"view\":%u",
             env->name, env->family, env->category, env->instance, env->obs, env->actions, env->box, env->seedStart,
-            env->seedStart + env->seeds - 1u, env->words);
+            env->seedStart + OAK_ENV_SEEDS - 1u, env->words, env_view(env->id, 0, 0, 0, 0));
     catalogDetails(out, env);
     fputc('}', out);
 }
@@ -215,16 +216,17 @@ static void replayWrite(const void *data, size_t bytes) {
     if (fwrite(data, 1u, bytes, stdout) != bytes) die("replay stream closed");
 }
 
-static void replayFrame(const EnvSpec *spec, const Lane *lane, const float *ctrl) {
+static void replayFrame(const EnvSpec *spec, const Lane *lane, const uint32_t *extra, const float *shared, const float *ctrl) {
     for (uint32_t k = spec->words; k < OAK_ENV_WORDS_MAX; k++)
         if (lane->words[k]) { fprintf(stderr, "%s writes state word %u beyond its declared width of %u\n", spec->name, k, spec->words); exit(1); }
-    uint32_t row[OAK_ENV_WORDS_MAX + OAK_ENV_OBS_MAX + OAK_ENV_ACT_MAX + 2u];
+    uint32_t row[OAK_ENV_WORDS_MAX + OAK_ENV_VIEW_MAX + OAK_ENV_OBS_MAX + OAK_ENV_ACT_MAX + 2u];
     uint32_t at = 0u, controls = spec->box ? spec->actions : 1u;
     for (uint32_t k = 0u; k < spec->words; k++) row[at++] = lane->words[k];
+    at += env_view(spec->id, lane->words, extra, shared, row + at);
     for (uint32_t k = 0u; k < spec->obs; k++) row[at++] = floatWord(lane->obs[k]);
     for (uint32_t k = 0u; k < controls; k++) row[at++] = floatWord(ctrl[k]);
-    row[at++] = floatWord(lane->reward);
-    row[at++] = floatWord((float)lane->done);
+    row[at++] = floatWord(lane->tally.reward);
+    row[at++] = floatWord((float)lane->tally.done);
     replayWrite(row, at * sizeof(uint32_t));
 }
 
@@ -277,9 +279,10 @@ static int replay(int argc, char **argv) {
     run.laneCount = 1u;
     run.lanes = &lane;
     run.specs = &spec;
-    allocateRun(&run, OAK_LANES, 1);
+    allocateRun(&run, OAK_LANES);
     flushToZero();
-    lane_init(&lane, 0u, run.steps, run.state, run.extra, run.shared, run.policy);
+    const float *shared = run.shared + env_sharedOffset(spec->id);
+    lane_init(&lane, 0u, run.steps, run.state, run.extra, shared, run.policy);
     char *descriptor = 0;
     size_t descriptorSize = 0u;
     FILE *header = open_memstream(&descriptor, &descriptorSize);
@@ -293,7 +296,7 @@ static int replay(int argc, char **argv) {
     uint32_t prefix[8] = {0};
     memcpy(prefix, "OAKTAPE", 8);
     prefix[2] = (uint32_t)descriptorSize;
-    prefix[3] = spec->words + spec->obs + (spec->box ? spec->actions : 1u) + 2u;
+    prefix[3] = spec->words + env_view(spec->id, 0, 0, 0, 0) + spec->obs + (spec->box ? spec->actions : 1u) + 2u;
     prefix[4] = run.steps + 1u;
     prefix[5] = 256u;
     replayWrite(prefix, sizeof prefix);
@@ -302,25 +305,91 @@ static int replay(int argc, char **argv) {
     replayWrite(&padding, (4u - descriptorSize % 4u) % 4u);
     free(descriptor);
     float ctrl[OAK_ENV_ACT_MAX] = {0};
-    replayFrame(spec, &lane, ctrl);
+    replayFrame(spec, &lane, run.extra, shared, ctrl);
     if (fflush(stdout)) die("replay stream closed");
-    while (lane.step < run.steps) {
-        lane_step(&lane, 0u, run.state, run.extra, run.shared, run.policy, ctrl);
-        replayFrame(spec, &lane, ctrl);
-        if ((lane.step == 1u || lane.step % prefix[5] == 0u) && fflush(stdout)) die("replay stream closed");
+    while (lane.tally.step < run.steps) {
+        lane_window(&lane, 0u, run.state, run.extra, shared, run.policy, lane.tally.step + 1u, ctrl);
+        replayFrame(spec, &lane, run.extra, shared, ctrl);
+        if ((lane.tally.step == 1u || lane.tally.step % prefix[5] == 0u) && fflush(stdout)) die("replay stream closed");
     }
     replayWrite("OAKHASH", 8u);
-    replayWrite(&lane.hash, 8u);
+    replayWrite(&lane.tally.hash, 8u);
     replayWrite(&recorded, 8u);
     replayWrite(&prefix[4], 4u);
-    replayWrite(&lane.health, 4u);
+    replayWrite(&lane.tally.health, 4u);
     if (fflush(stdout)) die("replay stream closed");
-    return lane.hash == recorded ? 0 : 2;
+    return lane.tally.hash == recorded ? 0 : 2;
+}
+
+static double costNow(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC_RAW, &t);
+    return (double)t.tv_sec + 1e-9 * (double)t.tv_nsec;
+}
+
+static double costRun(const EnvSpec *env, uint32_t *extra, uint32_t extraWords, const float *shared, const float *actions, uint32_t steps, int oracle) {
+    memset(extra, 0, ((size_t)extraWords + 1u) * sizeof(uint32_t));
+    uint32_t words[OAK_ENV_WORDS_MAX] = {0}, done = 0u;
+    float obs[OAK_ENV_OBS_MAX] = {0}, ctrl[OAK_ENV_ACT_MAX], sink = 0.0f;
+    env_reset(env->id, env->seedStart, words, extra, steps);
+    env_observe(env->id, env->seedStart, words, extra, 0u, obs, shared);
+    double t0 = costNow();
+    for (uint32_t s = 0u; s < steps; s++) {
+        const float *c = actions + (size_t)s * OAK_ENV_ACT_MAX;
+        if (oracle) {
+            for (uint32_t d = 0u; d < OAK_ENV_ACT_MAX; d++) ctrl[d] = 0.0f;
+            env_oracle(env->id, env->seedStart, s, words, extra, obs, ctrl, shared);
+            c = ctrl;
+        }
+        sink += env_step(env->id, env->seedStart, s + 1u, c, words, extra, obs, &done, shared);
+    }
+    double seconds = costNow() - t0;
+    __asm__ volatile("" : : "r"(&sink) : "memory");
+    return 1e9 * seconds / (double)steps;
+}
+
+static int cost(int argc, char **argv) {
+    if (argc != 3) die("usage: oak cost <steps>");
+    long steps = atol(argv[2]);
+    if (steps <= 0 || steps > 0x7fffffffL) die("steps out of range");
+    env_checkTable();
+    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+    const EnvSpec *specs[OAK_ENV_TABLE_MAX];
+    for (uint32_t i = 0u; i < OAK_ENV_TABLE_COUNT; i++) specs[i] = env_at(i);
+    float *shared = calloc((size_t)env_sharedWords() + 1u, sizeof(float));
+    float *actions = malloc((size_t)steps * OAK_ENV_ACT_MAX * sizeof(float));
+    if (!shared || !actions) die("out of memory");
+    env_buildShared(shared, specs, OAK_ENV_TABLE_COUNT);
+    flushToZero();
+    fputc('[', stdout);
+    for (uint32_t i = 0u; i < OAK_ENV_TABLE_COUNT; i++) {
+        const EnvSpec *env = env_at(i);
+        uint32_t extraWords = env_extraWords(env->id, (uint32_t)steps);
+        uint32_t *extra = malloc(((size_t)extraWords + 1u) * sizeof(uint32_t));
+        if (!extra) die("out of memory");
+        for (uint32_t s = 0u; s < (uint32_t)steps; s++) {
+            float *c = actions + (size_t)s * OAK_ENV_ACT_MAX;
+            for (uint32_t d = 0u; d < OAK_ENV_ACT_MAX; d++) c[d] = 0.0f;
+            random_act(env->id, env->seedStart, s, c);
+        }
+        const float *table = shared + env_sharedOffset(env->id);
+        double envNs = costRun(env, extra, extraWords, table, actions, (uint32_t)steps, 0);
+        for (int repeat = 0; repeat < 2; repeat++) {
+            double again = costRun(env, extra, extraWords, table, actions, (uint32_t)steps, 0);
+            if (again < envNs) envNs = again;
+        }
+        double oracleNs = costRun(env, extra, extraWords, table, actions, (uint32_t)steps, 1);
+        printf("%s{\"envId\":\"%s\",\"env\":%.3f,\"oracle\":%.3f}", i ? "," : "", env->name, envNs, oracleNs);
+        free(extra);
+    }
+    puts("]");
+    return 0;
 }
 
 int main(int argc, char **argv) {
     if (argc >= 2 && strcmp(argv[1], "record") == 0) return record(argc, argv);
     if (argc >= 2 && strcmp(argv[1], "replay") == 0) return replay(argc, argv);
+    if (argc >= 2 && strcmp(argv[1], "cost") == 0) return cost(argc, argv);
     if (argc == 2 && strcmp(argv[1], "envs") == 0) {
         env_checkTable();
         fputc('[', stdout);
@@ -331,6 +400,6 @@ int main(int argc, char **argv) {
         puts("]");
         return 0;
     }
-    die("usage: oak record oak|ppo|random|oracle <steps> <root> [env...] | oak replay <recording> <lane> | oak envs");
+    die("usage: oak record oak|ppo|random|oracle <steps> <root> [env...] | oak replay <recording> <lane> | oak cost <steps> | oak envs");
     return 1;
 }

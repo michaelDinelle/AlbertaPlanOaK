@@ -10,7 +10,14 @@
 #define OAK_LANES 1u
 static inline float wordFloat(uint32_t w) { union { uint32_t u; float f; } v; v.u = w; return v.f; }
 static inline uint32_t floatWord(float f) { union { uint32_t u; float f; } v; v.f = f; return v.u; }
-static inline uint32_t mulhi(uint32_t a, uint32_t b) { return (uint32_t)(((uint64_t)a * (uint64_t)b) >> 32); }
+
+typedef float float4 __attribute__((ext_vector_type(4)));
+typedef uint32_t lane4 __attribute__((ext_vector_type(4)));
+typedef int32_t int4 __attribute__((ext_vector_type(4)));
+static inline float4 splat4(float x) { float4 v = x; return v; }
+static inline const void *opaque(const void *p) { __asm__("" : "+r"(p)); return p; }
+static inline float4 flag4(lane4 set) { return (float4)((lane4)(set != 0u) & 0x3F800000u); }
+static inline float4 select4(lane4 mask, float4 yes, float4 no) { return (float4)(((lane4)yes & mask) | ((lane4)no & ~mask)); }
 
 static inline float oak_pow2i(int n) { return wordFloat((uint32_t)(n + 127) << 23); }
 
@@ -67,13 +74,7 @@ static inline float oak_tanh(float x) {
     return x != x ? x : t;
 }
 
-static inline void oak_sincos(float x, float *s, float *c) {
-    if (x != x || x == INFINITY || x == -INFINITY) {
-        *s = NAN;
-        *c = NAN;
-        return;
-    }
-    float j = floorf(fmaf(x, 0.636619772f, 0.5f));
+static inline void oak_sincosQuarter(float x, float j, float *s, float *c) {
     float r = fmaf(-j, 1.57079601287841796875f, x);
     r = fmaf(-j, 3.1391647e-07f, r);
     float r2 = r * r;
@@ -82,18 +83,24 @@ static inline void oak_sincos(float x, float *s, float *c) {
     sp = fmaf(sp, r2, 1.0f / 120.0f);
     sp = fmaf(sp, r2, -1.0f / 6.0f);
     sp = fmaf(sp, r2, 1.0f);
-    float sr = r * sp;
     float cp = -1.0f / 3628800.0f;
     cp = fmaf(cp, r2, 1.0f / 40320.0f);
     cp = fmaf(cp, r2, -1.0f / 720.0f);
     cp = fmaf(cp, r2, 1.0f / 24.0f);
     cp = fmaf(cp, r2, -0.5f);
-    float cr = fmaf(cp, r2, 1.0f);
     int q = ((int)j) & 3;
-    if (q == 0) { *s = sr; *c = cr; }
-    else if (q == 1) { *s = cr; *c = -sr; }
-    else if (q == 2) { *s = -sr; *c = -cr; }
-    else { *s = -cr; *c = sr; }
+    float sSign = q & 2 ? -1.0f : 1.0f, cSign = (q + 1) & 2 ? -1.0f : 1.0f;
+    *s = q & 1 ? fmaf(cp, r2 * sSign, sSign) : r * sSign * sp;
+    *c = q & 1 ? r * cSign * sp : fmaf(cp, r2 * cSign, cSign);
+}
+
+static inline void oak_sincos(float x, float *s, float *c) {
+    if (x != x || x == INFINITY || x == -INFINITY) {
+        *s = NAN;
+        *c = NAN;
+        return;
+    }
+    oak_sincosQuarter(x, floorf(fmaf(x, 0.636619772f, 0.5f)), s, c);
 }
 
 static inline float oak_sin(float x) { float s, c; oak_sincos(x, &s, &c); return s; }

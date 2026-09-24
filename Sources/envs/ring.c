@@ -37,7 +37,7 @@ void ring_observe(uint32_t instance, uint32_t seed, const uint32_t *words, const
     obs[1] = 1.0f;
 }
 
-void ring_oracle(uint32_t instance, uint32_t seed, uint32_t step, const uint32_t *words, const uint32_t *extra, const float *obs, float *ctrl, const float *shared) {
+void ring_oracle(uint32_t instance, uint32_t seed, uint32_t step, const uint32_t *words, uint32_t *extra, const float *obs, float *ctrl, const float *shared) {
     (void)shared;
     (void)seed; (void)step; (void)extra; (void)obs;
     ctrl[0] = (float)ring_colour(&RING_KNOBS[instance], (words[0] + 1u) % RING_CELLS);

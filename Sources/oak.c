@@ -7,7 +7,6 @@
 
 #define AT(i) ((i) * OAK_LANES + lane)
 
-typedef float float4 __attribute__((ext_vector_type(4)));
 static inline uint32_t oak_ctz(uint32_t x) { return (uint32_t)__builtin_ctz(x); }
 static inline float4 oak_max4(float4 x, float4 y) { return __builtin_elementwise_max(x, y); }
 static inline float4 oak_load4(const float *p) { float4 v; __builtin_memcpy(&v, p, sizeof v); return v; }

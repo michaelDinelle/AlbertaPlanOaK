@@ -15,14 +15,3 @@ void policy_init(uint32_t policy, uint32_t *state, uint32_t lane, uint32_t env, 
         default: return;
     }
 }
-
-void policy_act(uint32_t policy, uint32_t *state, uint32_t lane, uint32_t env, uint32_t seed, uint32_t step, const float *obs, float reward, uint32_t done,
-                const uint32_t *words, const uint32_t *extra, float *ctrl, const float *shared) {
-    switch (policy) {
-        case POLICY_OAK: oak_act(state, lane, env, seed, step, obs, reward, done, ctrl); return;
-        case POLICY_PPO: ppo_act(state, lane, env, seed, step, obs, reward, done, ctrl); return;
-        case POLICY_RANDOM: random_act(env, seed, step, ctrl); return;
-        case POLICY_ORACLE: env_oracle(env, seed, step, words, extra, obs, ctrl, shared); return;
-        default: return;
-    }
-}

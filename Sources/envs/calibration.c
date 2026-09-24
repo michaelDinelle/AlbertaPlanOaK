@@ -15,8 +15,9 @@ float calibration_step(uint32_t instance, uint32_t seed, uint32_t step, const fl
     (void)seed; (void)step; (void)extra;
     const calibrationKnobs *k = &CALIBRATION_KNOBS[instance];
     *done = 0u;
-    float frequency = wordFloat(words[0]);
-    frequency += (((uint32_t)ctrl[0] & 1u) ? 1.0f - frequency : -frequency) / 64.0f;
+    float frequency = wordFloat(words[0]), toward = ((uint32_t)ctrl[0] & 1u) ? 1.0f : 0.0f;
+    float rate = frequency >= 0x1p-120f ? 0x1p-6f : toward * 0x1p-6f;
+    frequency = fmaf(toward - frequency, rate, frequency);
     words[0] = floatWord(frequency);
     float miss = frequency - k->target;
     obs[0] = frequency;
@@ -31,7 +32,7 @@ void calibration_observe(uint32_t instance, uint32_t seed, const uint32_t *words
     obs[1] = 1.0f;
 }
 
-void calibration_oracle(uint32_t instance, uint32_t seed, uint32_t step, const uint32_t *words, const uint32_t *extra, const float *obs, float *ctrl, const float *shared) {
+void calibration_oracle(uint32_t instance, uint32_t seed, uint32_t step, const uint32_t *words, uint32_t *extra, const float *obs, float *ctrl, const float *shared) {
     (void)shared;
     (void)seed; (void)step; (void)extra; (void)obs;
     ctrl[0] = wordFloat(words[0]) < (&CALIBRATION_KNOBS[instance])->target ? 1.0f : 0.0f;

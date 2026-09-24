@@ -15,7 +15,7 @@ def emit(text):
 
 def generate():
     blocks = []
-    families = set(re.findall(r'^    F\((\w+), \w+\)', (ROOT / 'Sources/env.c').read_text(), re.M))
+    families = set(re.findall(r'^    F\((\w+), \w+, \w+, \w+\)', (ROOT / 'Sources/env.c').read_text(), re.M))
     number = re.compile(r'^-?\d+(?:\.\d+)?(?:[eE]-?\d+)?[uUfF]?$')
     for path in sorted((ROOT / 'Sources/envs').glob('*.c')):
         source = path.read_text()
