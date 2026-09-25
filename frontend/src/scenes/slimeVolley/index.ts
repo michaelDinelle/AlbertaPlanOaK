@@ -574,7 +574,8 @@ class SlimeVolleyScene extends Stage2DScene {
       const ours = event.type === 'goal', at = recent(frame.eventLog, event.type, step, 16);
       if (at === null) return;
       const before = frame.frameAt(at - 1), r = this.court.ball;
-      const x = before.step === at - 1 ? word(before, SLIME_BALL + SLIME_X) : ours ? -this.court.half / 2 : this.court.half / 2;
+      if (before.step !== at - 1) return;
+      const x = word(before, SLIME_BALL + SLIME_X);
       const landed = ours ? Math.min(x, -r) : Math.max(x, r);
       pool.ripple(this.spot.set(landed, 0, -ground), ours ? GOLD : TOKENS.failureBlue, 0.55, time);
       pool.burst(this.spot.set(landed, 40, -(ground + 0.4)), ours ? GOLD : TOKENS.failureBlue, ours ? 2.2 : 1, time);
