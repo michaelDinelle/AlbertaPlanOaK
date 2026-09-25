@@ -72,7 +72,7 @@ export function openTape(runId: string, lane: number, environment: EnvDescriptor
       for (let at = lo; at < block.steps.length && block.steps[at] === step; at++) {
         const type = SIM_EVENT_TYPES[block.kinds[at]!]!;
         if (type === 'collection') out.push({ type, item: (['banana', 'onion', 'jellyBean', 'truffle'] as const)[block.values[at]!]!, reward: frameAt(step).reward as -1 | 0 | 1, x: block.cellX[at]!, y: block.cellY[at]! });
-        else if (type === 'cue') out.push({ type, value: block.values[at]! });
+        else if (type === 'cue' || type === 'place') out.push({ type, value: block.values[at]! });
         else if (type === 'key') out.push({ type, index: block.values[at]! });
         else if (type === 'door') out.push({ type, index: block.values[at]! & 0xffff, open: block.values[at]! >>> 16 !== 0 });
         else out.push({ type });

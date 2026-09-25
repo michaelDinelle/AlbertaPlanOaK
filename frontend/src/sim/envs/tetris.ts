@@ -15,6 +15,8 @@ export function tetrisPiece(words: ArrayLike<number>): TetrisPiece {
   };
 }
 
+export const tetrisPlaced = (value: number): Pick<TetrisPiece, 'x' | 'y' | 'orient' | 'type'> => ({ x: value & 255, y: (value >>> 8) & 255, orient: (value >>> 16) & 255, type: (value >>> 24) & 255 });
+
 export const tetrisScore = (words: ArrayLike<number>): number => words[8]! >>> 0;
 export const tetrisLines = (words: ArrayLike<number>): number => words[9]! >>> 0;
 export const tetrisGame = (words: ArrayLike<number>): number => words[10]! >>> 0;
@@ -22,11 +24,11 @@ export const tetrisCleared = (words: ArrayLike<number>): number => words[11]! & 
 export const tetrisClearedRow = (words: ArrayLike<number>, i: number): number => ((words[11]! >>> (3 + 5 * i)) & 31) - 2;
 
 const DONE: SimEvent[] = [{ type: 'done' }];
-const CLEAR: SimEvent[] = [{ type: 'goal' }];
 
 export const tetrisDecoder: EnvDecoder = {
   slots: 7,
   discrete: true,
+  sequential: true,
   decode(frame, out) {
     const p = tetrisPiece(frame.words);
     out[0] = p.x;
@@ -43,7 +45,8 @@ export const tetrisDecoder: EnvDecoder = {
   },
   deriveEvents(prev, next) {
     if (next.done) return DONE;
-    const locked = tetrisByte(prev.words, 57) === 0 && tetrisByte(next.words, 57) > 0;
-    return locked && tetrisCleared(next.words) > 0 ? CLEAR : NO_EVENTS;
+    if (tetrisByte(prev.words, 57) !== 0 || tetrisByte(next.words, 57) === 0) return NO_EVENTS;
+    const place: SimEvent = { type: 'place', value: next.words[13]! };
+    return tetrisCleared(next.words) > 0 ? [{ type: 'goal' }, place] : [place];
   },
 };

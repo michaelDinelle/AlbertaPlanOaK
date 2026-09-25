@@ -7,6 +7,7 @@ export type SimEvent =
   | { type: 'key'; index: number }
   | { type: 'door'; index: number; open: boolean }
   | { type: 'cue'; value: number }
+  | { type: 'place'; value: number }
   | { type: 'teleport' }
   | { type: 'resurface' }
   | {
@@ -29,6 +30,7 @@ export const SIM_EVENT_TYPES = [
   'teleport',
   'resurface',
   'collection',
+  'place',
 ] as const satisfies readonly SimEvent['type'][];
 
 type CoversAllSimEvents = Exclude<SimEvent['type'], (typeof SIM_EVENT_TYPES)[number]>;

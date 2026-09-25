@@ -53,7 +53,7 @@ async function tapeAt(url: string, decoder: EnvDecoder) {
   return { header, initial, events, frameAt };
 }
 
-export async function renderPosters(): Promise<void> {
+export async function renderPosters(names: readonly string[]): Promise<void> {
   const failed: string[] = [], began = performance.now();
   let written = 0;
   try {
@@ -71,6 +71,7 @@ export async function renderPosters(): Promise<void> {
     const first = new Map<string, EnvDescriptor>();
     for (const environment of catalog) if (!first.has(environmentName(environment))) first.set(environmentName(environment), environment);
     for (const [name, environment] of first) {
+      if (names.length && !names.includes(name)) continue;
       try {
         const spec = sceneOf(environment), decoder = spec.decoder, { lanes, seeds } = envLanes(recording.meta, environment.envId);
         const [loaded, tape] = await Promise.all([spec.load(), tapeAt(`/api/runs/${encodeURIComponent(best.id)}/replay/${lanes[0]!}`, decoder)]);

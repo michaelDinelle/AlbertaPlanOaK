@@ -6,8 +6,9 @@ import { clamp01 } from '@kit/mix';
 import { coverage, rgb, sdBox } from '@kit/shapes2d';
 import { Stage2DScene, type Stage2D } from '@kit/stage2d';
 import type { FrameUpdate, LegendSpec, SceneContext, SceneFactory, ScenePost } from '@kit/types';
-import { TETRIS_H, TETRIS_W, tetrisByte, tetrisCleared, tetrisClearedRow, tetrisFilled, tetrisGame, tetrisLines, tetrisPiece, tetrisScore, type TetrisPiece } from '@sim/envs/tetris';
-import type { EnvFrame } from '@sim/types';
+import { TETRIS_H, TETRIS_W, tetrisByte, tetrisCleared, tetrisClearedRow, tetrisFilled, tetrisGame, tetrisLines, tetrisPiece, tetrisPlaced, tetrisScore, type TetrisPiece } from '@sim/envs/tetris';
+import { lastEvent } from '@sim/events';
+import { SIM_EVENT_TYPES, type EnvFrame, type EventStream } from '@sim/types';
 import { constantList, constantRecords } from '../../data/envs';
 import { formatCount } from '../../format';
 
@@ -35,6 +36,7 @@ const PALETTE: readonly (readonly [number, number])[] = [
 ];
 const CORE = 0xcfd3de;
 const DEAD = 0x5a6f9e;
+const PLACE = SIM_EVENT_TYPES.indexOf('place');
 
 const flat = (width: number, depth: number) => new THREE.PlaneGeometry(width, depth).rotateX(-Math.PI / 2);
 const easeOut = (t: number) => 1 - (1 - t) ** 3;
@@ -63,7 +65,11 @@ class TetrisScene extends Stage2DScene {
   private readonly shown = new Uint8Array(CELLS);
   private readonly sink = new Float32Array(CELLS);
   private readonly wiped = new Float32Array(CELLS);
-  private readonly colors = PALETTE.map(([a, b]) => ({ a: new THREE.Color(a), b: new THREE.Color(b), stack: new THREE.Color(a).lerp(new THREE.Color(b), 0.3).lerp(new THREE.Color(0x2c3140), 0.55).multiplyScalar(0.85) }));
+  private readonly colors = PALETTE.map(([a, b]) => ({ a: new THREE.Color(a), b: new THREE.Color(b) }));
+  private readonly landed = new Uint8Array(CELLS);
+  private readonly settled = new Uint8Array(CELLS);
+  private settledGame = -1;
+  private settledStep = -1;
   private readonly deadTint = new THREE.Color(DEAD);
   private readonly matrix = new THREE.Matrix4();
   private readonly at = new THREE.Vector3();
@@ -208,14 +214,15 @@ class TetrisScene extends Stage2DScene {
     const ghostAge = (time - this.ghostAt) / GHOST_SECONDS;
     this.chill.value = ghostAge >= 0 && ghostAge < 1 ? (1 - ghostAge) ** 2 : 0;
 
+    this.settle(frame, step, tetrisGame(now.words));
     const clearing = this.clearing(frame, step, now, piece, frac);
     for (let c = 0; c < CELLS; c++) {
       const row = Math.floor(c / TETRIS_W), col = c % TETRIS_W;
       this.at.set(col - HALF_W + 0.5, 0, row - HALF_H + 0.5);
       if (clearing) {
         this.at.z += this.sink[c]!;
-        this.place(c, this.shown[c] ? 3 : -1, 1, this.wiped[c]!, palette.stack);
-      } else this.place(c, tetrisFilled(now.words, c) ? 3 : -1, 1, 0, palette.stack);
+        this.block(c, this.shown[c] ? this.pieceAt(this.landed, c) : -1, this.wiped[c]!, palette);
+      } else this.block(c, tetrisFilled(now.words, c) ? this.pieceAt(this.settled, c) : -1, 0, palette);
       this.at.set(col - HALF_W + 0.5, 0, row - HALF_H + 0.5);
       const fade = ghostAge >= 0 && ghostAge < 1 && this.ghost[c] ? 1 - clamp01((ghostAge - (row / TETRIS_H) * 0.35) / 0.65) : 0;
       this.place(GHOST + c, fade > 0 ? 3 : -1, fade, 0.15 * fade, this.deadTint);
@@ -235,7 +242,7 @@ class TetrisScene extends Stage2DScene {
       const o = offsets[k];
       const visible = piece.delay === 0 && o !== undefined && piece.y + o.dy >= 0;
       if (o) this.at.set(x + o.dx - HALF_W + 0.5, 0, y + o.dy - HALF_H + 0.5);
-      this.place(LIVE + k, visible ? STYLE[piece.type]! : -1, 1, 0, STYLE[piece.type] === 2 ? palette.b : palette.a);
+      this.block(LIVE + k, visible ? piece.type : -1, 0, palette);
     }
     const preview = this.shapes[this.spawn[piece.next]!] ?? [];
     let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
@@ -245,7 +252,7 @@ class TetrisScene extends Stage2DScene {
     for (let k = 0; k < 4; k++) {
       const o = preview[k];
       if (o) this.at.set(BOX.x + o.dx - (minX + maxX) / 2, 0, BOX.y + o.dy - (minY + maxY) / 2);
-      this.place(NEXT + k, o ? STYLE[piece.next]! : -1, 1, 0, STYLE[piece.next] === 2 ? palette.b : palette.a);
+      this.block(NEXT + k, o ? piece.next : -1, 0, palette);
     }
     this.cells!.instanceMatrix.needsUpdate = true;
     this.lookAttr!.needsUpdate = true;
@@ -294,6 +301,44 @@ class TetrisScene extends Stage2DScene {
       }
     }
     return true;
+  }
+
+  private settle(frame: FrameUpdate, step: number, game: number): void {
+    const log: EventStream = frame.eventLog;
+    if (frame.scrubbed || game !== this.settledGame || step < this.settledStep) {
+      this.settled.fill(0);
+      this.settledGame = game;
+      this.settledStep = lastEvent(log, 'done', step) ?? 0;
+    }
+    for (let b = Math.floor((this.settledStep + 1) / log.blockFrames); b <= Math.floor(step / log.blockFrames); b++) {
+      const block = log.blocks[b];
+      if (!block) throw new Error(`Tetris events for block ${b} are not derived`);
+      for (let i = 0; i < block.steps.length; i++) if (block.kinds[i] === PLACE && block.steps[i]! > this.settledStep && block.steps[i]! <= step) this.lock(block.values[i]!);
+    }
+    this.settledStep = step;
+  }
+
+  private lock(value: number): void {
+    const p = tetrisPlaced(value);
+    for (const o of this.shapes[p.orient]!) {
+      const cell = (p.y + o.dy) * TETRIS_W + p.x + o.dx;
+      if (cell >= 0) this.settled[cell] = p.type + 1;
+    }
+    this.landed.set(this.settled);
+    for (let row = Math.max(0, p.y - 2); row <= Math.min(TETRIS_H - 1, p.y + 1); row++) {
+      if (!this.settled.subarray(row * TETRIS_W, (row + 1) * TETRIS_W).every(Boolean)) continue;
+      this.settled.copyWithin(TETRIS_W, 0, row * TETRIS_W);
+      this.settled.fill(0, 0, TETRIS_W);
+    }
+  }
+
+  private pieceAt(cells: Uint8Array, c: number): number {
+    if (!cells[c]) throw new Error(`Tetris cell ${c} is filled but no placed piece covers it`);
+    return cells[c]! - 1;
+  }
+
+  private block(i: number, type: number, flash: number, palette: { a: THREE.Color; b: THREE.Color }): void {
+    this.place(i, type < 0 ? -1 : STYLE[type]!, 1, flash, STYLE[type] === 2 ? palette.b : palette.a);
   }
 
   private place(i: number, kind: number, alpha: number, flash: number, tint: THREE.Color): void {

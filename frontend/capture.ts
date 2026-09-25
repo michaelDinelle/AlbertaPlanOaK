@@ -171,7 +171,7 @@ async function tile(send: Send, urls: readonly (string | null)[], labels: readon
 const save = (url: string, out: string) => writeFileSync(out, Buffer.from(url.slice(url.indexOf(',') + 1), 'base64'));
 const formatOf = (out: string) => out.endsWith('.png') ? 'image/png' : 'image/webp';
 
-const USAGE = 'usage: bun capture.ts <envId> <step> <out.webp|out.png> [seed] [--debug] [--dpr 2] [--size 1280x720] | bun capture.ts sheet <out.png> <cell>... [--dpr 2] [--jobs 2] | bun capture.ts perf <cell>... | bun capture.ts posters   (cell: <envId>@<step>[~seed][+debug]; more than 9 cells write <out>-01.png, <out>-02.png, ...)';
+const USAGE = 'usage: bun capture.ts <envId> <step> <out.webp|out.png> [seed] [--debug] [--dpr 2] [--size 1280x720] | bun capture.ts sheet <out.png> <cell>... [--dpr 2] [--jobs 2] | bun capture.ts perf <cell>... | bun capture.ts posters [name...]   (cell: <envId>@<step>[~seed][+debug]; more than 9 cells write <out>-01.png, <out>-02.png, ...)';
 const FLAT = 4;
 const STALL = /did not answer|closed its debugging socket|No target with given id|Failed to open a new tab/;
 const cellOf = (spec: string): Omit<Shot, 'dpr' | 'width' | 'height' | 'format'> => {
@@ -208,7 +208,7 @@ const each = async <T>(items: readonly T[], n: number, work: (worker: Worker, it
 try {
   if (positional[0] === 'posters') {
     const [worker] = await pool(1), send = worker!.browser.send, page = await openPage(send, dpr);
-    await send('Page.navigate', { url: `${ORIGIN}/?posters=1` }, page.sessionId);
+    await send('Page.navigate', { url: `${ORIGIN}/?posters=${positional.slice(1).join(',')}` }, page.sessionId);
     for (let title = ''; !title.startsWith('posters:'); await Bun.sleep(250)) title = await evaluate(send, page.sessionId, 'document.title');
     console.log(await evaluate(send, page.sessionId, 'document.title'));
     for (const error of page.errors.slice(0, 3)) console.log(`page error: ${error.split('\n')[0]!.slice(0, 300)}`);

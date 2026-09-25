@@ -8,5 +8,6 @@ for (const [slug, hex] of Object.entries(TOKENS.accents)) {
 }
 
 const mounted = globalThis as { oakRoot?: Root };
-if (new URLSearchParams(location.search).has('posters')) void renderPosters();
+const posters = new URLSearchParams(location.search).get('posters');
+if (posters !== null) void renderPosters(posters.split(',').filter(Boolean));
 else (mounted.oakRoot ??= createRoot(document.getElementById('app')!)).render(<App />);
