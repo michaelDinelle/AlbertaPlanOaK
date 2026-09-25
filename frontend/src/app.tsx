@@ -195,31 +195,27 @@ export function App() {
         </select>
         <button type="button" onClick={() => stage.current?.resetCamera()} title="Reset camera" className="glass flex h-9 items-center gap-2 rounded-lg px-3 text-xs text-ink-dim hover:bg-white/10 hover:text-ink">⟲<span className="hidden sm:inline">Reset camera</span></button>
       </div>
-      {s.panelOpen ? (
-        <aside className="glass absolute bottom-20 right-4 top-4 z-20 flex w-[400px] max-w-[calc(100vw-2rem)] flex-col overflow-hidden rounded-lg py-2.5">
-          <header className="mx-3 mb-2 flex shrink-0 items-center gap-3 border-b border-white/10 pb-2">
-            <span className="min-w-0 text-xs text-ink-dim">Michael Dinelle</span>
-            <nav aria-label="Michael Dinelle’s links" className="ml-auto flex items-center gap-1">
-              {AUTHOR_LINKS.map(({ href, label, Mark }) => (
-                <a key={href} href={href} target="_blank" rel="noreferrer" aria-label={`Michael Dinelle on ${label}`} title={`Michael Dinelle on ${label}`} className="flex size-8 items-center justify-center rounded-md text-ink-dim hover:bg-white/10 hover:text-accent">
-                  <Mark className="size-3.5" />
-                </a>
-              ))}
-            </nav>
-          </header>
-          <div className="flex items-center gap-1 px-2 pb-2">
-            {(Object.keys(PANELS) as Panel[]).map((panel) => (
-              <button key={panel} type="button" onClick={() => patch({ panel })} title={`${PANELS[panel]} (${(Object.keys(PANELS) as Panel[]).indexOf(panel) + 1})`} className={`rounded-md px-2.5 py-1 text-xs ${s.panel === panel ? 'bg-accent/20 text-accent' : 'text-ink-dim hover:bg-white/10 hover:text-ink'}`}>{PANELS[panel]}</button>
+      <aside id="side-panel" hidden={!s.panelOpen} className="glass absolute bottom-20 right-4 top-4 z-20 flex w-[400px] max-w-[calc(100vw-2rem)] flex-col overflow-hidden rounded-lg pb-2.5">
+        <header className="mx-3 mb-2 flex h-10 shrink-0 items-center gap-3 border-b border-white/10 pb-1 pr-9">
+          <span className="min-w-0 text-xs text-ink-dim">Michael Dinelle</span>
+          <nav aria-label="Michael Dinelle’s links" className="ml-auto flex items-center gap-1">
+            {AUTHOR_LINKS.map(({ href, label, Mark }) => (
+              <a key={href} href={href} target="_blank" rel="noreferrer" aria-label={`Michael Dinelle on ${label}`} title={`Michael Dinelle on ${label}`} className="flex size-8 items-center justify-center rounded-md text-ink-dim hover:bg-white/10 hover:text-accent">
+                <Mark className="size-3.5" />
+              </a>
             ))}
-            <button type="button" onClick={() => patch({ panelOpen: false })} aria-label="Hide the side panel" title="Hide the side panel (c)" className="ml-auto flex size-8 items-center justify-center rounded-md text-ink-dim hover:bg-white/10 hover:text-ink"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="size-4" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2" /><path d="M15 3v18" /></svg></button>
-          </div>
-          {s.panel === 'reward' && active !== null && s.envId !== null && seed !== null && <RewardView stage={stage} runId={active.id} envId={s.envId} seed={seed} compare={compare} />}
-          {s.panel === 'standings' && <StandingsView />}
-          {s.panel === 'health' && active !== null && s.envId !== null && <HealthView runId={active.id} envId={s.envId} />}
-        </aside>
-      ) : (
-        <button type="button" onClick={() => patch({ panelOpen: true })} aria-label="Show the side panel" title="Show the side panel (c)" className="glass absolute right-4 top-4 z-20 flex size-9 items-center justify-center rounded-lg text-ink-dim hover:bg-white/10 hover:text-ink"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="size-4" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2" /><path d="M15 3v18" /></svg></button>
-      )}
+          </nav>
+        </header>
+        <div className="flex items-center gap-1 px-2 pb-2">
+          {(Object.keys(PANELS) as Panel[]).map((panel) => (
+            <button key={panel} type="button" onClick={() => patch({ panel })} title={`${PANELS[panel]} (${(Object.keys(PANELS) as Panel[]).indexOf(panel) + 1})`} className={`rounded-md px-2.5 py-1 text-xs ${s.panel === panel ? 'bg-accent/20 text-accent' : 'text-ink-dim hover:bg-white/10 hover:text-ink'}`}>{PANELS[panel]}</button>
+          ))}
+        </div>
+        {s.panel === 'reward' && active !== null && s.envId !== null && seed !== null && <RewardView stage={stage} runId={active.id} envId={s.envId} seed={seed} compare={compare} />}
+        {s.panel === 'standings' && <StandingsView />}
+        {s.panel === 'health' && active !== null && s.envId !== null && <HealthView runId={active.id} envId={s.envId} />}
+      </aside>
+      <button type="button" onClick={() => patch({ panelOpen: !store.get().panelOpen })} aria-controls="side-panel" aria-expanded={s.panelOpen} aria-label="Side panel" title={`${s.panelOpen ? 'Hide' : 'Show'} the side panel (c)`} className={`absolute right-4 top-4 z-30 flex size-9 touch-manipulation items-center justify-center rounded-lg text-ink-dim hover:bg-white/10 hover:text-ink ${s.panelOpen ? '' : 'glass'}`}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="size-4" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2" /><path d="M15 3v18" /></svg></button>
       <div className="absolute inset-x-0 bottom-4 z-30 grid grid-cols-[1fr_minmax(0,760px)_1fr] items-end gap-3 px-4">
         <div className="flex flex-col items-start gap-3">
           <SceneLegend stage={stage} />
