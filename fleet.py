@@ -1,23 +1,36 @@
 #!/usr/bin/env python3
+import bisect
+import fcntl
 import filecmp
 import hashlib
+import io
 import json
 import math
+import os
 import random
 import re
 import shutil
+import signal
 import statistics
 import subprocess
 import sys
+import time
+import traceback
 from array import array
+from contextlib import contextmanager
 from pathlib import Path
+from xml.etree import ElementTree
 
 REPO = Path(__file__).resolve().parent
 BENCH = REPO / ".oak-benchmarks"
 BASELINES = BENCH / "baselines"
+SPEED = BENCH / "speed"
+VERDICTS = BENCH / "verdicts.log"
+RUNNER_LOCK = BENCH / "runner.lock"
+RUNNER_LOG = BENCH / "runner.log"
+QUEUE = REPO / ".build/queue"
 BEST = REPO / "best"
 ANCHOR = "4262868f4bce5ea25ac4905e60742f75d11be371"
-ENGINE = REPO / ".build/oak"
 STEPS = 1_000_000
 TERMINAL = 100_000
 MARGIN = 0.01
@@ -26,46 +39,55 @@ BOOTSTRAP = 10_000
 POWER = 0.8
 PROBE_STEPS = 20_000
 PROBE_BLOCKS = 3
-COST_STEPS = 100_000
-COST_BLOCKS = 3
-COST_CAP_NS = 62.0
-COST_NOISE = 0.05
-COST_FLOOR_NS = 1.0
-COST_EXCEPTIONS = frozenset({"Craftax-Classic-cont-v0", "Reacher-cont-v0", "Contextual-8-drift-cont-v0", "Contextual-16-drift-cont-v0", "HalfCheetah-cont-v0", "HalfCheetah-friction-cont-v0", "InvertedDoublePendulum-cont-v0", "Hopper-cont-v0"})
 POLICIES = ("random", "ppo", "oracle")
 POLICY_SOURCES = {"random": ("Sources/random.c",), "ppo": ("Sources/ppo.c",), "oracle": ()}
 ENV_LAYER = ("Sources/env.h", "Sources/rng.h", "Sources/portable.h")
 SNAPSHOT = ("Sources", "catalog.py", "setup.sh")
 ENV_ROW = re.compile(r'\s*X\(\s*\w+\s*,\s*(\w+)\s*,.*?"([^"]+)"')
+VERBS = ("judge", "adopt", "probe", "trace")
+TIMING = ("probe", "trace")
+TRACE_SECONDS = 10
+ACTIVE = []
 
 
-def digest(entries):
+def stamp():
+    return time.strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def digest(entries, root=REPO):
     result = hashlib.sha256()
     for entry in sorted(entries):
-        path = REPO / entry
+        path = root / entry
         files = sorted(p for p in path.rglob("*") if p.is_file() and not p.name.startswith(".")) if path.is_dir() else [path]
         for file in files:
-            result.update(str(file.relative_to(REPO)).encode() + b"\0" + file.read_bytes() + b"\0")
+            result.update(str(file.relative_to(root)).encode() + b"\0" + file.read_bytes() + b"\0")
     return result.hexdigest()
 
 
-def env_digests(table):
+def file_digest(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def env_digests(table, root=REPO):
     rows = {}
-    for line in (REPO / "Sources/env.c").read_text().splitlines():
+    for line in (root / "Sources/env.c").read_text().splitlines():
         row = ENV_ROW.match(line)
         if row:
             rows[row.group(2)] = (row.group(1), line.strip())
-    digests = {}
+    texts = {p: p.read_text() for p in sorted((root / "Sources/envs").glob("*.c"))}
+    layers, digests = {}, {}
     for entry in table:
         name = entry["envId"]
         if name not in rows:
             raise SystemExit(f"{name} has no row in the environment table")
         family, row = rows[name]
-        hook = re.compile(rf"\b{family}_step\(")
-        owners = [p for p in sorted((REPO / "Sources/envs").glob("*.c")) if hook.search(p.read_text())]
-        if len(owners) != 1:
-            raise SystemExit(f"{name} draws its behaviour from {len(owners)} environment files")
-        digests[name] = hashlib.sha256((digest(ENV_LAYER + (str(owners[0].relative_to(REPO)),)) + row).encode()).hexdigest()
+        if family not in layers:
+            hook = re.compile(rf"\b{family}_step\(")
+            owners = [p for p, text in texts.items() if hook.search(text)]
+            if len(owners) != 1:
+                raise SystemExit(f"{name} draws its behaviour from {len(owners)} environment files")
+            layers[family] = digest(ENV_LAYER + (str(owners[0].relative_to(root)),), root)
+        digests[name] = hashlib.sha256((layers[family] + row).encode()).hexdigest()
     return digests
 
 
@@ -106,102 +128,213 @@ class Recording:
         return json.loads((self.root / "sources.json").read_text())
 
 
-def snapshot(target):
+def complete(root):
+    meta = root / "meta.json"
+    return meta.exists() and "finishedAt" in json.loads(meta.read_text())
+
+
+def snapshot(target, root=REPO):
     shutil.rmtree(target, ignore_errors=True)
     target.mkdir(parents=True)
     for entry in SNAPSHOT:
-        source = REPO / entry
+        source = root / entry
         if source.is_dir():
             shutil.copytree(source, target / entry, ignore=shutil.ignore_patterns(".*"))
         else:
             shutil.copy2(source, target / entry)
 
 
+def processes():
+    out = subprocess.run(["ps", "-ax", "-o", "pid=,stat=,comm="], capture_output=True, text=True, check=True).stdout
+    for fields in (line.split(None, 2) for line in out.splitlines()):
+        if len(fields) == 3:
+            yield int(fields[0]), fields[1], Path(fields[2].strip()).name
+
+
+def stopped(pid):
+    return any(p == pid and stat.startswith("T") for p, stat, _ in processes())
+
+
+@contextmanager
+def quiet():
+    if ACTIVE and (ACTIVE[-1] / "cancel").exists():
+        raise SystemExit("CANCELLED")
+    paused = []
+    for pid, stat, name in processes():
+        if name == "oak" and not stat.startswith("T"):
+            try:
+                os.kill(pid, signal.SIGSTOP)
+                paused.append(pid)
+            except ProcessLookupError:
+                pass
+    try:
+        yield
+    finally:
+        for pid in paused:
+            try:
+                os.kill(pid, signal.SIGCONT)
+            except ProcessLookupError:
+                pass
+
+
 def probe(engine, tag, index):
     root = BENCH / f"probe-{tag}-{index}"
     shutil.rmtree(root, ignore_errors=True)
-    out = subprocess.run(["caffeinate", "-i", str(engine), "record", "oak", str(PROBE_STEPS), str(root)],
-                         capture_output=True, text=True, check=True, cwd=REPO).stdout
+    with quiet():
+        out = subprocess.run(["caffeinate", "-i", str(engine), "record", "oak", str(PROBE_STEPS), str(root)],
+                             capture_output=True, text=True, check=True, cwd=REPO).stdout
+    streams = array("Q", (root / "hash.u64").read_bytes())
     shutil.rmtree(root, ignore_errors=True)
-    return float(out.rsplit(":", 1)[1].split()[0])
+    return float(out.rsplit(":", 1)[1].split()[0]), streams
+
+
+def leaves(export):
+    frames, backtraces, binaries, counts = {}, {}, {}, {}
+    for _, element in ElementTree.iterparse(io.StringIO(export), events=("end",)):
+        if element.tag == "binary" and "id" in element.attrib:
+            binaries[element.attrib["id"]] = element.attrib
+        elif element.tag == "frame" and "id" in element.attrib:
+            binary = element.find("binary")
+            frames[element.attrib["id"]] = (element.attrib.get("name", "?"), element.attrib.get("addr", "0x0"),
+                                            None if binary is None else binary.attrib.get("id", binary.attrib.get("ref")))
+        elif element.tag == "backtrace" and "id" in element.attrib:
+            first = element.find("frame")
+            backtraces[element.attrib["id"]] = first.attrib.get("id", first.attrib.get("ref"))
+        elif element.tag == "row":
+            backtrace = element.find("backtrace")
+            if backtrace is not None:
+                leaf = backtraces[backtrace.attrib.get("id", backtrace.attrib.get("ref"))]
+                counts[leaf] = counts.get(leaf, 0) + 1
+            element.clear()
+    return [(frames[leaf], binaries.get(frames[leaf][2], {}), count) for leaf, count in counts.items()]
+
+
+def trace(engine):
+    root, report = BENCH / "probe-trace", BENCH / "trace.trace"
+    shutil.rmtree(root, ignore_errors=True)
+    shutil.rmtree(report, ignore_errors=True)
+    with quiet():
+        process = subprocess.Popen([str(engine), "record", "oak", str(PROBE_STEPS), str(root)], cwd=REPO, stdout=subprocess.DEVNULL)
+        while not (root / "meta.json").exists():
+            time.sleep(0.1)
+        subprocess.run(["xcrun", "xctrace", "record", "--template", "Time Profiler", "--attach", str(process.pid),
+                        "--time-limit", f"{TRACE_SECONDS}s", "--output", str(report)], check=True, capture_output=True)
+        process.wait()
+    shutil.rmtree(root, ignore_errors=True)
+    export = subprocess.run(["xcrun", "xctrace", "export", "--input", str(report), "--xpath",
+                             '/trace-toc/run[@number="1"]/data/table[@schema="time-profile"]'], capture_output=True, text=True, check=True).stdout
+    shutil.rmtree(report, ignore_errors=True)
+    symbols = sorted((int(address, 16), name) for address, kind, name in
+                     (line.split() for line in subprocess.run(["nm", "-n", str(engine)], capture_output=True, text=True, check=True).stdout.splitlines() if line.count(" ") == 2)
+                     if kind in "tT")
+    starts = [address for address, _ in symbols]
+    functions, places, total = {}, {}, 0
+    for (name, address, _), binary, count in leaves(export):
+        total += count
+        functions[name] = functions.get(name, 0) + count
+        if binary.get("name") == "oak" and "load-addr" in binary:
+            static = (0x100000000 + int(address, 16) - int(binary["load-addr"], 16)) & ~3
+            index = bisect.bisect_right(starts, static) - 1
+            place = f"{symbols[index][1]}+0x{static - starts[index]:x}"
+            places[place] = places.get(place, 0) + count
+    print(f"{total} samples", flush=True)
+    for name, count in sorted(functions.items(), key=lambda item: -item[1])[:20]:
+        print(f"  {100 * count / total:6.2f}%  {name}", flush=True)
+    for place, count in sorted(places.items(), key=lambda item: -item[1])[:40]:
+        print(f"  {100 * count / total:6.2f}%  {place}", flush=True)
+
+
+def toolchain():
+    driver = subprocess.run(["clang", "-###", "-x", "c", "-c", "/dev/null", "-o", "/dev/null"], capture_output=True, text=True, check=True).stderr
+    sysroot = re.search(r'"-isysroot" "([^"]+)"', driver)[1]
+    return driver + str(Path(sysroot).resolve()) + subprocess.run(["ld", "-v"], capture_output=True, text=True, check=True).stderr
 
 
 def reference_engine(reference, preset):
     source = reference.root / "source"
     if not source.is_dir():
         raise SystemExit(f"Recorded reference carries no source snapshot and cannot be timed: {reference.root.name}")
-    tree = REPO / ".build" / f"reference-{reference.root.name[:9]}"
-    shutil.rmtree(tree, ignore_errors=True)
-    shutil.copytree(source, tree)
-    subprocess.run([tree / "setup.sh", "--preset", preset], cwd=tree, check=True, capture_output=True)
+    key = digest([p.name for p in source.iterdir() if not p.name.startswith(".")], source) + preset + toolchain()
+    tree = REPO / ".build" / ("reference-" + hashlib.sha256(key.encode()).hexdigest()[:16])
+    if not tree.is_dir():
+        staged = tree.with_name(tree.name + ".partial")
+        shutil.rmtree(staged, ignore_errors=True)
+        shutil.copytree(source, staged)
+        subprocess.run([staged / "setup.sh", "--preset", preset], cwd=staged, check=True, capture_output=True)
+        staged.rename(tree)
     return tree / ".build/oak"
 
 
-def costs(engine):
-    out = subprocess.run(["caffeinate", "-i", str(engine), "cost", str(COST_STEPS)], capture_output=True, text=True, check=True, cwd=REPO).stdout
-    return {row["envId"]: row["env"] for row in json.loads(out)}
-
-
-def hawk(other, reference, candidate):
-    if filecmp.cmp(ENGINE, other, shallow=False):
-        print(f"binary identical to recorded {reference.root.name[:9]}; environment costs unchanged", flush=True)
-        return []
-    print(f"timing environment steps against recorded {reference.root.name[:9]}", flush=True)
-    now_blocks, was_blocks = [], []
-    for block in range(COST_BLOCKS):
-        a, b, c, d = costs(ENGINE), costs(other), costs(other), costs(ENGINE)
-        now_blocks.append({env: (a[env] + d[env]) / 2 for env in a})
-        was_blocks.append({env: (b[env] + c[env]) / 2 for env in b})
-    now = {env: quantile(sorted(block[env] for block in now_blocks), 0.5) for env in now_blocks[0]}
-    was = {env: quantile(sorted(block[env] for block in was_blocks), 0.5) for env in was_blocks[0]}
-    failures = []
-    source_was, source_now = reference.sources()["envs"], candidate.sources()["envs"]
-    for env in sorted(now, key=now.get, reverse=True):
-        mark = ""
-        if env in was and now[env] - was[env] > max(COST_FLOOR_NS, COST_NOISE * was[env]):
-            if source_now.get(env) == source_was.get(env):
-                mark = "layout"
-            else:
-                mark = "SLOWER"
-                failures.append(f"{env} slower: {was[env]:.1f} -> {now[env]:.1f} ns")
-        elif env not in was and now[env] > COST_CAP_NS and env not in COST_EXCEPTIONS:
-            mark = f"ABOVE {COST_CAP_NS:g} ns"
-            failures.append(f"{env} above {COST_CAP_NS:g} ns: {now[env]:.1f} ns")
-        elif now[env] > COST_CAP_NS:
-            mark = "named exception" if env in COST_EXCEPTIONS else f"above {COST_CAP_NS:g} ns, ratcheted"
-        print(f"  {env:<36} {now[env]:9.1f} ns  {('was ' + format(was[env], '.1f')) if env in was else 'new':>12}  {mark}", flush=True)
-    shared = [env for env in candidate.envs if env in was]
-    weight = sum(len(candidate.seeds[env]) for env in shared)
-    mean_now = sum(now[env] * len(candidate.seeds[env]) for env in shared) / weight
-    mean_was = sum(was[env] * len(candidate.seeds[env]) for env in shared) / weight
-    mean_all = sum(now[env] * len(candidate.seeds[env]) for env in candidate.envs) / candidate.lanes
-    print(f"lane-weighted environment step over the {len(shared)} shared environments: {mean_was:.2f} -> {mean_now:.2f} ns; over all {len(candidate.envs)}: {mean_all:.2f} ns", flush=True)
-    if mean_now > mean_was * (1 + COST_NOISE):
-        failures.append(f"lane-weighted environment step rose: {mean_was:.2f} -> {mean_now:.2f} ns")
-    return failures
-
-
-def paired_speed(other, reference):
-    if filecmp.cmp(ENGINE, other, shallow=False):
+def paired_speed(engine, other, reference, compare):
+    if filecmp.cmp(engine, other, shallow=False):
         print(f"binary identical to recorded {reference.root.name[:9]}; no probe", flush=True)
-        return 1.0
+        return 1.0, 0
     print(f"timing against recorded {reference.root.name[:9]}", flush=True)
-    ratios = []
+    ratios, diverged = [], 0
     for block in range(PROBE_BLOCKS):
-        a = probe(ENGINE, "candidate", 2 * block)
-        b = probe(other, "reference", 2 * block)
-        c = probe(other, "reference", 2 * block + 1)
-        d = probe(ENGINE, "candidate", 2 * block + 1)
+        a, streams = probe(engine, "candidate", 2 * block)
+        b, expected = probe(other, "reference", 2 * block)
+        if compare and block == 0:
+            diverged = sum(1 for x, y in zip(streams, expected) if x != y)
+            if diverged:
+                print(f"reward streams diverge from recorded {reference.root.name[:9]} on {diverged} of {len(streams)} lanes within {PROBE_STEPS} steps", flush=True)
+        c, _ = probe(other, "reference", 2 * block + 1)
+        d, _ = probe(engine, "candidate", 2 * block + 1)
         ratios.append((a + d) / (b + c))
         print(f"speed block {block + 1}: candidate {(a + d) / 2:,.0f}  reference {(b + c) / 2:,.0f}  ratio {ratios[-1]:.4f}", flush=True)
-    return quantile(sorted(ratios), 0.5)
+    return quantile(sorted(ratios), 0.5), diverged
 
 
-def record(policy, root, sources, envs=()):
+def speed_stage(engine, timing_engine, timing_reference, compare):
+    key = file_digest(engine) + file_digest(timing_engine)
+    path = SPEED / (hashlib.sha256(key.encode()).hexdigest()[:40] + ".json")
+    if path.exists():
+        result = json.loads(path.read_text())
+        print(f"speed stage already measured at {result['at']} for this binary pair", flush=True)
+        if compare and result["diverged"]:
+            print(f"reward streams diverge from recorded {timing_reference.root.name[:9]} on {result['diverged']} lanes within {PROBE_STEPS} steps", flush=True)
+    else:
+        ratio, diverged = paired_speed(engine, timing_engine, timing_reference, compare)
+        result = {"at": stamp(), "ratio": ratio, "diverged": diverged}
+        SPEED.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(result, indent=1) + "\n")
+    print(f"paired speed against recorded {timing_reference.root.name[:9]}: {result['ratio']:.4f}x", flush=True)
+    return result["ratio"]
+
+
+def supervise(command):
+    process = subprocess.Popen(command, cwd=REPO, start_new_session=True)
+    awake = subprocess.Popen(["caffeinate", "-i", "-w", str(process.pid)])
+    (ACTIVE[-1] / "pid").write_text(f"{process.pid}\n")
+    while process.poll() is None:
+        job = pending(TIMING)
+        if job is None:
+            time.sleep(2)
+            continue
+        try:
+            os.kill(process.pid, signal.SIGTSTP)
+        except ProcessLookupError:
+            continue
+        while process.poll() is None and not stopped(process.pid):
+            time.sleep(0.05)
+        print(f"{stamp()} paused for probe {job.name}", flush=True)
+        run(job)
+        print(f"{stamp()} resumed", flush=True)
+        try:
+            os.kill(process.pid, signal.SIGCONT)
+        except ProcessLookupError:
+            pass
+    awake.wait()
+    if process.returncode:
+        raise subprocess.CalledProcessError(process.returncode, command)
+
+
+def record(engine, policy, root, sources, tree, envs=()):
     print(f"Recording {policy} into {root.name}", flush=True)
+    shutil.rmtree(root, ignore_errors=True)
     staged = root.with_name(root.name + ".source")
-    snapshot(staged)
-    subprocess.run(["caffeinate", "-i", ENGINE, "record", policy, str(STEPS), root, *envs], check=True, cwd=REPO)
+    snapshot(staged, tree)
+    supervise([str(engine), "record", policy, str(STEPS), str(root), *envs])
     (root / "sources.json").write_text(json.dumps(sources, indent=1, sort_keys=True) + "\n")
     staged.rename(root / "source")
     return Recording(root)
@@ -211,8 +344,8 @@ def baseline_identity(policy, env, env_digest, seeds, policy_digest):
     return hashlib.sha256(json.dumps({"policy": policy, "env": env, "digest": env_digest, "seeds": seeds, "steps": STEPS, "policyDigest": policy_digest}, sort_keys=True).encode()).hexdigest()[:40]
 
 
-def baseline(policy, digests, schedule):
-    policy_digest = digest(POLICY_SOURCES[policy])
+def baseline(policy, digests, schedule, engine, tree):
+    policy_digest = digest(POLICY_SOURCES[policy], tree)
     index = BASELINES / policy
     found, missing = {}, []
     for env, seeds in schedule.items():
@@ -225,7 +358,7 @@ def baseline(policy, digests, schedule):
     if missing:
         names = [env for env, _ in missing]
         root = BENCH / f"{policy}-{hashlib.sha256(json.dumps(sorted(identity for _, identity in missing)).encode()).hexdigest()[:40]}"
-        record(policy, root, {"policy": policy, "envs": {env: digests[env] for env in names}, "policyDigest": policy_digest}, names)
+        record(engine, policy, root, {"policy": policy, "envs": {env: digests[env] for env in names}, "policyDigest": policy_digest}, tree, names)
         index.mkdir(parents=True, exist_ok=True)
         for env, identity in missing:
             (index / identity).write_text(root.name + "\n")
@@ -333,7 +466,7 @@ def rho_of(a, b):
     va = mean([(x - ma) ** 2 for x in a])
     vb = mean([(y - mb) ** 2 for y in b])
     cov = mean([(x - ma) * (y - mb) for x, y in zip(a, b)])
-    return cov / math.sqrt(va * vb) if va > 0 and vb > 0 else 0.0
+    return min(1.0, cov / math.sqrt(va * vb)) if va > 0 and vb > 0 else 0.0
 
 
 def mdr(rho, tests, n):
@@ -397,90 +530,237 @@ def fmt(v):
     return str(v)
 
 
-def main():
-    verb = sys.argv[1] if len(sys.argv) > 1 else "judge"
-    if verb not in ("judge", "adopt"):
-        raise SystemExit("usage: ./fleet.py [adopt]")
+def execute(tree, verb):
     best_id = BEST.read_text().strip() if BEST.exists() else ""
-    if best_id:
-        preset = json.loads((BENCH / best_id / "meta.json").read_text())["preset"]
-    elif (REPO / ".build/preset").exists() and (REPO / ".build/preset").read_text().strip() in ("base", "pro", "max", "ultra"):
-        preset = (REPO / ".build/preset").read_text().strip()
-    else:
-        raise SystemExit("No best and no built preset: ./setup.sh --preset base|pro|max|ultra first")
-    subprocess.run([REPO / "setup.sh", "--preset", preset], cwd=REPO, check=True)
-    tree = hashlib.sha256((digest(("Sources", "setup.sh")) + preset).encode()).hexdigest()[:40]
-    table = json.loads(subprocess.run([ENGINE, "envs"], capture_output=True, text=True, check=True).stdout)
-    schedule = {row["envId"]: [row["seedStart"], row["seedEnd"]] for row in table}
-    digests = env_digests(table)
     if not best_id:
-        raise SystemExit("No recorded reference with baseline links; nothing will be recorded")
+        raise SystemExit("No recorded best to judge against")
     reference = Recording(BENCH / best_id)
-    best = reference if verb == "judge" else None
-    if best is not None:
-        expected = {entry["envId"]: [entry["seedStart"], entry["seedEnd"]] for entry in best.meta["envSchedule"]}
-        if schedule != expected or best.steps != STEPS:
-            raise SystemExit("Schedule differs from the recorded best; environments, seeds, and horizon must match before recording")
-        reference_sources = best.sources()["envs"]
+    preset = reference.meta["preset"]
+    subprocess.run([tree / "setup.sh", "--preset", preset], cwd=tree, check=True)
+    engine = tree / ".build/oak"
+    tree_id = hashlib.sha256((digest(("Sources", "setup.sh"), tree) + preset).encode()).hexdigest()[:40]
+    table = json.loads(subprocess.run([engine, "envs"], capture_output=True, text=True, check=True).stdout)
+    schedule = {row["envId"]: [row["seedStart"], row["seedEnd"]] for row in table}
+    digests = env_digests(table, tree)
+    judged = verb != "adopt"
+    if judged:
+        expected = {entry["envId"]: [entry["seedStart"], entry["seedEnd"]] for entry in reference.meta["envSchedule"]}
+        if schedule != expected or reference.steps != STEPS:
+            raise SystemExit("Schedule differs from the recorded best; environments, seeds, and horizon must match: ./fleet.py adopt if this change is intended")
+        reference_sources = reference.sources()["envs"]
         changed = sorted(env for env in reference_sources.keys() | digests.keys() if reference_sources.get(env) != digests.get(env))
         if changed:
             print(f"Environment sources changed since the recorded best ({len(changed)} environments); comparing on the same seeds and horizon: {', '.join(changed)}", flush=True)
-    baselines = {policy: baseline(policy, digests, schedule) for policy in POLICIES}
-    BENCH.mkdir(exist_ok=True)
-    candidate_root = BENCH / tree
-    sources = {"policy": "oak", "preset": preset, "envs": digests, "policyDigest": digest(("Sources",))}
-    if (candidate_root / "meta.json").exists():
+    if verb == "trace":
+        trace(engine)
+        return f"trace: sampled {TRACE_SECONDS} s of the working tree's engine"
+    other = reference_engine(reference, preset)
+    if judged and filecmp.cmp(engine, other, shallow=False):
+        if verb == "probe":
+            return f"probe: binary identical to recorded {best_id[:9]}"
+        raise SystemExit(f"REJECT: binary identical to recorded {best_id[:9]}; nothing to judge")
+    if judged:
+        timing = (other, reference)
+    else:
+        anchor = Recording(BENCH / ANCHOR)
+        timing = (other if best_id == ANCHOR else reference_engine(anchor, preset), anchor)
+    ratio = speed_stage(engine, timing[0], timing[1], judged)
+    if verb == "probe":
+        return f"probe: {ratio:.4f}x against recorded {best_id[:9]}"
+    if ratio < 1 - MARGIN:
+        raise SystemExit(f"{'REJECT' if judged else 'REFUSE'}: paired speed {ratio:.4f}x against recorded {timing[1].root.name[:9]}; best stays {best_id}")
+    baselines = {policy: baseline(policy, digests, schedule, engine, tree) for policy in POLICIES}
+    candidate_root = BENCH / tree_id
+    sources = {"policy": "oak", "preset": preset, "envs": digests, "policyDigest": digest(("Sources",), tree)}
+    if complete(candidate_root):
         (candidate_root / "sources.json").write_text(json.dumps(sources, indent=1, sort_keys=True) + "\n")
-        snapshot(candidate_root / "source")
+        snapshot(candidate_root / "source", tree)
         candidate = Recording(candidate_root)
     else:
-        candidate = record("oak", candidate_root, sources)
+        candidate = record(engine, "oak", candidate_root, sources, tree)
     for policy, found in baselines.items():
         if set(found) != set(candidate.envs) or any(found[env].steps != candidate.steps or found[env].seeds[env] != candidate.seeds[env] for env in candidate.envs):
             raise SystemExit(f"Recorded {policy} baselines do not match the candidate schedule")
     (candidate_root / "baselines.json").write_text(json.dumps(
         {policy: {env: rec.root.name for env, rec in found.items()} for policy, found in baselines.items()},
         indent=1, sort_keys=True) + "\n")
-    if best is not None and (set(best.envs) != set(candidate.envs) or best.seeds != candidate.seeds or best.steps != candidate.steps):
-        print(f"best envs: {best.envs}\ncandidate envs: {candidate.envs}")
+    if judged and (set(reference.envs) != set(candidate.envs) or reference.seeds != candidate.seeds or reference.steps != candidate.steps):
         raise SystemExit("Schedule differs from the best: ./fleet.py adopt if this change is intended")
-    verdict = report(candidate, baselines, best)
+    verdict = report(candidate, baselines, reference if judged else None)
     sps = candidate.meta["stepsPerSecond"]
-    if best is None:
+    if not judged:
         print(f"Steps/s: {sps:,.0f}")
-        previous = Recording(BENCH / best_id)
-        common = [key for key in candidate.lane if key in previous.lane]
-        same = sum(1 for key in common if candidate.hash[candidate.lane[key]] == previous.hash[previous.lane[key]])
+        common = [key for key in candidate.lane if key in reference.lane]
+        same = sum(1 for key in common if candidate.hash[candidate.lane[key]] == reference.hash[reference.lane[key]])
         print(f"reward streams identical to the previous best on {same} of {len(common)} shared lanes")
-        previous_engine = reference_engine(previous, preset)
-        failures = hawk(previous_engine, previous, candidate)
-        if failures:
-            raise SystemExit("REFUSE: " + "; ".join(failures) + f"; best stays {best_id}")
-        anchor = Recording(BENCH / ANCHOR)
-        ratio = paired_speed(previous_engine if best_id == ANCHOR else reference_engine(anchor, preset), anchor)
-        print(f"paired speed against the anchor {ANCHOR[:9]}: {ratio:.4f}x")
-        if ratio < 1 - MARGIN:
-            raise SystemExit(f"REFUSE: throughput below the anchor; best stays {best_id}")
-        BEST.write_text(tree + "\n")
-        print(f"ADOPT: best is {tree}")
-        return
+        BEST.write_text(tree_id + "\n")
+        return f"ADOPT: best is {tree_id}"
+    print(f"Steps/s: {sps:,.0f} recorded; paired speed against best: {ratio:.4f}x")
     reward_better = verdict["lo"] > 0 and not verdict["guard"]
     reward_not_worse = verdict["identical"] or (verdict["lo"] >= -MARGIN and not verdict["guard"])
-    if not reward_not_worse:
-        raise SystemExit(f"REJECT: best stays {best_id}")
-    other = reference_engine(best, preset)
-    failures = hawk(other, best, candidate)
-    if failures:
-        raise SystemExit("REJECT: " + "; ".join(failures) + f"; best stays {best_id}")
-    ratio = paired_speed(other, best)
-    print(f"Steps/s: {sps:,.0f} recorded; paired speed against best: {ratio:.4f}x")
-    sps_better = ratio >= 1 + MARGIN
-    sps_not_worse = ratio >= 1 - MARGIN
-    if (reward_better and sps_not_worse) or sps_better:
-        BEST.write_text(tree + "\n")
-        print(f"PROMOTE: {tree}")
+    if reward_not_worse and ((reward_better and ratio >= 1 - MARGIN) or ratio >= 1 + MARGIN):
+        BEST.write_text(tree_id + "\n")
+        return f"PROMOTE: {tree_id}"
+    raise SystemExit(f"REJECT: best stays {best_id}")
+
+
+@contextmanager
+def logging_to(path):
+    sys.stdout.flush()
+    sys.stderr.flush()
+    saved = os.dup(1), os.dup(2)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+    os.dup2(fd, 1)
+    os.dup2(fd, 2)
+    os.close(fd)
+    try:
+        yield
+    finally:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os.dup2(saved[0], 1)
+        os.dup2(saved[1], 2)
+        os.close(saved[0])
+        os.close(saved[1])
+
+
+def jobs():
+    if not QUEUE.is_dir():
+        return []
+    return sorted(p for p in QUEUE.iterdir() if p.is_dir() and not p.name.startswith(".") and (p / "job.json").exists())
+
+
+def pending(verbs):
+    for job in jobs():
+        if not (job / "started").exists() and json.loads((job / "job.json").read_text())["verb"] in verbs:
+            return job
+    return None
+
+
+def run(job):
+    verb = json.loads((job / "job.json").read_text())["verb"]
+    (job / "started").write_text(stamp() + "\n")
+    ACTIVE.append(job)
+    with logging_to(job / "log"):
+        print(f"{stamp()} {verb} {job.name}", flush=True)
+        try:
+            if (job / "cancel").exists():
+                raise SystemExit("CANCELLED")
+            verdict = execute(job / "tree", verb)
+        except SystemExit as stop:
+            verdict = str(stop)
+        except Exception as error:
+            traceback.print_exc()
+            verdict = f"ERROR: {error}"
+        print(f"{stamp()} {verdict}", flush=True)
+    ACTIVE.pop()
+    (job / "pid").unlink(missing_ok=True)
+    (job / "verdict").write_text(verdict + "\n")
+    with open(VERDICTS, "a") as log:
+        log.write(f"{stamp()} {verb} {job.name}: {verdict}\n")
+    subprocess.run(["osascript", "-e", f"display notification {json.dumps(verdict[:240])} with title {json.dumps('OaK ' + verb)}"], capture_output=True)
+    shutil.rmtree(job / "tree", ignore_errors=True)
+
+
+def requeue():
+    for job in jobs():
+        if (job / "started").exists() and not (job / "verdict").exists():
+            pid = job / "pid"
+            if pid.exists():
+                orphan = int(pid.read_text())
+                if any(p == orphan and name == "oak" for p, _, name in processes()):
+                    os.kill(orphan, signal.SIGKILL)
+                pid.unlink()
+            (job / "started").unlink()
+            print(f"{stamp()} requeued {job.name}", flush=True)
+
+
+def locked(lock):
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except BlockingIOError:
+        return False
+
+
+def serve():
+    if os.getpriority(os.PRIO_PROCESS, 0) > 0:
+        print(f"{stamp()} refusing to run at reduced priority (nice {os.getpriority(os.PRIO_PROCESS, 0)})", flush=True)
+        return
+    BENCH.mkdir(exist_ok=True)
+    lock = open(RUNNER_LOCK, "w")
+    if not locked(lock):
+        return
+    sys.stdout.reconfigure(line_buffering=True)
+    requeue()
+    while True:
+        job = pending(TIMING) or pending(("judge", "adopt"))
+        if job is not None:
+            run(job)
+            continue
+        fcntl.flock(lock, fcntl.LOCK_UN)
+        if pending(VERBS) is None or not locked(lock):
+            return
+
+
+def wake():
+    if os.getpriority(os.PRIO_PROCESS, 0) > 0:
+        return False
+    BENCH.mkdir(exist_ok=True)
+    with open(RUNNER_LOG, "a") as log:
+        subprocess.Popen([sys.executable, str(REPO / "fleet.py"), "serve"], cwd=REPO, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+    return True
+
+
+def submit(verb):
+    QUEUE.mkdir(parents=True, exist_ok=True)
+    name = f"{time.time_ns()}-{verb}"
+    staged = QUEUE / f".{name}"
+    snapshot(staged / "tree")
+    (staged / "job.json").write_text(json.dumps({"verb": verb, "submitted": stamp()}) + "\n")
+    staged.rename(QUEUE / name)
+    return QUEUE / name
+
+
+def follow(job):
+    log, offset, checked = job / "log", 0, time.monotonic()
+    while True:
+        done = (job / "verdict").exists()
+        if log.exists():
+            with open(log) as f:
+                f.seek(offset)
+                chunk = f.read()
+                offset = f.tell()
+            print(chunk, end="", flush=True)
+        if done:
+            return
+        if time.monotonic() - checked > 10:
+            checked = time.monotonic()
+            with open(RUNNER_LOCK, "a") as lock:
+                if locked(lock):
+                    fcntl.flock(lock, fcntl.LOCK_UN)
+                    wake()
+        time.sleep(0.5)
+
+
+def main():
+    verb = sys.argv[1] if len(sys.argv) > 1 else "judge"
+    if verb == "serve":
+        serve()
+        return
+    if verb not in VERBS:
+        raise SystemExit("usage: ./fleet.py [adopt|probe|trace]")
+    job = submit(verb)
+    if not wake():
+        print(f"queued {job.name}, but this shell runs at reduced priority (nice {os.getpriority(os.PRIO_PROCESS, 0)}), so no runner was started; run ./fleet.py from a normal-priority shell", flush=True)
+    if verb in TIMING:
+        try:
+            follow(job)
+        except KeyboardInterrupt:
+            (job / "cancel").touch()
+            print(f"\ncancelling {job.name} at its next timed run")
     else:
-        raise SystemExit(f"REJECT: best stays {best_id}")
+        print(f"queued {verb} as {job.name}; its log is {(job / 'log').relative_to(REPO)} and the verdict lands in {VERDICTS.relative_to(REPO)}")
 
 
 if __name__ == "__main__":

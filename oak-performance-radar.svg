@@ -4,7 +4,7 @@
 <rect width="1250" height="930" fill="#ffffff"/>
 <g font-family="Arial, Helvetica, sans-serif" fill="#243044">
 <text x="54.0" y="55.0" font-size="30" fill="#243044" text-anchor="start" font-weight="600">Policy comparison</text>
-<text x="54.0" y="86.0" font-size="17" fill="#637084" text-anchor="start" font-weight="400">Mean normalized reward per step · 245 environments · best recording 24536da67</text>
+<text x="54.0" y="86.0" font-size="17" fill="#637084" text-anchor="start" font-weight="400">Mean normalized reward per step · 245 environments · best recording a0de2ae05</text>
 <circle cx="430" cy="390" r="96.0" fill="none" stroke="#cbd2dc" stroke-width="1" stroke-dasharray="2 4"/>
 <circle cx="430" cy="390" r="144.0" fill="none" stroke="#cbd2dc" stroke-width="1" stroke-dasharray="2 4"/>
 <circle cx="430" cy="390" r="192.0" fill="none" stroke="#cbd2dc" stroke-width="1" stroke-dasharray="2 4"/>
@@ -65,19 +65,19 @@
 <text x="900.0" y="300.0" font-size="20" fill="#52a96a" text-anchor="start" font-weight="600">1. Oracle</text>
 <text x="1180.0" y="300.0" font-size="20" fill="#243044" text-anchor="end" font-weight="400">1.000</text>
 <rect x="900" y="312" width="280.00" height="13" fill="#52a96a"/>
-<text x="900.0" y="346.0" font-size="16" fill="#637084" text-anchor="start" font-weight="400">70,296,194 steps/s</text>
+<text x="900.0" y="346.0" font-size="16" fill="#637084" text-anchor="start" font-weight="400">61,421,091 steps/s</text>
 <text x="900.0" y="376.0" font-size="20" fill="#68a8cc" text-anchor="start" font-weight="600">2. PPO</text>
 <text x="1180.0" y="376.0" font-size="20" fill="#243044" text-anchor="end" font-weight="400">0.442</text>
 <rect x="900" y="388" width="123.67" height="13" fill="#68a8cc"/>
-<text x="900.0" y="422.0" font-size="16" fill="#637084" text-anchor="start" font-weight="400">4,016,650 steps/s</text>
+<text x="900.0" y="422.0" font-size="16" fill="#637084" text-anchor="start" font-weight="400">3,971,887 steps/s</text>
 <text x="900.0" y="452.0" font-size="20" fill="#5548b4" text-anchor="start" font-weight="600">3. OaK</text>
 <text x="1180.0" y="452.0" font-size="20" fill="#243044" text-anchor="end" font-weight="400">0.362</text>
 <rect x="900" y="464" width="101.30" height="13" fill="#5548b4"/>
-<text x="900.0" y="498.0" font-size="16" fill="#637084" text-anchor="start" font-weight="400">4,464,909 steps/s</text>
+<text x="900.0" y="498.0" font-size="16" fill="#637084" text-anchor="start" font-weight="400">5,818,529 steps/s</text>
 <text x="900.0" y="528.0" font-size="20" fill="#e88152" text-anchor="start" font-weight="600">4. Random</text>
 <text x="1180.0" y="528.0" font-size="20" fill="#243044" text-anchor="end" font-weight="400">0.000</text>
 <path d="M 900 538 v 17" stroke="#e88152" stroke-width="2"/>
-<text x="900.0" y="574.0" font-size="16" fill="#637084" text-anchor="start" font-weight="400">175,973,501 steps/s</text>
+<text x="900.0" y="574.0" font-size="16" fill="#637084" text-anchor="start" font-weight="400">179,705,059 steps/s</text>
 <text x="900.0" y="621.0" font-size="15" fill="#637084" text-anchor="start" font-weight="400">steps per second; baselines lane-weighted over their recordings</text>
 <text x="54.0" y="745.0" font-size="17" fill="#243044" text-anchor="start" font-weight="600">Axis scores</text>
 <text x="330.0" y="745.0" font-size="15" fill="#243044" text-anchor="middle" font-weight="400">control</text>

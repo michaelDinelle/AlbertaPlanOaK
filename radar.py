@@ -13,6 +13,7 @@ COLORS = {"OaK": "#5548b4", "Oracle": "#52a96a", "PPO": "#68a8cc", "Random": "#e
 CATEGORIES = ("control", "navigation", "memory", "decision", "prediction", "world", "games", "puzzles")
 README = fleet.REPO / "README.md"
 CHART = fleet.REPO / "oak-performance-radar.svg"
+ENGINE = fleet.REPO / ".build/oak"
 
 
 def load():
@@ -26,7 +27,7 @@ def load():
             loaded[name] = fleet.Recording(fleet.BENCH / name)
         return loaded[name]
 
-    catalog = json.loads(subprocess.run([str(fleet.ENGINE), "envs"], capture_output=True, text=True, check=True).stdout)
+    catalog = json.loads(subprocess.run([str(ENGINE), "envs"], capture_output=True, text=True, check=True).stdout)
     category = {entry["envId"]: entry["category"] for entry in catalog}
     rows = []
     for env in oak.envs:

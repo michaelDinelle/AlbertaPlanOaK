@@ -1,9 +1,9 @@
 #include <pthread.h>
+#include <signal.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/qos.h>
 #include <sys/stat.h>
 #include <sys/sysctl.h>
 #include <time.h>
@@ -22,6 +22,30 @@ typedef struct {
 } Run;
 
 static const char *POLICY_NAMES[POLICY_COUNT] = { "oak", "ppo", "random", "oracle" };
+
+static volatile sig_atomic_t pausing;
+static struct timespec pausedAt;
+static double pausedSeconds;
+
+static double secondsBetween(const struct timespec *from, const struct timespec *to) {
+    return (double)(to->tv_sec - from->tv_sec) + 1e-9 * (double)(to->tv_nsec - from->tv_nsec);
+}
+
+static void onPause(int sig) {
+    (void)sig;
+    clock_gettime(CLOCK_MONOTONIC, &pausedAt);
+    pausing = 1;
+    raise(SIGSTOP);
+}
+
+static void onResume(int sig) {
+    (void)sig;
+    if (!pausing) return;
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    pausedSeconds += secondsBetween(&pausedAt, &now);
+    pausing = 0;
+}
 
 static void flushToZero(void) {
     uint64_t fpcr;
@@ -176,12 +200,14 @@ static int record(int argc, char **argv) {
     long cores = sysconf(_SC_NPROCESSORS_ONLN);
     if (cores < 1) cores = 1;
     pthread_t *threads = calloc((size_t)cores, sizeof(pthread_t));
+    signal(SIGTSTP, onPause);
+    signal(SIGCONT, onResume);
     struct timespec t0, t1;
     clock_gettime(CLOCK_MONOTONIC, &t0);
     for (long i = 0; i < cores; i++) pthread_create(&threads[i], 0, worker, &run);
     for (long i = 0; i < cores; i++) pthread_join(threads[i], 0);
     clock_gettime(CLOCK_MONOTONIC, &t1);
-    double seconds = (double)(t1.tv_sec - t0.tv_sec) + 1e-9 * (double)(t1.tv_nsec - t0.tv_nsec);
+    double seconds = secondsBetween(&t0, &t1) - pausedSeconds;
     uint32_t *ends = calloc(run.windows, sizeof(uint32_t));
     uint64_t *hash = calloc(run.laneCount, sizeof(uint64_t));
     uint32_t *health = calloc(run.laneCount, sizeof(uint32_t));
@@ -321,75 +347,9 @@ static int replay(int argc, char **argv) {
     return lane.tally.hash == recorded ? 0 : 2;
 }
 
-static double costNow(void) {
-    struct timespec t;
-    clock_gettime(CLOCK_MONOTONIC_RAW, &t);
-    return (double)t.tv_sec + 1e-9 * (double)t.tv_nsec;
-}
-
-static double costRun(const EnvSpec *env, uint32_t *extra, uint32_t extraWords, const float *shared, const float *actions, uint32_t steps, int oracle) {
-    memset(extra, 0, ((size_t)extraWords + 1u) * sizeof(uint32_t));
-    uint32_t words[OAK_ENV_WORDS_MAX] = {0}, done = 0u;
-    float obs[OAK_ENV_OBS_MAX] = {0}, ctrl[OAK_ENV_ACT_MAX], sink = 0.0f;
-    env_reset(env->id, env->seedStart, words, extra, steps);
-    env_observe(env->id, env->seedStart, words, extra, 0u, obs, shared);
-    double t0 = costNow();
-    for (uint32_t s = 0u; s < steps; s++) {
-        const float *c = actions + (size_t)s * OAK_ENV_ACT_MAX;
-        if (oracle) {
-            for (uint32_t d = 0u; d < OAK_ENV_ACT_MAX; d++) ctrl[d] = 0.0f;
-            env_oracle(env->id, env->seedStart, s, words, extra, obs, ctrl, shared);
-            c = ctrl;
-        }
-        sink += env_step(env->id, env->seedStart, s + 1u, c, words, extra, obs, &done, shared);
-    }
-    double seconds = costNow() - t0;
-    __asm__ volatile("" : : "r"(&sink) : "memory");
-    return 1e9 * seconds / (double)steps;
-}
-
-static int cost(int argc, char **argv) {
-    if (argc != 3) die("usage: oak cost <steps>");
-    long steps = atol(argv[2]);
-    if (steps <= 0 || steps > 0x7fffffffL) die("steps out of range");
-    env_checkTable();
-    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
-    const EnvSpec *specs[OAK_ENV_TABLE_MAX];
-    for (uint32_t i = 0u; i < OAK_ENV_TABLE_COUNT; i++) specs[i] = env_at(i);
-    float *shared = calloc((size_t)env_sharedWords() + 1u, sizeof(float));
-    float *actions = malloc((size_t)steps * OAK_ENV_ACT_MAX * sizeof(float));
-    if (!shared || !actions) die("out of memory");
-    env_buildShared(shared, specs, OAK_ENV_TABLE_COUNT);
-    flushToZero();
-    fputc('[', stdout);
-    for (uint32_t i = 0u; i < OAK_ENV_TABLE_COUNT; i++) {
-        const EnvSpec *env = env_at(i);
-        uint32_t extraWords = env_extraWords(env->id, (uint32_t)steps);
-        uint32_t *extra = malloc(((size_t)extraWords + 1u) * sizeof(uint32_t));
-        if (!extra) die("out of memory");
-        for (uint32_t s = 0u; s < (uint32_t)steps; s++) {
-            float *c = actions + (size_t)s * OAK_ENV_ACT_MAX;
-            for (uint32_t d = 0u; d < OAK_ENV_ACT_MAX; d++) c[d] = 0.0f;
-            random_act(env->id, env->seedStart, s, c);
-        }
-        const float *table = shared + env_sharedOffset(env->id);
-        double envNs = costRun(env, extra, extraWords, table, actions, (uint32_t)steps, 0);
-        for (int repeat = 0; repeat < 2; repeat++) {
-            double again = costRun(env, extra, extraWords, table, actions, (uint32_t)steps, 0);
-            if (again < envNs) envNs = again;
-        }
-        double oracleNs = costRun(env, extra, extraWords, table, actions, (uint32_t)steps, 1);
-        printf("%s{\"envId\":\"%s\",\"env\":%.3f,\"oracle\":%.3f}", i ? "," : "", env->name, envNs, oracleNs);
-        free(extra);
-    }
-    puts("]");
-    return 0;
-}
-
 int main(int argc, char **argv) {
     if (argc >= 2 && strcmp(argv[1], "record") == 0) return record(argc, argv);
     if (argc >= 2 && strcmp(argv[1], "replay") == 0) return replay(argc, argv);
-    if (argc >= 2 && strcmp(argv[1], "cost") == 0) return cost(argc, argv);
     if (argc == 2 && strcmp(argv[1], "envs") == 0) {
         env_checkTable();
         fputc('[', stdout);
@@ -400,6 +360,6 @@ int main(int argc, char **argv) {
         puts("]");
         return 0;
     }
-    die("usage: oak record oak|ppo|random|oracle <steps> <root> [env...] | oak replay <recording> <lane> | oak cost <steps> | oak envs");
+    die("usage: oak record oak|ppo|random|oracle <steps> <root> [env...] | oak replay <recording> <lane> | oak envs");
     return 1;
 }
