@@ -1,4 +1,4 @@
-import type * as THREE from 'three';
+import type * as THREE from 'three/webgpu';
 import { philoxDraw } from '@sim/philox';
 import { oakMaterial } from '../materials';
 import type { WorldBuilder } from '../world';

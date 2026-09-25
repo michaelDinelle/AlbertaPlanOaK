@@ -1,4 +1,4 @@
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
 import { oakMaterial } from './materials';
 import { blendTokens, TOKEN_WHITE } from './mix';
 import { hash2f } from './rng';

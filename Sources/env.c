@@ -4,7 +4,7 @@
     F(access, decision, noShared, noView) \
     F(acrobot, control, noShared, noView) \
     F(alchemy, puzzles, noShared, noView) \
-    F(aliased, memory, noShared, noView) \
+    F(aliased, memory, noShared, aliased_view) \
     F(ancients, games, noShared, ancients_view) \
     F(backgammon, games, backgammon_shared, noView) \
     F(arm2, control, noShared, noView) \
@@ -29,11 +29,11 @@
     F(deepsea, navigation, noShared, noView) \
     F(eleven, games, noShared, eleven_view) \
     F(dungeon, world, noShared, dungeon_view) \
-    F(forager, world, noShared, noView) \
+    F(forager, world, noShared, forager_view) \
     F(hall, navigation, noShared, noView) \
     F(frost, prediction, noShared, noView) \
     F(g2048, puzzles, g2048_shared, noView) \
-    F(garnet, decision, noShared, noView) \
+    F(garnet, decision, noShared, garnet_view) \
     F(generals, games, noShared, generals_view) \
     F(hanabi, games, noShared, noView) \
     F(hanoi, puzzles, noShared, noView) \
@@ -47,24 +47,24 @@
     F(maze, navigation, noShared, noView) \
     F(microrts, games, noShared, microrts_view) \
     F(tmaze, memory, noShared, noView) \
-    F(minatar, control, noShared, noView) \
+    F(minatar, control, noShared, minatar_view) \
     F(minesweeper, puzzles, noShared, minesweeper_view) \
     F(mountainCar, control, noShared, noView) \
     F(nexting, prediction, noShared, noView) \
     F(operant, decision, noShared, noView) \
     F(overcooked, games, overcooked_shared, noView) \
     F(parity, memory, noShared, noView) \
-    F(password, memory, password_shared, noView) \
+    F(password, memory, password_shared, password_view) \
     F(patience, memory, patience_shared, noView) \
     F(pendulum, control, noShared, noView) \
-    F(permuted, prediction, noShared, noView) \
+    F(permuted, prediction, noShared, permuted_view) \
     F(planar, control, planar_shared, noView) \
     F(pocketcube, puzzles, pocketcube_shared, noView) \
     F(poker, games, poker_shared, noView) \
     F(pommerman, games, noShared, pommerman_view) \
     F(puddle, control, noShared, noView) \
     F(quadrotor, control, quadrotor_shared, noView) \
-    F(recite, memory, noShared, noView) \
+    F(recite, memory, noShared, recite_view) \
     F(regression, prediction, noShared, noView) \
     F(relicfog, games, relicfog_shared, relicfog_view) \
     F(repeat, memory, noShared, noView) \
@@ -427,6 +427,13 @@ uint32_t relicfog_view(uint32_t instance, const uint32_t *words, const uint32_t 
 uint32_t skirmish_view(uint32_t instance, const uint32_t *words, const uint32_t *extra, const float *shared, uint32_t *out);
 uint32_t sokoban_view(uint32_t instance, const uint32_t *words, const uint32_t *extra, const float *shared, uint32_t *out);
 uint32_t supervised_view(uint32_t instance, const uint32_t *words, const uint32_t *extra, const float *shared, uint32_t *out);
+uint32_t aliased_view(uint32_t instance, const uint32_t *words, const uint32_t *extra, const float *shared, uint32_t *out);
+uint32_t forager_view(uint32_t instance, const uint32_t *words, const uint32_t *extra, const float *shared, uint32_t *out);
+uint32_t garnet_view(uint32_t instance, const uint32_t *words, const uint32_t *extra, const float *shared, uint32_t *out);
+uint32_t minatar_view(uint32_t instance, const uint32_t *words, const uint32_t *extra, const float *shared, uint32_t *out);
+uint32_t password_view(uint32_t instance, const uint32_t *words, const uint32_t *extra, const float *shared, uint32_t *out);
+uint32_t permuted_view(uint32_t instance, const uint32_t *words, const uint32_t *extra, const float *shared, uint32_t *out);
+uint32_t recite_view(uint32_t instance, const uint32_t *words, const uint32_t *extra, const float *shared, uint32_t *out);
 uint64_t backgammon_shared(float *table);
 uint64_t chess_shared(float *table);
 uint64_t craftax_shared(float *table);

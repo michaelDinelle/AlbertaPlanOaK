@@ -8,7 +8,7 @@ import { StageScene, type Stage } from '@kit/stage';
 import { TOKENS } from '@kit/tokens';
 import type { FrameState, FrameUpdate, LegendSpec, SceneContext, SceneFactory, ScenePost, SceneSize } from '@kit/types';
 import { Wisp } from '@kit/wisp';
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
 import type { GridCell, GridGeometry } from '@sim/types';
 import { buildLantern, buildTravelerLantern, type LanternHandle } from './actors';
 import { buildWorld, courtyardSkin, resolveGrid, type WorldHandle } from './world';
@@ -89,7 +89,7 @@ class FourSeasonsCourtyardScene extends StageScene<WorldHandle> {
     const palette = ctx.tokens.palettes.noon;
     const skin = courtyardSkin(palette, ctx.tokens);
     const accent = this.accentOf(ctx);
-    this.blossom = ctx.tokens.accents['walk'] ?? ctx.tokens.celebrationGold;
+    this.blossom = ctx.tokens.accents['Chain'] ?? ctx.tokens.celebrationGold;
     this.gold = ctx.tokens.celebrationGold;
     const flame = blendTokens(ctx.tokens.celebrationGold, palette.sun, 0.22).getHex();
 

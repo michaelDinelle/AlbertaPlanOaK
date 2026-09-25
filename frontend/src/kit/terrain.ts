@@ -1,4 +1,4 @@
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
 import { hash2f } from './rng';
 import { oakMaterial, type OakMaterialOptions } from './materials';
 

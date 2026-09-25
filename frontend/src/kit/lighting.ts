@@ -1,4 +1,4 @@
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
 import { paletteSunDirection } from './sky';
 import type { Palette } from './tokens';
 

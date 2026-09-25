@@ -1,7 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { watch } from 'node:fs';
 import { open, readFile, readdir, mkdir, rename, rm, stat } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import index from './index.html';
+import wgsl from './wgsl';
 import type { EnvDescriptor } from './src/data/envs';
 import { ENGINE_FILES, JUDGE_FILE, packRecording, type Baselines, type Meta, type RunIndexEntry } from './src/data/layout';
 import { readHeader, readVerdict, VERDICT_BYTES } from './src/data/replay';
@@ -97,12 +99,10 @@ async function snapshot(root: string): Promise<ArrayBuffer> {
 interface Generation {
   path: string;
   size: number;
-  clients: number;
   done: boolean;
   error: Error | null;
   changed: Promise<void>;
   wake(): void;
-  process: ReturnType<typeof Bun.spawn>;
 }
 
 const generations = new Map<string, Promise<Generation>>();
@@ -131,7 +131,7 @@ async function generate(key: string, path: string, root: string, lane: number, e
   const process = Bun.spawn([ENGINE, 'replay', root, String(lane)], { cwd: REPO, stdout: 'pipe', stderr: 'pipe' });
   let wake = () => {};
   const changed = () => new Promise<void>(resolve => { wake = resolve; });
-  const job: Generation = { path: temporary, size: 0, clients: 0, done: false, error: null, changed: changed(), wake() { wake(); job.changed = changed(); }, process };
+  const job: Generation = { path: temporary, size: 0, done: false, error: null, changed: changed(), wake() { wake(); job.changed = changed(); } };
   const errors = new Response(process.stderr).text();
   void (async () => {
     try {
@@ -194,16 +194,16 @@ async function replay(req: Request, id: string, laneText: string): Promise<Respo
     pending.catch(() => generations.delete(key));
   }
   const job = await generations.get(key)!;
-  job.clients++;
-  const file = await open(job.path, 'r');
   let cursor = 0, closed = false;
+  const readAt = async (bytes: Uint8Array, at: number) => {
+    const file = await open(job.path, 'r').catch((error: NodeJS.ErrnoException) => { if (error.code !== 'ENOENT') throw error; return open(path, 'r'); });
+    try { return (await file.read(bytes, 0, bytes.length, at)).bytesRead; } finally { await file.close(); }
+  };
   const detach = async () => {
     if (closed) return;
     closed = true;
     req.signal.removeEventListener('abort', abort);
-    if (--job.clients === 0 && !job.done) { generations.delete(key); job.process.kill(); }
     job.wake();
-    await file.close();
   };
   const abort = () => { void detach(); };
   req.signal.addEventListener('abort', abort, { once: true });
@@ -215,7 +215,7 @@ async function replay(req: Request, id: string, laneText: string): Promise<Respo
         if (closed) { controller.close(); return; }
         if (cursor < job.size) {
           const bytes = new Uint8Array(Math.min(CHUNK_BYTES, job.size - cursor));
-          const { bytesRead } = await file.read(bytes, 0, bytes.length, cursor);
+          const bytesRead = await readAt(bytes, cursor);
           if (!bytesRead) throw new Error('Replay cache write was incomplete');
           cursor += bytesRead;
           controller.enqueue(bytes.subarray(0, bytesRead));
@@ -231,9 +231,24 @@ async function replay(req: Request, id: string, laneText: string): Promise<Respo
   return new Response(body, { headers: { ...headers, 'X-Oak-Cached': '0' } });
 }
 
-const workerBuild = await Bun.build({ entrypoints: ['src/scenes/jbw/scentfield.worker.ts', 'src/theater/tape.worker.ts'].map(path => resolve(import.meta.dir, path)), target: 'browser', naming: { entry: '[name].[ext]' }, splitting: true, minify: true });
-if (!workerBuild.success) throw new AggregateError(workerBuild.logs, 'Worker bundle failed');
-const workers = new Map(workerBuild.outputs.map(output => [output.path.split('/').at(-1)!, output]));
+type WorkerFiles = Map<string, Blob>;
+let workers: Promise<WorkerFiles> | null = null, previousWorkers: WorkerFiles = new Map();
+const buildWorkers = async (): Promise<WorkerFiles> => {
+  const build = await Bun.build({ entrypoints: ['src/scenes/jbw/scentfield.worker.ts', 'src/theater/tape.worker.ts'].map(path => resolve(import.meta.dir, path)), target: 'browser', naming: { entry: '[name].[ext]' }, splitting: true, minify: true, plugins: [wgsl] });
+  if (!build.success) throw new AggregateError(build.logs, 'Worker bundle failed');
+  return new Map(build.outputs.map(output => [output.path.split('/').at(-1)!, output]));
+};
+const workerFile = async (name: string): Promise<Blob | undefined> => {
+  workers ??= buildWorkers();
+  return (await workers).get(name) ?? previousWorkers.get(name);
+};
+watch(resolve(import.meta.dir, 'src'), { recursive: true }, () => {
+  if (workers === null) return;
+  const stale = workers;
+  workers = null;
+  void stale.then(files => { previousWorkers = files; }, () => {});
+});
+await workerFile('tape.worker.js');
 
 async function publicFile(req: Request): Promise<Response> {
   const rel = decodeURIComponent(new URL(req.url).pathname).split('/').filter(s => s !== '' && s !== '..').join('/');
@@ -252,8 +267,9 @@ const server = Bun.serve({
     '/api/runs': async () => Response.json(await runs()),
     '/api/runs/:id': async req => new Response(await snapshot(await runRoot(req.params.id))),
     '/api/runs/:id/replay/:lane': req => replay(req, req.params.id, req.params.lane),
-    '/workers/:name': req => { const file = workers.get(req.params.name); return file ? new Response(file) : new Response('Unknown worker', { status: 404 }); },
+    '/workers/:name': async req => { const file = await workerFile(req.params.name); return file ? new Response(file) : new Response('Unknown worker', { status: 404 }); },
     '/posters/*': async req => publicFile(req).catch(error => { if (error instanceof HttpError && error.status === 404) return new Response(null, { status: 204 }); throw error; }),
+    '/api/posters/:name': { POST: async req => { await Bun.write(join(PUBLIC, 'posters', `${req.params.name.replace(/[^\w-]/g, '')}.webp`), await req.arrayBuffer()); return new Response(null, { status: 204 }); } },
     '/terrain/*': publicFile,
     '/textures/*': publicFile,
   },

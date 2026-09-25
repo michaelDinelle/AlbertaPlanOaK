@@ -29,19 +29,28 @@ export interface State {
   error: string | null;
 }
 
+const link = new URLSearchParams(location.search);
+let linkedStep = link.has('step') ? Number(link.get('step')) : null;
+
+export function takeLinkedStep(): number | null {
+  const step = linkedStep;
+  linkedStep = null;
+  return step;
+}
+
 let value: State = {
   runs: null,
   catalog: [],
   recordings: {},
   runId: null,
   policy: 'oak',
-  envId: null,
-  seed: null,
+  envId: link.get('env'),
+  seed: link.has('seed') ? Number(link.get('seed')) : null,
   panel: 'reward',
   panelOpen: true,
-  playing: true,
+  playing: linkedStep === null,
   speed: 1,
-  debug: false,
+  debug: link.get('debug') === '1',
   stage: EMPTY_STAGE,
   error: null,
 };

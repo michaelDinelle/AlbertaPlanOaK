@@ -1,6 +1,7 @@
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
+import { abs, color, exp, max, mix, modelWorldMatrix, sin, smoothstep, step, vec3, vec4, vertexColor } from 'three/tsl';
 import { makeHeightField } from '@kit/heightfield';
-import { oakMaterial } from '@kit/materials';
+import { deformOf, oakMaterial, setDeform } from '@kit/materials';
 import { mergeColoredParts, type ColoredPart } from '@kit/parts';
 import { hash2f } from '@kit/rng';
 import type { SceneContext } from '@kit/types';
@@ -25,51 +26,35 @@ export function makeMeadow(w: WorldBuilder, ctx: SceneContext, opts: MeadowOptio
   const amplitude = opts.amplitude ?? 2.6;
   const field = makeHeightField({ base: -0.075, court: { halfX: opts.halfX, halfZ: opts.halfZ, rise: 0.34 }, octaves: [{ wavelength: 31, amplitude: amplitude * 0.55, seed: ctx.seed }, { wavelength: 13, amplitude: amplitude * 0.25, seed: ctx.seed ^ 0x51 }] });
   const heightAt = field.heightAt;
-  const grounds = opts.grounds?.map((value) => {
-    const c = new THREE.Color(value);
-    return `vec3(${c.r.toFixed(5)}, ${c.g.toFixed(5)}, ${c.b.toFixed(5)})`;
-  });
-  const groundDetail = grounds ? `
-    float seasonX = smoothstep(-4.0, 4.0, p.x + (landNoise(p.xz * 0.08 + 11.0) - 0.5) * 7.0);
-    float seasonZ = smoothstep(-4.0, 4.0, p.z + (landNoise(p.xz * 0.07 + 23.0) - 0.5) * 7.0);
-    vec3 season = mix(mix(${grounds[0]}, ${grounds[1]}, seasonX), mix(${grounds[2]}, ${grounds[3]}, seasonX), seasonZ);
-    float garden = exp(-max(0.0, max(abs(p.x) - ${opts.halfX.toFixed(4)}, abs(p.z) - ${opts.halfZ.toFixed(4)})) * 0.07);
-    color = mix(color, season, garden * 0.62);` : '';
+  const grounds = opts.grounds?.map((value) => color(new THREE.Color(value)));
   const surface = w.time(w.own(makeContinuousSurface({
     name: `${opts.name}Terrain`,
     seed: ctx.seed,
     colorA: opts.ground,
     colorB: opts.grass,
-    height: field.glsl,
+    height: field.height,
     follow: false,
-    detail: `
-      float grass = sin(p.x * 1.7 + sin(p.z * 1.1)) * sin(p.z * 2.3);
-      ${groundDetail}
-      color *= 0.96 + 0.045 * grass;
-    `,
+    detail({ p, color: ground, noise }) {
+      const grass = sin(p.x.mul(1.7).add(sin(p.z.mul(1.1)))).mul(sin(p.z.mul(2.3)));
+      if (grounds) {
+        const seasonX = smoothstep(-4, 4, p.x.add(noise(p.xz.mul(0.08).add(11)).sub(0.5).mul(7)));
+        const seasonZ = smoothstep(-4, 4, p.z.add(noise(p.xz.mul(0.07).add(23)).sub(0.5).mul(7)));
+        const season = mix(mix(grounds[0]!, grounds[1]!, seasonX), mix(grounds[2]!, grounds[3]!, seasonX), seasonZ);
+        const garden = exp(max(0, max(abs(p.x).sub(opts.halfX), abs(p.z).sub(opts.halfZ))).negate().mul(0.07));
+        ground = mix(ground, season, garden.mul(0.62));
+      }
+      return ground.mul(grass.mul(0.045).add(0.96));
+    },
   })));
   w.add(surface.mesh);
   const material = w.own(oakMaterial({ vertexColors: true, roughness: 0.9, flatShading: true,
     rimColor: opts.ground, rimStrength: 0.3, wind: { amplitude: 0.03, frequency: 0.8, height: 1.7 }, name: `${opts.name}Trees` }));
-  material.customProgramCacheKey = () => `${opts.name}|grove-colors`;
-  const compile = material.onBeforeCompile;
-  material.onBeforeCompile = (shader, renderer) => {
-    compile.call(material, shader, renderer);
-    shader.uniforms.uGroveColors = { value: Array.from({ length: 4 }, (_, i) => new THREE.Color(opts.trees[i % opts.trees.length] as THREE.ColorRepresentation)) };
-    shader.vertexShader = 'varying vec2 vGroveWorld; varying float vGroveCanopy;\n' + shader.vertexShader;
-    shader.vertexShader = shader.vertexShader.replace('#include <begin_vertex>', `
-      #include <begin_vertex>
-      vGroveWorld = (modelMatrix * instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0)).xz;
-      vGroveCanopy = step(color.r, color.g * 1.35);
-    `);
-    shader.fragmentShader = 'uniform vec3 uGroveColors[4]; varying vec2 vGroveWorld; varying float vGroveCanopy;\n' + shader.fragmentShader;
-    shader.fragmentShader = shader.fragmentShader.replace('#include <color_fragment>', `
-      #include <color_fragment>
-      vec2 season = smoothstep(vec2(-6.0), vec2(6.0), vGroveWorld + sin(vGroveWorld.yx * 0.17) * 2.5);
-      vec3 grove = mix(mix(uGroveColors[0], uGroveColors[1], season.x), mix(uGroveColors[2], uGroveColors[3], season.x), season.y);
-      diffuseColor.rgb *= mix(vec3(1.0), grove, vGroveCanopy);
-    `);
-  };
+  const wind = deformOf(material)!, grove = (i: number) => color(new THREE.Color(opts.trees[i % opts.trees.length] as THREE.ColorRepresentation));
+  setDeform(material, (matrix) => {
+    const world = modelWorldMatrix.mul(matrix ? matrix.mul(vec4(0, 0, 0, 1)) : vec4(0, 0, 0, 1)).xz, tone = vertexColor();
+    const season = smoothstep(-6, 6, world.add(sin(world.yx.mul(0.17)).mul(2.5)));
+    return { ...wind(matrix), tint: mix(vec3(1), mix(mix(grove(0), grove(1), season.x), mix(grove(2), grove(3), season.x), season.y), step(tone.r, tone.g.mul(1.35))) };
+  });
   const kinds = opts.archetypes ?? ['broadleaf'];
   const treeGeometry = (kind: TreeArchetype, detail: number) => {
     const geometry = kind === 'conifer' ? coniferTreeGeometry(detail) : kind === 'bare' ? bareTreeGeometry(detail) : broadleafTreeGeometry(detail);

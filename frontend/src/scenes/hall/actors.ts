@@ -12,7 +12,8 @@ import {
 import { blendTokens, clamp01 } from '@kit/mix';
 import { mergeColoredParts, type ColoredPart } from '@kit/parts';
 import type { Palette } from '@kit/tokens';
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
+import { instancedMesh } from '@kit/instances';
 
 const BUD_Y = 0.44;
 const PETAL_SCALE = 1.55;
@@ -104,7 +105,7 @@ export function buildLantern(opts: LanternOptions): LanternHandle {
     toonFloor: 0.35,
     name: 'lanternPetalMaterial',
   });
-  const petals = new THREE.InstancedMesh(petalGeometry, petalMaterial, PETALS);
+  const petals = instancedMesh(petalGeometry, petalMaterial, PETALS);
   petals.name = 'lanternPetals';
   petals.castShadow = false;
   petals.frustumCulled = false;

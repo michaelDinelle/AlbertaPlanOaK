@@ -1,5 +1,5 @@
 import type { EnvDescriptor } from '../../data/envs';
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
 import { scentConfig, cellKey, FIELD_TEXELS, FIELD_TILES, TILE_CELLS, TILE_VALUES, type FieldLog } from './fieldmath';
 import type { FieldJob, FieldRequest, FieldTile } from './scentfield.worker';
 
@@ -19,7 +19,7 @@ export class ScentField {
   private sent = 0;
   private sequence = 0;
 
-  constructor(private readonly renderer: THREE.WebGLRenderer, seed: number, environment: EnvDescriptor) {
+  constructor(private readonly renderer: THREE.WebGPURenderer, seed: number, environment: EnvDescriptor) {
     const config = scentConfig(environment);
     this.reach = config.radius - 1; this.settleAge = config.lifetime;
     this.texture.name = 'threeChannelScent';

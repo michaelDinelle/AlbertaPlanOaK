@@ -1,4 +1,4 @@
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 
 export function vineStrand(points: readonly (readonly [number, number, number])[], radius = 0.02, leaves = 8): THREE.BufferGeometry {

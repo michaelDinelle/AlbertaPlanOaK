@@ -1,4 +1,4 @@
-import { recordedFamilies } from './data/envs';
+import { recordedEnvironments } from './data/envs';
 import { useEffect, useMemo, useRef } from 'react';
 import { POLICIES, type Policy, type Recording, type RunIndexEntry } from './data/layout';
 import { fetchCatalog, fetchRecording, fetchRuns } from './data/oak';
@@ -12,7 +12,7 @@ import { PlaybackBar, PolicySwitch } from './panels/PlaybackBar';
 import { RewardView, type Comparison } from './panels/RewardView';
 import { SceneLegend } from './panels/SceneLegend';
 import { StandingsView } from './panels/StandingsView';
-import { addRecording, cycleSpeed, fail, patch, selectEnv, selectRun, setStage, store, type Panel } from './store';
+import { addRecording, cycleSpeed, fail, patch, selectEnv, selectRun, setStage, store, takeLinkedStep, type Panel } from './store';
 import { mountStage, type Stage } from './theater/stage';
 
 const PANELS: Record<Panel, string> = { reward: 'Reward', standings: 'Standings', health: 'Health' };
@@ -49,7 +49,7 @@ export function App() {
   const active = activeId === null ? null : s.recordings[activeId] ?? null;
   const live = s.policy === 'oak' && entry?.inFlight === true;
   const envs = useMemo(() => (run === null ? [] : runEnvs(run.meta)), [run]);
-  const families = useMemo(() => s.catalog.length ? recordedFamilies(s.catalog, envs) : [], [s.catalog, envs]);
+  const environments = useMemo(() => s.catalog.length ? recordedEnvironments(s.catalog, envs) : [], [s.catalog, envs]);
   const environment = s.catalog.find(env => env.envId === s.envId);
   const referenced = useMemo(() => {
     if (run === null || !s.panelOpen) return [];
@@ -85,7 +85,7 @@ export function App() {
   useEffect(() => {
     if (s.runId !== null || s.runs === null) return;
     const pick = s.runs.find((candidate) => candidate.role === 'best') ?? s.runs.find((candidate) => candidate.policy === 'oak');
-    if (pick !== undefined) selectRun(pick.id);
+    if (pick !== undefined) patch({ runId: pick.id });
   }, [s.runs, s.runId]);
 
   useEffect(() => {
@@ -123,6 +123,8 @@ export function App() {
     }
     const lane = lanes.lanes[lanes.seeds.indexOf(seed)]!;
     stage.current?.setTarget({ runId: active.id, environment, seed, lane, horizon: active.meta.steps, hash: active.hash[lane]! });
+    const step = takeLinkedStep();
+    if (step !== null) stage.current?.seekStep(step);
     if (s.playing) stage.current?.play();
   }, [active, environment, seed, lanes]);
 
@@ -131,15 +133,15 @@ export function App() {
       if (event.metaKey || event.ctrlKey || event.altKey || event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement) return;
       const state = store.get();
       const cycleEnv = (direction: 1 | -1): void => {
-        const at = families.findIndex(family => family.configurations.some(config => config.envId === state.envId));
-        const next = families[(at + direction + families.length) % families.length]?.configurations[0];
+        const at = environments.findIndex(environment => environment.configurations.some(config => config.envId === state.envId));
+        const next = environments[(at + direction + environments.length) % environments.length]?.configurations[0];
         if (next !== undefined) selectEnv(next.envId);
       };
       const cycleConfiguration = (direction: 1 | -1): void => {
-        const family = families.find(entry => entry.configurations.some(config => config.envId === state.envId));
-        if (family === undefined) return;
-        const at = family.configurations.findIndex(config => config.envId === state.envId);
-        const next = family.configurations[(at + direction + family.configurations.length) % family.configurations.length];
+        const environment = environments.find(entry => entry.configurations.some(config => config.envId === state.envId));
+        if (environment === undefined) return;
+        const at = environment.configurations.findIndex(config => config.envId === state.envId);
+        const next = environment.configurations[(at + direction + environment.configurations.length) % environment.configurations.length];
         if (next !== undefined) selectEnv(next.envId);
       };
       const cyclePolicy = (): void => {
@@ -172,7 +174,7 @@ export function App() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [families, available]);
+  }, [environments, available]);
 
   const notice = s.error
     ?? s.stage.note
@@ -221,7 +223,7 @@ export function App() {
       <div className="absolute inset-x-0 bottom-4 z-30 grid grid-cols-[1fr_minmax(0,760px)_1fr] items-end gap-3 px-4">
         <div className="flex flex-col items-start gap-3">
           <SceneLegend stage={stage} />
-          <EnvPicker families={families} run={run} seed={seed} />
+          <EnvPicker environments={environments} run={run} seed={seed} />
         </div>
         <PlaybackBar stage={stage} live={live} />
         <div className="justify-self-end"><PolicySwitch available={available} /></div>

@@ -2,7 +2,7 @@ import { CELL, type GridSize } from '@kit/grid';
 import { blendTokens, clamp01, shade } from '@kit/mix';
 import { TOKENS, type Palette } from '@kit/tokens';
 import type { FrameState } from '@kit/types';
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
 import { DEEPSEA_ACTION, DEEPSEA_COL, DEEPSEA_ROW, deepSeaNextCol, type DeepSeaStatic } from '@sim/envs/deepsea';
 import type { EnvGeometry, GridGeometry } from '@sim/types';
 
@@ -108,11 +108,11 @@ export interface ReefSkin {
 }
 
 export function reefSkin(palette: Palette, tokens: typeof TOKENS): ReefSkin {
-  const accent = tokens.accents['deepsea'] ?? tokens.uiCyan;
-  const green = tokens.accents['tmaze'] ?? palette.groundB;
-  const blossom = tokens.accents['walk'] ?? tokens.celebrationGold;
-  const dawnRose = tokens.accents['acrobot'] ?? blossom;
-  const gold = tokens.accents['multi-key-corridor'] ?? tokens.celebrationGold;
+  const accent = tokens.accents['DeepSea'] ?? tokens.uiCyan;
+  const green = tokens.accents['TMaze'] ?? palette.groundB;
+  const blossom = tokens.accents['Chain'] ?? tokens.celebrationGold;
+  const dawnRose = tokens.accents['Acrobot'] ?? blossom;
+  const gold = 0xd9b36a;
   const abyss = tokens.palettes.abyss;
 
   const shelfShallow = blendTokens(blendTokens(palette.groundB, accent, 0.78), palette.sun, 0.22);

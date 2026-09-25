@@ -1,7 +1,7 @@
 import { sculptureMaterial } from '@kit/materials';
 import { makeMeadow } from '@kit/meadow';
 import type { ViewCoverage } from '@kit/view';
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
 import {
   buildCellField,
   CELL,
@@ -123,11 +123,11 @@ export interface CourtyardSkin {
 }
 
 export function courtyardSkin(palette: Palette, tokens: typeof TOKENS): CourtyardSkin {
-  const blossom = tokens.accents['walk'] ?? tokens.celebrationGold;
+  const blossom = tokens.accents['Chain'] ?? tokens.celebrationGold;
   const leaf = tokens.accents['foliage'] ?? palette.groundA;
-  const gold = tokens.accents['multi-key-corridor'] ?? tokens.celebrationGold;
-  const terracotta = tokens.accents['high-dim-maze'] ?? tokens.celebrationGold;
-  const silver = tokens.accents['po-maze'] ?? palette.hemiSky;
+  const gold = 0xd9b36a;
+  const terracotta = tokens.accents['HighDimMaze'] ?? tokens.celebrationGold;
+  const silver = tokens.accents['POMaze'] ?? palette.hemiSky;
   const white = palette.sun;
 
   const seasons: SeasonSkin[] = [
@@ -367,7 +367,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
       name: spec.name,
     });
     w.add(handle.points);
-    w.size(w.time(w.own(handle)));
+    w.time(w.own(handle));
   }
 
   const m = propMaterials(w), parts = modelParts(w), braziers = new THREE.Group(), brazierFlame = m.glass(blendTokens(ctx.tokens.celebrationGold, palette.sun, 0.22), 1.4);

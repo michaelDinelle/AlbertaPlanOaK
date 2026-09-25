@@ -1,4 +1,4 @@
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
 import type { GridCell } from '@sim/types';
 import { HopMotion, type GridSize, type HopMotionOptions } from './grid';
 import { emissiveMaterial, oakMaterial, setEmissiveIntensity, wispMaterial } from './materials';
@@ -327,7 +327,7 @@ export class Wisp {
     if (this.flareAmount > 0) this.flareAmount = Math.max(0, this.flareAmount - dt / 0.5);
     this.brightness += (this.targetBrightness - this.brightness) * (1 - Math.exp(-6 * Math.max(0, dt)));
     this.applyBrightness();
-    this.coreMaterial.oak.setTime(time);
+    this.coreMaterial.time.value = time;
     this.syncShade();
     this.pushRibbon();
   }
@@ -349,7 +349,7 @@ export class Wisp {
 
   private applyBrightness(): void {
     const gain = this.brightness * (1 + 1.8 * this.flareAmount);
-    this.coreMaterial.oak.setRim(1.9 * gain);
+    this.coreMaterial.intensity.value = 1.9 * gain;
     this.coreMaterial.pulse.value = this.flareAmount;
     setEmissiveIntensity(this.haloMaterial, this.baseIntensity * gain);
     if (this.ribbonMaterial) this.ribbonMaterial.opacity = 0.4 * this.brightness;

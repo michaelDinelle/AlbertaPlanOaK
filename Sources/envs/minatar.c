@@ -1023,3 +1023,16 @@ void minatar_oracle(uint32_t instance, uint32_t seed, uint32_t step, const uint3
     for (uint32_t i = 0u; i < MINATAR_ACTION_COUNT[k->game]; i++)
         if (MINATAR_ACTION_MAP[k->game][i] == action) ctrl[0] = (float)i;
 }
+
+uint32_t minatar_view(uint32_t instance, const uint32_t *words, const uint32_t *extra, const float *shared, uint32_t *out) {
+    (void)shared;
+    if (MINATAR_KNOBS[instance].game != MINATAR_SEAQUEST) return 0u;
+    const uint32_t caps[5] = { MINATAR_ENEMY_CAP, MINATAR_ENEMY_CAP, MINATAR_DIVER_CAP, MINATAR_SHOT_CAP, MINATAR_BOMB_CAP };
+    uint32_t count = caps[0] + caps[1] + caps[2] + caps[3] + caps[4];
+    if (!out) return count;
+    const minatarSeaquest *s = (const minatarSeaquest *)words;
+    const uint32_t live[5] = { s->fish, s->subs, s->divers, s->shots, s->bombs };
+    for (uint32_t list = 0u, at = 0u; list < 5u; at += caps[list++])
+        for (uint32_t i = 0u; i < caps[list]; i++) out[at + i] = i < live[list] ? extra[MINATAR_FISH + at + i] : 0u;
+    return count;
+}

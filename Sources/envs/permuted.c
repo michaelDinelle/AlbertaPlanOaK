@@ -105,3 +105,11 @@ void permuted_oracle(uint32_t instance, uint32_t seed, uint32_t step, const uint
     (void)instance; (void)seed; (void)step; (void)obs;
     ctrl[0] = (float)extra[PERMUTED_LOOKUP + words[0]];
 }
+
+uint32_t permuted_view(uint32_t instance, const uint32_t *words, const uint32_t *extra, const float *shared, uint32_t *out) {
+    (void)instance; (void)words; (void)shared;
+    if (!out) return PERMUTED_STATES + 1u;
+    out[0] = extra[0];
+    for (uint32_t state = 0u; state < PERMUTED_STATES; state++) out[1u + state] = extra[PERMUTED_LOOKUP + state];
+    return PERMUTED_STATES + 1u;
+}

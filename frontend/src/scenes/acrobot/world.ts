@@ -1,4 +1,4 @@
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
 import { alpineWorld, type AlpineWorld } from '@kit/alpine';
 import { makeHeightField } from '@kit/heightfield';
 import { blendTokens } from '@kit/mix';
@@ -46,7 +46,7 @@ export interface WorldHandle extends AlpineWorld {
 }
 
 export async function buildWorld(ctx: SceneContext, scene: THREE.Scene): Promise<WorldHandle> {
-  const accent = ctx.tokens.accents['acrobot'] ?? ctx.tokens.celebrationGold, palette = ctx.tokens.palettes.night;
+  const accent = ctx.tokens.accents['Acrobot'] ?? ctx.tokens.celebrationGold, palette = ctx.tokens.palettes.night;
   const positionOnly = parameter(ctx.environment, 'positionOnly') !== 0, slip = Math.fround(parameter(ctx.environment, 'slip'));
   const lamps: ReturnType<typeof lamp>[] = [];
   const rimLight = new THREE.PointLight(0xffc98a, 2.4, 9, 2), accentLight = new THREE.PointLight(accent, 1.8, 7, 2);
@@ -112,7 +112,7 @@ export async function buildWorld(ctx: SceneContext, scene: THREE.Scene): Promise
       mist.group.position.set(0, 0, -3);
       w.add(mist.group); w.time(w.own(mist));
       const snow = makeAmbientParticles({ preset: 'snow', count: 520, bounds: { x: 0, y: 1.2, z: -1.5, halfX: 8, halfY: 3.2, halfZ: 6 }, seed: ctx.seed ^ 0x51ab, color: 0xeef4ff, size: 0.25, intensity: 1.1, opacity: 0.7, rise: -0.32, swirl: 0.12, name: 'lakeSnow' });
-      w.add(snow.points); w.size(w.time(w.own(snow)));
+      w.add(snow.points); w.time(w.own(snow));
     },
   });
   return { ...world, lamps, rimLight, accentLight, positionOnly, slip };

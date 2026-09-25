@@ -1,4 +1,5 @@
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
+import { abs, all, clamp, dot, exp, float, floor, fract, fwidth, int, log2, max, min, mix, select, smoothstep, texture, uniform, uniformArray, vec2, vec3 } from 'three/tsl';
 import { buildAurora } from '@kit/aurora';
 import { makeHeightField } from '@kit/heightfield';
 import type { SceneContext } from '@kit/types';
@@ -23,67 +24,49 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene) {
   rig.sun.color.set(0xc4d9ff); rig.sun.intensity = 1.8; rig.sun.shadow.normalBias = 0.03;
   rig.hemi.color.set(0xc9c9ef); rig.hemi.groundColor.set(0x6b527c); rig.hemi.intensity = 1.3;
   fog.color.set(0x775970);
-  const weather = winterWeather(world, ctx.seed), vision = { value: new Float32Array(9) }, agent = { value: new THREE.Vector2() };
+  const weather = winterWeather(world, ctx.seed), visionNode = uniformArray(new Array<number>(9).fill(0), 'float' as const), vision = { value: visionNode.array as number[] }, agent = uniform(new THREE.Vector2());
   const field = makeHeightField({ base: 0.45, octaves: [{ wavelength: 140, amplitude: 6, seed: ctx.seed ^ 0x51ed }, { wavelength: 44, amplitude: 1.8, seed: ctx.seed }, { wavelength: 14, amplitude: 0.4, seed: ctx.seed ^ 0xa817 }] });
   const heightAt = field.heightAt;
-  const scent = world.own(new ScentField(ctx.renderer, ctx.seed, ctx.environment)), debug = { value: 0 };
+  const scent = world.own(new ScentField(ctx.renderer, ctx.seed, ctx.environment)), debug = uniform(0), origin = uniform(scent.origin);
+  let emissive: THREE.Node<'vec3'> = vec3(0);
   const terrain = world.own(world.time(makeSceneTerrain({
     name: 'sculptedSnow', seed: ctx.seed, segments: 256, radius: 8192,
-    colorA: 0xffffff, colorB: 0xeff3ff, height: field.glsl,
+    colorA: 0xffffff, colorB: 0xeff3ff, height: field.height,
+    detail: (s) => {
+      const p = s.p.xz;
+      const snow = mix(vec3(0.72, 0.83, 1.0), vec3(1.0, 0.91, 0.97), s.noise(p.mul(vec2(0.22, 0.08))));
+      const lit = snow.mul(s.noise(p.mul(2.5)).mul(0.06).add(0.94)).mul(s.color);
+      const scentUV = p.sub(origin).add(0.5).div(FIELD_TEXELS);
+      const sample = texture(scent.texture, scentUV);
+      const edge = smoothstep(vec2(0), vec2(0.025), scentUV).mul(smoothstep(vec2(0), vec2(0.025), scentUV.oneMinus()));
+      const concentration = max(sample.rgb, vec3(0));
+      const mass = dot(concentration, vec3(1));
+      const scentColor = concentration.div(max(max(concentration.r, max(concentration.g, concentration.b)), 0.00001));
+      const strength = exp(mass.mul(-0.38)).oneMinus().mul(edge.x.mul(edge.y).mul(sample.a));
+      const level = log2(mass.mul(4).add(1)).mul(1.6);
+      const width = max(fwidth(level), 0.015);
+      const contour = smoothstep(width.mul(0.45), width.mul(1.1), abs(fract(level.add(0.5)).sub(0.5))).oneMinus().mul(smoothstep(0.2, 0.7, level).mul(smoothstep(0.35, 1, width).oneMinus()));
+      const gridWidth = max(fwidth(p), vec2(0.00001));
+      const grid = abs(fract(p).sub(0.5)).div(gridWidth);
+      const line = smoothstep(0.25, 1.25, min(grid.x, grid.y)).oneMinus().mul(smoothstep(0.25, 0.9, max(gridWidth.x, gridWidth.y)).oneMinus());
+      const survey = abs(fract(p.add(0.5).div(16).sub(0.5)).sub(0.5)).mul(16).div(gridWidth);
+      const major = smoothstep(0.5, 1.5, min(survey.x, survey.y)).oneMinus();
+      const local = p.sub(agent), cell = floor(local.add(0.5));
+      const within = select(all(abs(cell).lessThan(vec2(1.5))).and(dot(cell, cell).greaterThan(0)), float(1), float(0));
+      const signal = exp(visionNode.element(int(clamp(cell.y.add(1).mul(3).add(cell.x).add(1), 0, 8))).negate()).oneMinus();
+      const border = float(0.5).sub(max(abs(local.x.sub(cell.x)), abs(local.y.sub(cell.y))));
+      const edgeWidth = max(fwidth(border), 0.015);
+      const outline = smoothstep(edgeWidth, edgeWidth.mul(2.2), border).oneMinus();
+      const visionColor = vec3(0.13, 0.66, 0.84);
+      emissive = scentColor.mul(strength).mul(contour.mul(debug.mul(0.36).add(0.055)).add(0.008))
+        .add(vec3(0.2, 0.59, 0.7).mul(max(line.mul(0.48), major.mul(0.72))).mul(debug))
+        .add(visionColor.mul(debug.mul(0.85).add(0.09)).mul(outline.add(signal.mul(0.14))).mul(within));
+      return mix(mix(lit, scentColor.mul(0.45), strength.mul(debug.mul(0.42).add(0.035))), visionColor.mul(0.5), debug.mul(0.16).add(0.03).mul(signal.add(0.3)).mul(within));
+    },
   }, heightAt, { roughness: 1, toonSteps: 0 })));
-  const compile = terrain.material.onBeforeCompile;
-  terrain.material.onBeforeCompile = (shader, renderer) => {
-    compile(shader, renderer);
-    Object.assign(shader.uniforms, { uScent: { value: scent.texture }, uScentOrigin: { value: scent.origin }, uDebug: debug, uVision: vision, uAgent: agent });
-    shader.fragmentShader = shader.fragmentShader.replace('#include <common>', `#include <common>
-uniform sampler2D uScent;
-uniform vec2 uScentOrigin;
-uniform float uDebug, uVision[9];
-uniform vec2 uAgent;
-
-`)
-      .replace('#include <color_fragment>', `#include <color_fragment>
-float drift = landNoise(vLandPosition.xz * vec2(0.22, 0.08));
-float crust = landNoise(vLandPosition.xz * 2.5);
-vec3 snowColor = mix(vec3(0.72, 0.83, 1.0), vec3(1.0, 0.91, 0.97), drift);
-diffuseColor.rgb *= snowColor * (0.94 + 0.06 * crust);
-`)
-      .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
-vec2 scentUV = (vLandPosition.xz - uScentOrigin + 0.5) / ${FIELD_TEXELS.toFixed(1)};
-vec4 field = texture2D(uScent, scentUV);
-vec2 edge = smoothstep(vec2(0.0), vec2(0.025), scentUV) * smoothstep(vec2(0.0), vec2(0.025), 1.0 - scentUV);
-float inside = edge.x * edge.y * field.a;
-vec3 concentration = max(field.rgb, vec3(0.0));
-float mass = dot(concentration, vec3(1.0));
-vec3 scentColor = concentration / max(max(concentration.r, max(concentration.g, concentration.b)), 0.00001);
-float strength = (1.0 - exp(-mass * 0.38)) * inside;
-float level = log2(1.0 + mass * 4.0) * 1.6;
-float width = max(fwidth(level), 0.015);
-float contour = 1.0 - smoothstep(width * 0.45, width * 1.1, abs(fract(level + 0.5) - 0.5));
-contour *= smoothstep(0.2, 0.7, level) * (1.0 - smoothstep(0.35, 1.0, width));
-diffuseColor.rgb = mix(diffuseColor.rgb, scentColor * 0.45, strength * (0.035 + uDebug * 0.42));
-totalEmissiveRadiance += scentColor * strength * (0.008 + contour * (0.055 + 0.36 * uDebug));
-vec2 gridWidth = max(fwidth(vLandPosition.xz), vec2(0.00001));
-vec2 grid = abs(fract(vLandPosition.xz) - 0.5) / gridWidth;
-float line = (1.0 - smoothstep(0.25, 1.25, min(grid.x, grid.y))) * (1.0 - smoothstep(0.25, 0.9, max(gridWidth.x, gridWidth.y)));
-vec2 survey = abs(fract((vLandPosition.xz + 0.5) / 16.0 - 0.5) - 0.5) * 16.0 / gridWidth;
-float major = 1.0 - smoothstep(0.5, 1.5, min(survey.x, survey.y));
-totalEmissiveRadiance += vec3(0.2, 0.59, 0.7) * max(line * 0.48, major * 0.72) * uDebug;
-vec2 localVision = vLandPosition.xz - uAgent, cell = floor(localVision + 0.5);
-if (all(lessThan(abs(cell), vec2(1.5))) && dot(cell, cell) > 0.0) {
-  float signal = 1.0 - exp(-uVision[int((cell.y + 1.0) * 3.0 + cell.x + 1.0)]);
-  float border = 0.5 - max(abs(localVision.x - cell.x), abs(localVision.y - cell.y));
-  float edgeWidth = max(fwidth(border), 0.015);
-  float outline = 1.0 - smoothstep(edgeWidth, edgeWidth * 2.2, border);
-  vec3 visionColor = vec3(0.13, 0.66, 0.84);
-  totalEmissiveRadiance += visionColor * (0.09 + uDebug * 0.85) * (outline + signal * 0.14);
-  diffuseColor.rgb = mix(diffuseColor.rgb, visionColor * 0.5, (0.03 + uDebug * 0.16) * (0.3 + signal));
-}
-`);
-  };
+  terrain.material.emissiveNode = emissive;
   world.add(terrain.mesh);
   const items = new ItemField(world, ctx.seed, heightAt);
-  world.own({ dispose() {}, staticInstances: items.staticInstances });
   const handle = {
     items, scent, heightAt, debug, vision, agent, lights: rig,
     setView(coverage: ViewCoverage, camera: THREE.PerspectiveCamera) {

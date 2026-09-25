@@ -1,4 +1,5 @@
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
+import { instancedMesh } from '@kit/instances';
 import { bevelBox, engravedPanel, modelParts, robotMaterials } from '@kit/robot';
 import { CELL } from '@kit/grid';
 import { banner } from '@kit/props';
@@ -66,7 +67,7 @@ export function buildCrossing(grid: GridGeometry, accent: THREE.ColorRepresentat
     box(root, beacon, destination, deckHeight(destination) + 0.69, z, 0.1, 0.025, 0.14, 0.005);
   }
   parts.build();
-  const markers = world.own(new THREE.InstancedMesh(world.own(bevelBox(0.32, 0.015, 0.055, 0.005)), status, grid.w * 2));
+  const markers = world.own(instancedMesh(world.own(bevelBox(0.32, 0.015, 0.055, 0.005)), status, grid.w * 2));
   const dummy = new THREE.Object3D(), tint = new THREE.Color();
   for (let i = 0; i < grid.w; i++) for (let side = 0; side < 2; side++) {
     const x = chainX(i, grid);
@@ -143,7 +144,7 @@ export function buildRover() {
   const matrix = new THREE.Matrix4();
   const wheels = wheel.children.map(child => {
     const mesh = child as THREE.Mesh;
-    const instances = world.own(new THREE.InstancedMesh(mesh.geometry, mesh.material, wheelPositions.length));
+    const instances = world.own(instancedMesh(mesh.geometry, mesh.material, wheelPositions.length));
     wheelPositions.forEach((position, i) => instances.setMatrixAt(i, matrix.makeTranslation(position)));
     instances.castShadow = instances.receiveShadow = true;
     instances.instanceMatrix.setUsage(THREE.DynamicDrawUsage);

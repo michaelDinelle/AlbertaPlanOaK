@@ -1,4 +1,4 @@
-import type * as THREE from 'three';
+import type * as THREE from 'three/webgpu';
 import type { EnvDescriptor } from '../data/envs';
 import type { EnvFrame, EnvGeometry, EventStream, SimEvent } from '@sim/types';
 import type { DesignTokens, Palette, PaletteName } from './tokens';
@@ -43,7 +43,7 @@ export interface FrameUpdate {
 export interface SceneSize { width: number; height: number; dpr: number }
 
 export interface SceneContext {
-  renderer: THREE.WebGLRenderer;
+  renderer: THREE.WebGPURenderer;
   canvas: HTMLCanvasElement;
   envId: string;
   environment: EnvDescriptor;
@@ -70,7 +70,7 @@ export interface LegendSpec {
 
 export interface SceneModule {
   readonly scene: THREE.Scene;
-  readonly camera: THREE.PerspectiveCamera;
+  readonly camera: THREE.Camera;
   readonly post: ScenePost;
   readonly controlHz: number;
   readonly legend: LegendSpec | null;

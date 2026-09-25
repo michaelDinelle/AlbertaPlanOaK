@@ -1,4 +1,5 @@
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
+import { instancedMesh } from '../instances';
 import { engravedPanel, modelParts, robotMaterials } from '../robot';
 import { makeWorld, type WorldCore } from '../world';
 import { vineStrand } from '../props/vine';
@@ -56,7 +57,7 @@ export function buildCourier(opts: CourierOptions = {}) {
     for (let i = 0; i < 6; i++) disc(wheel, frame, Math.cos(i * Math.PI / 3) * 0.054, Math.sin(i * Math.PI / 3) * 0.054, side * 0.075, 0.009, 0.013, 6);
   }
   for (let i = 0; i < 20; i++) parts.add(wheel, new THREE.BoxGeometry(0.026, 0.014, 0.067).translate(0, 0.144, 0).rotateZ(i * Math.PI / 10), rubber);
-  const indicators = world.own(new THREE.InstancedMesh(world.own(new THREE.SphereGeometry(1, 8, 6)), world.own(new THREE.MeshBasicMaterial({ color: 0xffffff })), 11));
+  const indicators = world.own(instancedMesh(world.own(new THREE.SphereGeometry(1, 8, 6)), world.own(new THREE.MeshBasicMaterial({ color: 0xffffff })), 11));
   const sensor = new THREE.Object3D(), color = new THREE.Color();
   for (let i = 0; i < 11; i++) {
     if (i < 3) { sensor.position.set(-0.26, 0.53, (i - 1) * 0.135); sensor.scale.set(0.04, 0.065, 0.04); }
@@ -69,7 +70,7 @@ export function buildCourier(opts: CourierOptions = {}) {
   const matrix = new THREE.Matrix4(), spins = new Float64Array(4);
   const wheels = wheel.children.map(child => {
     const mesh = child as THREE.Mesh;
-    const instances = world.own(new THREE.InstancedMesh(mesh.geometry, mesh.material, 4));
+    const instances = world.own(instancedMesh(mesh.geometry, mesh.material, 4));
     wheelPositions.forEach((position, i) => instances.setMatrixAt(i, matrix.makeTranslation(position)));
     instances.castShadow = instances.receiveShadow = true;
     instances.instanceMatrix.setUsage(THREE.DynamicDrawUsage); instances.computeBoundingSphere(); world.add(instances);

@@ -1,4 +1,5 @@
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
+import { abs, clamp, cos, exp, float, floor, fract, fwidth, length, materialEmissive, max, mix, positionWorld, pow, sin, smoothstep, uniform, vec3 } from 'three/tsl';
 import { CELL, buildCellField, type CellFieldHandle } from '@kit/grid';
 import { parameter } from '../../data/envs';
 import { makeLandscape } from '@kit/landscape';
@@ -11,41 +12,20 @@ import type { SceneContext } from '@kit/types';
 import { flowerGeometry, rockGeometry } from '@kit/vegetation';
 import type { WorldCore } from '@kit/world';
 import type { GridGeometry } from '@sim/types';
-import type { ViewCoverage } from '@kit/view';
+import type { SurfaceSample, ViewCoverage } from '@kit/view';
 import { isReef, reefDepthY, reefSkin, shelfTint, terraceShelves, SHELF_THICKNESS, TERRACE_DESCENT, type ReefSkin } from './reef';
 
-export function causticLighting(material: THREE.MeshStandardMaterial, strength = 0.075): { setTime(t: number): void } {
-  const clock = { value: 0 };
-  const compile = material.onBeforeCompile;
-  const cacheKey = material.customProgramCacheKey();
-  material.onBeforeCompile = (shader, renderer) => {
-    compile.call(material, shader, renderer);
-    shader.uniforms.uReefTime = clock;
-    shader.vertexShader = `varying vec3 vReefWorld;\n${shader.vertexShader}`.replace(
-      '#include <project_vertex>',
-      `vec4 reefWorld = vec4(transformed, 1.0);
-#ifdef USE_INSTANCING
-reefWorld = instanceMatrix * reefWorld;
-#endif
-vReefWorld = (modelMatrix * reefWorld).xyz;
-#include <project_vertex>`,
-    );
-    shader.fragmentShader = `uniform float uReefTime;\nvarying vec3 vReefWorld;\n${shader.fragmentShader}`.replace(
-      '#include <emissivemap_fragment>',
-      `#include <emissivemap_fragment>
-vec2 causticP = vReefWorld.xz * 5.8;
-float causticA = sin(causticP.x + sin(causticP.y * 1.2 + uReefTime * .28));
-float causticB = sin(causticP.y - sin(causticP.x * .8 - uReefTime * .22));
-float caustic = pow(max(0., 1. - abs(causticA + causticB) * 2.4), 5.);
-caustic = mix(.045, caustic, 1. - smoothstep(.3, 1.2, length(fwidth(causticP))));
-totalEmissiveRadiance += vec3(.42,.91,1.) * caustic * ${strength.toFixed(3)} * (.7 + .3 * exp(-abs(vReefWorld.y)*.08));`,
-    );
-  };
-  material.customProgramCacheKey = () => `${cacheKey}:caustic:${strength}`;
+export function causticLighting(material: THREE.MeshStandardNodeMaterial, strength = 0.075): { setTime(t: number): void } {
+  const clock = uniform(0);
+  const p = positionWorld.xz.mul(5.8);
+  const causticA = sin(p.x.add(sin(p.y.mul(1.2).add(clock.mul(0.28)))));
+  const causticB = sin(p.y.sub(sin(p.x.mul(0.8).sub(clock.mul(0.22)))));
+  const caustic = mix(float(0.045), pow(max(0, abs(causticA.add(causticB)).mul(2.4).oneMinus()), 5), smoothstep(0.3, 1.2, length(fwidth(p))).oneMinus());
+  material.emissiveNode = materialEmissive.add(vec3(0.42, 0.91, 1).mul(caustic).mul(strength).mul(exp(abs(positionWorld.y).mul(-0.08)).mul(0.3).add(0.7)));
   return { setTime(t) { clock.value = t; } };
 }
 
-export function shelfLandscape(grid: GridGeometry, depth: number): { height: string; detail: string; heightAt(x: number, z: number): number } {
+export function shelfLandscape(grid: GridGeometry, depth: number): { height: (p: THREE.Node<'vec2'>) => THREE.Node<'float'>; detail: (s: SurfaceSample) => THREE.Node<'vec3'>; heightAt(x: number, z: number): number } {
   const span = (grid.h - 1) * CELL;
   const half = grid.w * CELL / 2;
   const drop = TERRACE_DESCENT / (grid.h - 1) * 0.5 + 0.08;
@@ -54,15 +34,16 @@ export function shelfLandscape(grid: GridGeometry, depth: number): { height: str
     return t * t * (3 - 2 * t);
   };
   return {
-    height: `float row = clamp((p.y+${(span / 2).toFixed(4)})/${CELL.toFixed(4)},0.,${(grid.h - 1).toFixed(1)});
-float shelf = -${(TERRACE_DESCENT / (grid.h - 1)).toFixed(4)}*(floor(row)+smoothstep(.25,.75,fract(row)))-${drop.toFixed(4)};
-float coast = 1.-smoothstep(${(CELL * 0.7).toFixed(4)},${(CELL * 3.7).toFixed(4)},p.x-p.y-2.2-sin((p.x+p.y)*.25)*1.2-sin((p.x+p.y)*.57)*.7);
-float outer = smoothstep(${half.toFixed(4)},${(half + 12).toFixed(4)},max(abs(p.x),abs(p.y)));
-shelf += outer*sin(p.x*.09)*sin(p.y*.07)*1.2;
-float bed = -${depth.toFixed(1)} + sin(p.x*.035)*cos(p.y*.03)*1.5;
-float bank = smoothstep(${(half + 5).toFixed(4)},${(half + 28).toFixed(4)},p.x);
-return mix(mix(bed,shelf,coast),shelf+1.+sin(p.y*.06)*4.,bank);`,
-    detail: `float row = clamp((p.z+${(span / 2).toFixed(4)})/${span.toFixed(4)},0.,1.); color = mix(uLandA,uLandB,row); color *= .94 + .06*sin(p.y*3.1+sin(p.x*.3+p.z*.2));`,
+    height(p) {
+      const row = clamp(p.y.add(span / 2).div(CELL), 0, grid.h - 1);
+      const terrace = float(-TERRACE_DESCENT / (grid.h - 1)).mul(floor(row).add(smoothstep(0.25, 0.75, fract(row)))).sub(drop);
+      const along = p.x.add(p.y);
+      const coast = smoothstep(CELL * 0.7, CELL * 3.7, p.x.sub(p.y).sub(2.2).sub(sin(along.mul(0.25)).mul(1.2)).sub(sin(along.mul(0.57)).mul(0.7))).oneMinus();
+      const shelf = terrace.add(smoothstep(half, half + 12, max(abs(p.x), abs(p.y))).mul(sin(p.x.mul(0.09))).mul(sin(p.y.mul(0.07))).mul(1.2));
+      const bed = float(-depth).add(sin(p.x.mul(0.035)).mul(cos(p.y.mul(0.03))).mul(1.5));
+      return mix(mix(bed, shelf, coast), shelf.add(1).add(sin(p.y.mul(0.06)).mul(4)), smoothstep(half + 5, half + 28, p.x));
+    },
+    detail: (s) => mix(s.a, s.b, clamp(s.p.z.add(span / 2).div(span), 0, 1)).mul(sin(s.p.y.mul(3.1).add(sin(s.p.x.mul(0.3).add(s.p.z.mul(0.2))))).mul(0.06).add(0.94)),
     heightAt(x, z) {
       const row = Math.min(grid.h - 1, Math.max(0, (z + span / 2) / CELL));
       const outer = smooth(half, half + 12, Math.max(Math.abs(x), Math.abs(z)));
@@ -177,12 +158,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   });
   const { world: w, sky, rig, fog } = land;
   sky.setColors(0x91ece1, 0x217fa2, 0x05294c);
-  sky.material.fragmentShader = sky.material.fragmentShader.replace(
-    'gl_FragColor = vec4( col, 1.0 );',
-    `float overhead = pow(max(dir.y, 0.), 8.);
-col += vec3(.66,1.,.87) * overhead * (1.25 + .16 * sin(dir.x * 30. + dir.z * 27. + uTime * .17));
-gl_FragColor = vec4(col, 1.);`,
-  );
+  sky.add((dir, time) => vec3(0.66, 1, 0.87).mul(pow(max(dir.y, 0), 8)).mul(sin(dir.x.mul(30).add(dir.z.mul(27)).add(time.mul(0.17))).mul(0.16).add(1.25)));
   fog.color.set(0x247b96);
   rig.sun.color.set(0xd6f4ff); rig.sun.intensity = 1.9;
   rig.hemi.color.set(0x7fd0ea); rig.hemi.groundColor.set(0x0e3a5c); rig.hemi.intensity *= 1.4;
@@ -252,14 +228,14 @@ gl_FragColor = vec4(col, 1.);`,
       },
     });
   });
-  const silt = w.size(w.time(w.own(makeAmbientParticles({
+  const silt = w.time(w.own(makeAmbientParticles({
     preset: 'dust', count: 64, bounds: { halfX: 0.35, halfY: 0.2, halfZ: 0.35 },
     seed: ctx.seed, color: skin.silt, size: 0.9, intensity: 1.1, rise: -0.07, name: 'reefSilt',
-  }))));
-  const rush = w.size(w.time(w.own(makeAmbientParticles({
+  })));
+  const rush = w.time(w.own(makeAmbientParticles({
     preset: 'bubbles', count: 100, bounds: { halfX: 0.26, halfY: 3.6, halfZ: 0.26 },
     seed: ctx.seed ^ 0x2c58, color: skin.bubble, size: 1.5, intensity: 2, rise: 2.4, name: 'resurfaceBubbles',
-  }))));
+  })));
   silt.setDensity(0);
   rush.setDensity(0);
   w.add(silt.points);

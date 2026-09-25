@@ -1,4 +1,4 @@
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
 import { alpineWorld, type AlpineWorld } from '@kit/alpine';
 import { terrainNoise as noise } from '@kit/mountains';
 import { makeAmbientParticles } from '@kit/particles';
@@ -70,8 +70,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): Promise<World
     },
     grassColor: 0x8ca36b,
     extras(world) {
-      const fireflies = world.size(world.time(world.own(makeAmbientParticles({ preset: 'fireflies', count: 72, seed: ctx.seed, color: 0xffe6a0, size: 1.3, intensity: 1.8, bounds: { y: 1.1, halfX: 13, halfY: 0.6, halfZ: 10 }, name: 'riverbankFireflies' }))));
-      const positions = fireflies.points.geometry.getAttribute('position');
+      const fireflies = world.time(world.own(makeAmbientParticles({ preset: 'fireflies', count: 72, seed: ctx.seed, color: 0xffe6a0, size: 1.3, intensity: 1.8, bounds: { y: 1.1, halfX: 13, halfY: 0.6, halfZ: 10 }, name: 'riverbankFireflies' })));
+      const positions = fireflies.points.geometry.getAttribute('aPosition');
       for (let i = 0; i < positions.count; i++) {
         const x = positions.getX(i), { center, width } = riverChannel(positions.getZ(i));
         positions.setX(i, center + Math.sign(x) * (width + 2 + Math.abs(x) * 0.25));

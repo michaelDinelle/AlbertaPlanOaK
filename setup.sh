@@ -22,7 +22,7 @@ printf '_oak_act\n_worker\n_env_step\n' > "$ROOT/.build/hot.order"
 CACHE_LINE="$(sysctl -n hw.cachelinesize)"
 clang -O3 -mcpu=apple-m4 -flto=full "-falign-functions=$CACHE_LINE" -fno-fast-math -ffp-contract=off -Werror=double-promotion -Wall -Wextra \
   "-DOAK_PRESET_$(printf '%s' "$PRESET" | tr a-z A-Z)" -I"$ROOT/Sources" \
-  "$ROOT"/Sources/*.c "$ROOT"/Sources/envs/*.c -lm -lpthread -Wl,-order_file,"$ROOT/.build/hot.order" -o "$ROOT/.build/oak"
+  "$ROOT"/Sources/*.c "$ROOT"/Sources/envs/*.c "$ROOT"/.build/catalog/*.c -lm -lpthread -Wl,-order_file,"$ROOT/.build/hot.order" -o "$ROOT/.build/oak"
 first="$(nm -n "$ROOT/.build/oak" | awk '$2 ~ /^[tT]$/ && $3 != "__mh_execute_header" { print $3; exit }')"
 [ "$first" = _oak_act ] || { echo "the linker placed $first first, not _oak_act" >&2; exit 1; }
 printf '%s\n' "$PRESET" > "$PRESET_FILE"

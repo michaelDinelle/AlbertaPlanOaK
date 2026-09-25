@@ -9,7 +9,7 @@ import {
 import { blendTokens, clamp01 } from '@kit/mix';
 import { mergeColoredParts, type ColoredPart } from '@kit/parts';
 import type { Palette } from '@kit/tokens';
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
 import type { ReefSkin } from './reef';
 
 const SHELL_R = 0.5;

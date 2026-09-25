@@ -72,3 +72,11 @@ void aliased_oracle(uint32_t instance, uint32_t seed, uint32_t step, const uint3
     (void)instance; (void)seed; (void)step; (void)extra; (void)obs;
     ctrl[0] = words[0] == words[1] ? 1.0f : 0.0f;
 }
+
+uint32_t aliased_view(uint32_t instance, const uint32_t *words, const uint32_t *extra, const float *shared, uint32_t *out) {
+    (void)words; (void)shared;
+    uint32_t count = aliased_extraWords(instance, 0u);
+    if (!out) return count;
+    for (uint32_t i = 0u; i < count; i++) out[i] = extra[i];
+    return count;
+}

@@ -1,4 +1,4 @@
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
 import { modelParts } from '../robot';
 import type { WorldBuilder } from '../world';
 import { propMaterials, type PropMaterials } from './materials';

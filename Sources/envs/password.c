@@ -75,3 +75,11 @@ void password_oracle(uint32_t instance, uint32_t seed, uint32_t step, const uint
     (void)instance; (void)seed; (void)step; (void)obs;
     ctrl[0] = (float)password_digit(extra, words[0]);
 }
+
+uint32_t password_view(uint32_t instance, const uint32_t *words, const uint32_t *extra, const float *shared, uint32_t *out) {
+    (void)words; (void)shared;
+    uint32_t count = PASSWORD_KNOBS[instance].length;
+    if (!out) return count;
+    for (uint32_t index = 0u; index < count; index++) out[index] = password_digit(extra, index);
+    return count;
+}

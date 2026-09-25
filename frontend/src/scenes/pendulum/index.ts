@@ -1,4 +1,4 @@
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
 import { formatSigned } from '../../format';
 import type { GroundTruthOptions } from '@kit/debug';
 import { clampRange, envelope } from '@kit/mix';

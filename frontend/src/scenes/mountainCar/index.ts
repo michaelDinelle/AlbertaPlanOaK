@@ -1,4 +1,4 @@
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
 import { formatSigned } from '../../format';
 import type { GroundTruthOptions } from '@kit/debug';
 import { envelope } from '@kit/mix';
@@ -124,7 +124,6 @@ class AlpineValleyScene extends StageScene<WorldHandle> {
   protected start(ctx: SceneContext, world: WorldHandle): void {
     const cart = this.cart;
     if (!cart) return;
-    cart.setPixelRatio(ctx.size.dpr);
     world.setGust(0);
     world.setEagle(null);
     cart.setLanternGain(this.positionOnly ? 0 : 1);
@@ -224,7 +223,6 @@ class AlpineValleyScene extends StageScene<WorldHandle> {
 
   override resize(size: SceneSize): void {
     super.resize(size);
-    this.cart?.setPixelRatio(size.dpr);
     if (this.rig && this.view) this.view.resize(size, this.rig);
   }
 

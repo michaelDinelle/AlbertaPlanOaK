@@ -1,24 +1,16 @@
-import * as THREE from 'three';
-import { cacheStaticShadows } from './shadows';
-import type { SpatialInstances } from './instances';
+import * as THREE from 'three/webgpu';
 
 export interface Disposable {
   dispose(): void;
-  staticInstances?: SpatialInstances[];
 }
 
 export interface Timed {
   setTime(t: number): void;
 }
 
-export interface PixelSized {
-  setPixelRatio(dpr: number): void;
-}
-
 export interface WorldCore {
   group: THREE.Group;
   setTime(t: number): void;
-  setPixelRatio(dpr: number): void;
   dispose(): void;
 }
 
@@ -32,7 +24,6 @@ export interface WorldBuilder {
   add<T extends THREE.Object3D>(object: T): T;
   own<T extends Disposable>(handle: T): T;
   time<T extends Timed>(handle: T): T;
-  size<T extends PixelSized>(handle: T): T;
   seal<H extends WorldCore>(extra: Omit<H, keyof WorldCore>, hooks?: WorldHooks): H;
 }
 
@@ -41,8 +32,6 @@ export function makeWorld(name: string): WorldBuilder {
   group.name = name;
   const owned: Disposable[] = [];
   const timed: Timed[] = [];
-  const sized: PixelSized[] = [];
-  let shadows: ReturnType<typeof cacheStaticShadows> | undefined;
   const builder: WorldBuilder = {
     group,
     add(object) {
@@ -53,14 +42,9 @@ export function makeWorld(name: string): WorldBuilder {
     },
     own(handle) {
       owned.push(handle);
-      if (handle.staticInstances?.length) {
-        shadows ??= cacheStaticShadows(builder);
-        for (const source of handle.staticInstances) shadows.add(source);
-      }
       return handle;
     },
     time: (handle) => (timed.push(handle), handle),
-    size: (handle) => (sized.push(handle), handle),
     seal<H extends WorldCore>(extra: Omit<H, keyof WorldCore>, hooks: WorldHooks = {}): H {
       const core: WorldCore = {
         group,
@@ -68,14 +52,10 @@ export function makeWorld(name: string): WorldBuilder {
           for (let i = 0; i < timed.length; i++) timed[i]?.setTime(t);
           hooks.time?.(t);
         },
-        setPixelRatio(dpr) {
-          for (let i = 0; i < sized.length; i++) sized[i]?.setPixelRatio(dpr);
-        },
         dispose() {
           for (let i = owned.length - 1; i >= 0; i--) owned[i]?.dispose();
           owned.length = 0;
           timed.length = 0;
-          sized.length = 0;
           hooks.drop?.();
           group.removeFromParent();
           group.clear();

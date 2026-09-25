@@ -27,9 +27,10 @@ static void forager_spawn(const foragerKnobs *k, uint32_t seed, uint32_t index, 
 
 static uint32_t forager_good(const foragerKnobs *k, uint32_t step) { return k->switching && ((step / FORAGER_SWITCH_PERIOD) & 1u) ? 2u : 1u; }
 
+static const float FORAGER_VALUES[2][3] = { { 0.0f, 1.0f, -1.0f }, { 0.0f, -1.0f, 1.0f } };
+
 static const float *forager_values(const foragerKnobs *k, uint32_t step) {
-    static const float VALUES[2][3] = { { 0.0f, 1.0f, -1.0f }, { 0.0f, -1.0f, 1.0f } };
-    return VALUES[forager_good(k, step) - 1u];
+    return FORAGER_VALUES[forager_good(k, step) - 1u];
 }
 
 static inline __attribute__((always_inline)) lane4 forager_draw(const foragerKnobs *k, uint32_t seed, uint32_t step, uint32_t *draws) {
@@ -166,4 +167,13 @@ void forager_oracle(uint32_t instance, uint32_t seed, uint32_t step, const uint3
         case 3u: forager_seek(&FORAGER_KNOBS[3], step, words, extra, ctrl); return;
         default: __builtin_trap();
     }
+}
+
+uint32_t forager_view(uint32_t instance, const uint32_t *words, const uint32_t *extra, const float *shared, uint32_t *out) {
+    (void)words; (void)shared;
+    uint32_t cells = FORAGER_KNOBS[instance].side * FORAGER_KNOBS[instance].side, count = cells / 16u;
+    if (!out) return count;
+    for (uint32_t i = 0u; i < count; i++) out[i] = 0u;
+    for (uint32_t cell = 0u; cell < cells; cell++) out[cell / 16u] |= (extra[cell] & 3u) << (2u * (cell % 16u));
+    return count;
 }

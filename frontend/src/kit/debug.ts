@@ -1,4 +1,5 @@
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
+import { instancedMesh } from './instances';
 import type { EnvGeometry, GridCell, GridGeometry } from '@sim/types';
 import { cellToWorld, type Vec3Tuple } from './grid';
 import { TOKENS } from './tokens';
@@ -710,7 +711,7 @@ class DebugInstances implements DebugPrimitive {
 
   constructor(geometry: THREE.BufferGeometry, private readonly capacity: number, name: string) {
     this.material = solidMaterial();
-    this.object = new THREE.InstancedMesh(geometry, this.material, capacity);
+    this.object = instancedMesh(geometry, this.material, capacity);
     this.object.name = name;
     this.object.frustumCulled = false;
     this.object.renderOrder = 998;

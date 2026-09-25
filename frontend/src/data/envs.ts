@@ -7,7 +7,6 @@ export interface ScentParameters {
 
 export interface EnvDescriptor {
   envId: string;
-  family: string;
   category: string;
   instance: number;
   obs: number;
@@ -16,11 +15,18 @@ export interface EnvDescriptor {
   seedStart: number;
   seedEnd: number;
   words: number;
+  view: number;
   parameters: Record<string, unknown>;
-  constants: Record<string, number | number[]>;
+  constants: Record<string, CatalogValue>;
   grid?: { w: number; h: number; walls: number[] };
+  goal?: [number, number];
+  hazards?: [number, number][];
+  fences?: [number, number, number, number][];
   scent?: ScentParameters;
 }
+
+export type CatalogRecord = Record<string, number | number[]>;
+export type CatalogValue = number | number[] | CatalogRecord | CatalogRecord[];
 
 export function parameter(env: EnvDescriptor, key: string): number {
   const value = env.parameters[key];
@@ -36,46 +42,49 @@ export function constant(env: EnvDescriptor, key: string): number {
 
 export function constantList(env: EnvDescriptor, key: string): number[] {
   const value = env.constants[key];
-  if (!Array.isArray(value)) throw new Error(`${env.envId} lacks constant list ${key}`);
+  if (!Array.isArray(value) || value.some(item => typeof item !== 'number')) throw new Error(`${env.envId} lacks constant list ${key}`);
+  return value as number[];
+}
+
+export function constantRecord(env: EnvDescriptor, key: string): CatalogRecord {
+  const value = env.constants[key];
+  if (typeof value !== 'object' || Array.isArray(value)) throw new Error(`${env.envId} lacks constant record ${key}`);
   return value;
 }
 
-export function configurationLabel(env: EnvDescriptor, family: readonly EnvDescriptor[]): string {
-  if (env.family === 'blocking') {
-    const phases = env.parameters.phase as NonNullable<EnvDescriptor['grid']>[];
-    if (!Array.isArray(phases) || phases.length !== 2 || phases.some(grid => !grid || !Array.isArray(grid.walls) || grid.walls.length !== grid.w * grid.h)) throw new Error('BlockingMaze layout parameters are missing');
-    const [first, second] = phases as [NonNullable<EnvDescriptor['grid']>, NonNullable<EnvDescriptor['grid']>];
-    if (first.w !== second.w || first.h !== second.h) throw new Error('BlockingMaze layout dimensions differ');
-    return `${first.w} × ${first.h} · ${second.walls.some((wall, i) => wall && !first.walls[i]) ? 'barrier shifts' : 'shortcut opens'}`;
-  }
-  const keys = Object.keys(env.parameters).filter(key => typeof env.parameters[key] === 'number' && !(env.family === 'deepsea' && key === 'mapWords' || env.family === 'jbw' && ['cells', 'slot'].includes(key)) && family.some(other => other.parameters[key] !== env.parameters[key]));
-  return keys.map(key => key === 'extent' ? `size ${parameter(env, key) + 1}` : key === 'cueBits' ? `choices ${2 ** parameter(env, key)}` : key === 'positionOnly' ? parameter(env, key) ? 'positions only' : 'full observations' : `${key.replace(/[A-Z]/g, letter => ` ${letter.toLowerCase()}`)} ${Number(parameter(env, key).toPrecision(6))}`).join(' · ');
+export function constantRecords(env: EnvDescriptor, key: string): CatalogRecord[] {
+  const value = env.constants[key];
+  if (!Array.isArray(value) || value.some(item => typeof item !== 'object')) throw new Error(`${env.envId} lacks constant records ${key}`);
+  return value as CatalogRecord[];
 }
 
-export interface EnvFamily {
-  id: string;
+export interface Environment {
   name: string;
   category: string;
   configurations: EnvDescriptor[];
 }
 
-export function recordedFamilies(catalog: readonly EnvDescriptor[], ids: readonly string[]): EnvFamily[] {
+export function recordedEnvironments(catalog: readonly EnvDescriptor[], ids: readonly string[]): Environment[] {
   const descriptors = new Map(catalog.map(env => [env.envId, env]));
-  const groups = new Map<string, EnvFamily>();
+  const groups = new Map<string, Environment>();
   for (const id of ids) {
     const env = descriptors.get(id);
     if (env === undefined) throw new Error(`Recording configuration ${id} is missing from the catalog`);
-    let family = groups.get(env.family);
-    if (family === undefined) {
-      family = { id: env.family, name: env.envId.replace(/-cont-v0$/, '').split('-')[0]!, category: env.category, configurations: [] };
-      groups.set(env.family, family);
+    const name = environmentName(env);
+    let environment = groups.get(name);
+    if (environment === undefined) {
+      environment = { name, category: env.category, configurations: [] };
+      groups.set(name, environment);
     }
-    family.configurations.push(env);
+    environment.configurations.push(env);
   }
   return [...groups.values()];
 }
 
-export function configurationName(env: EnvDescriptor, family: EnvFamily): string {
-  const label = configurationLabel(env, family.configurations);
-  return label ? `${family.name} · ${label}` : family.name;
+export function configurationName(env: EnvDescriptor): string {
+  return env.envId.replace(/-cont-v0$/, '');
+}
+
+export function environmentName(env: EnvDescriptor): string {
+  return configurationName(env).split('-')[0]!;
 }

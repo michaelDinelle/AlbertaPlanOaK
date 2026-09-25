@@ -1,7 +1,6 @@
-import * as THREE from 'three';
-import { mergeGeometries, mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
+import * as THREE from 'three/webgpu';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { applyFog, makeLightRig } from '@kit/lighting';
-import { leafSurface } from '@kit/leaves';
 import { oakMaterial, oakUniforms } from '@kit/materials';
 import { skyFromPalette } from '@kit/sky';
 import type { Palette } from '@kit/tokens';
@@ -26,7 +25,7 @@ export function makeLandscape(scene: THREE.Scene, name: string, palette: Palette
   const rig = world.own(makeLightRig(palette, { sunDir: sky.sunDirection, pointCount: 2, ...options.light }));
   world.add(rig.group);
   const fog = applyFog(scene, palette, options.fogExtent ?? 220);
-  if (options.weather) world.add(world.size(world.time(world.own(makeAmbientParticles({ ...options.weather, name: `${name}Weather` })))).points);
+  if (options.weather) world.add(world.time(world.own(makeAmbientParticles({ ...options.weather, name: `${name}Weather` }))).points);
   const surfaces: ReturnType<typeof makeContinuousSurface>[] = [];
   const banks: { bank: ReturnType<typeof makeSceneryBank>; camera: boolean }[] = [];
   return {
@@ -88,12 +87,10 @@ export function prairieGrass(blades = 6) {
   return { geometry, material };
 }
 
-export function aspenTree(world: ReturnType<typeof makeWorld>, foliage = ['#8ca357', '#c6ce8a', '#a6bd70', '#d1d28b']) {
-  const palette = foliage.map(color => new THREE.Color(color));
+export function aspenTree() {
   const pieces: THREE.BufferGeometry[] = [];
   const add = (geometry: THREE.BufferGeometry, color: THREE.Color) => {
     const count = geometry.getAttribute('position').count, colors = new Float32Array(count * 3);
-    if (!geometry.hasAttribute('aLeaf')) geometry.setAttribute('aLeaf', new THREE.Float32BufferAttribute(new Float32Array(count * 2).fill(-2), 2));
     for (let i = 0; i < count; i++) color.toArray(colors, i * 3);
     geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3)); pieces.push(geometry);
   };
@@ -103,33 +100,17 @@ export function aspenTree(world: ReturnType<typeof makeWorld>, foliage = ['#8ca3
     const end = new THREE.Vector3(Math.cos(angle) * spread, y + 0.38, Math.sin(angle) * spread);
     const start = new THREE.Vector3(0, y, 0), direction = end.clone().sub(start);
     add(new THREE.CylinderGeometry(0.004, 0.019, direction.length(), 5).applyQuaternion(new THREE.Quaternion().setFromUnitVectors(THREE.Object3D.DEFAULT_UP, direction.clone().normalize())).translate(...start.add(end).multiplyScalar(0.5).toArray()), new THREE.Color(0xd1cdbb));
-    if (!palette.length) {
-      const snow = new THREE.CapsuleGeometry(0.048, Math.max(0, direction.length() - 0.08), 4, 10);
-      snow.applyQuaternion(new THREE.Quaternion().setFromUnitVectors(THREE.Object3D.DEFAULT_UP, direction.clone().normalize())).translate(end.x * 0.5, y + direction.y * 0.5 + 0.045, end.z * 0.5);
-      add(snow, new THREE.Color(0xf3f6ff));
-      for (let fork = 0; fork < 4; fork++) {
-        const t = 0.45 + fork * 0.15, base = new THREE.Vector3(end.x * t, y + direction.y * t, end.z * t), tip = base.clone().add(new THREE.Vector3(Math.cos(angle + fork - 1.5) * 0.24, 0.2 + fork * 0.035, Math.sin(angle + fork - 1.5) * 0.24));
-        const branch = tip.clone().sub(base);
-        add(new THREE.CylinderGeometry(0.002, 0.007, branch.length(), 6).applyQuaternion(new THREE.Quaternion().setFromUnitVectors(THREE.Object3D.DEFAULT_UP, branch.normalize())).translate(...base.add(tip).multiplyScalar(0.5).toArray()), new THREE.Color(0xa8a5ac));
-      }
-    }
-    const count = palette.length ? 38 : 0;
-    for (let j = 0; j < count; j++) {
-      const t = j / count, azimuth = j * 2.39996 + angle, radial = Math.sqrt(t) * 0.52;
-      const orientation = new THREE.Quaternion().setFromEuler(new THREE.Euler(azimuth * 0.7, azimuth, Math.sin(j * 1.7) * 0.8, 'ZYX'));
-      const center = new THREE.Vector3(end.x + Math.cos(azimuth) * radial, end.y + Math.sin(j * 3.7) * radial * 0.9, end.z + Math.sin(azimuth) * radial);
-      const leaf = new THREE.BufferGeometry().setAttribute('position', new THREE.Float32BufferAttribute([0, -0.1425, 0.017, 0.111, 0, -0.009, 0, 0.1425, 0.017, -0.111, 0, -0.009], 3)).setIndex([0, 1, 2, 0, 2, 3]);
-      leaf.setAttribute('uv', new THREE.Float32BufferAttribute(new Float32Array(8), 2));
-      leaf.setAttribute('aLeaf', new THREE.Float32BufferAttribute([0, -1.5, 1.5, 0, 0, 1.5, -1.5, 0], 2));
-      leaf.applyQuaternion(orientation).translate(center.x, center.y, center.z);
-      leaf.computeVertexNormals(); add(leaf, palette[(i + j) % palette.length]!);
+    const snow = new THREE.CapsuleGeometry(0.048, Math.max(0, direction.length() - 0.08), 4, 10);
+    snow.applyQuaternion(new THREE.Quaternion().setFromUnitVectors(THREE.Object3D.DEFAULT_UP, direction.clone().normalize())).translate(end.x * 0.5, y + direction.y * 0.5 + 0.045, end.z * 0.5);
+    add(snow, new THREE.Color(0xf3f6ff));
+    for (let fork = 0; fork < 4; fork++) {
+      const t = 0.45 + fork * 0.15, base = new THREE.Vector3(end.x * t, y + direction.y * t, end.z * t), tip = base.clone().add(new THREE.Vector3(Math.cos(angle + fork - 1.5) * 0.24, 0.2 + fork * 0.035, Math.sin(angle + fork - 1.5) * 0.24));
+      const branch = tip.clone().sub(base);
+      add(new THREE.CylinderGeometry(0.002, 0.007, branch.length(), 6).applyQuaternion(new THREE.Quaternion().setFromUnitVectors(THREE.Object3D.DEFAULT_UP, branch.normalize())).translate(...base.add(tip).multiplyScalar(0.5).toArray()), new THREE.Color(0xa8a5ac));
     }
   }
   const geometry = mergeGeometries(pieces); pieces.forEach(piece => piece.dispose());
-  const material = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.92, side: THREE.DoubleSide });
-  const depth = world.own(new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking }));
-  leafSurface(material, depth);
-  return { geometry, material, depth };
+  return { geometry, material: new THREE.MeshStandardNodeMaterial({ vertexColors: true, roughness: 0.92, side: THREE.DoubleSide }) };
 }
 
 export function fieldstoneGeometry(segments = 20, rings = 12) {
@@ -150,80 +131,15 @@ export function fieldstoneGeometry(segments = 20, rings = 12) {
 }
 
 export function fieldstones() {
-  return { geometry: fieldstoneGeometry(), material: new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 1 }) };
+  return { geometry: fieldstoneGeometry(), material: new THREE.MeshStandardNodeMaterial({ vertexColors: true, roughness: 1 }) };
 }
 
 export function makeSceneTerrain(
   options: Parameters<typeof makeContinuousSurface>[0],
   sampleHeight: (x: number, z: number) => number,
-  materialOptions: Parameters<typeof oakMaterial>[0],
+  finish: NonNullable<Parameters<typeof makeContinuousSurface>[0]['finish']>,
 ) {
-  const surface = makeContinuousSurface(options);
-  const finish = oakMaterial(materialOptions);
-  const compile = surface.material.onBeforeCompile;
-  const key = surface.material.customProgramCacheKey();
-  surface.material.roughness = finish.roughness;
-  surface.material.onBeforeCompile = (shader, renderer) => {
-    finish.onBeforeCompile.call(finish, shader, renderer);
-    compile.call(surface.material, shader, renderer);
-  };
-  surface.material.customProgramCacheKey = () => `${key}|${finish.customProgramCacheKey()}|world-noise`;
-  return {
-    ...surface,
-    sampleHeight,
-    setTime(t: number) {
-      surface.setTime(t);
-      finish.oak.setTime(t);
-    },
-    dispose() {
-      finish.dispose();
-      surface.dispose();
-    },
-  };
-}
-
-export function extendWater(
-  mesh: THREE.Mesh,
-  coverage: ViewCoverage,
-  width: number,
-  depth: number,
-  bedDepth: string,
-): void {
-  const material = mesh.material;
-  if (!(material instanceof THREE.ShaderMaterial)) throw new Error('water shader required');
-  if (!material.userData.worldWater) {
-    const waves = material.vertexShader.slice(material.vertexShader.indexOf('const int OAK_WAVES'), material.vertexShader.indexOf('float oakWaveHeight'));
-    material.vertexShader = material.vertexShader.replace('world4.y += h;', '');
-    material.fragmentShader = material.fragmentShader
-      .replace('uniform float uTime;', 'uniform float uTime;\nuniform float uAmplitude;')
-      .replace('void main() {', `${waves}
-vec3 waterWave(vec2 p, float footprint) {
-  vec3 wave = vec3(0.0);
-  for (int i = 0; i < OAK_WAVES; i++) {
-    vec4 w = OAK_WAVE[i];
-    float k = w.z * uWaveScale;
-    float phase = dot(p, w.xy) * k + uTime * w.w * uSpeed;
-    float amplitude = OAK_WAVE_AMP[i] * uAmplitude / (1.0 + footprint * footprint * k * k);
-    wave += vec3(cos(phase) * amplitude * k * w.xy, sin(phase) * amplitude);
-  }
-  return wave;
-}
-void main() {`)
-      .replace('vec3 n = normalize( vNormalW );', `float footprint = length(fwidth(vWorld.xz));
-  vec3 wave = waterWave(vWorld.xz, footprint);
-  vec3 n = normalize(vec3(-wave.x, 1.0, -wave.y));`)
-      .replace('-vDepth / max( uDepthFalloff, 0.001 )', `-max(0.0, ${bedDepth}) / max(uDepthFalloff, 0.001)`)
-      .replace('vHeight * 6.0', 'wave.z * 6.0')
-      .replace('oakCaustic( vWorld.xz * uWaveScale, uTime * uSpeed );', 'oakCaustic(vWorld.xz * uWaveScale, uTime * uSpeed) * (1.0 - smoothstep(0.12, 0.7, footprint * uWaveScale));')
-      .replace('96.0 );', '36.0 );')
-      .replace('spec * uSpecular', 'spec * uSpecular * 0.4 / (1.0 + footprint * footprint * 4.0)');
-    material.userData.worldWater = true;
-    material.needsUpdate = true;
-  }
-  mesh.position.x = coverage.x;
-  mesh.position.z = coverage.z;
-  mesh.scale.set(coverage.radius * 2 / width, 1, coverage.radius * 2 / depth);
-  mesh.frustumCulled = false;
+  return { ...makeContinuousSurface({ ...options, finish }), sampleHeight };
 }
 
 export function extendVegetation(
@@ -238,7 +154,7 @@ export function extendVegetation(
   const count = Math.ceil(options.perTile / source.models.length);
   for (const { geometry, material } of source.models) {
     if (!/^oak(Broadleaf|Conifer|BareTree)$/.test(geometry.name) || geometry.userData.treeTint) continue;
-    if (!(material instanceof THREE.MeshStandardMaterial)) throw new Error('tree surface material required');
+    if (!(material instanceof THREE.MeshStandardNodeMaterial)) throw new Error('tree surface material required');
     const positions = geometry.getAttribute('position');
     const colors = geometry.getAttribute('color');
     const bark = new THREE.Color(options.bark ?? 0x7e6852);
@@ -275,7 +191,6 @@ export function extendVegetation(
   }));
   return {
     meshes: banks.map((bank) => bank.mesh),
-    staticInstances: banks.flatMap(bank => bank.staticInstances),
     setView(coverage: ViewCoverage) {
       for (const bank of banks) bank.setView(coverage);
     },

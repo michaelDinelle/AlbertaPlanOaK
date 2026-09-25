@@ -35,7 +35,7 @@ export function readHeader(bytes: Uint8Array): TapeHeader | null {
   const descriptor = JSON.parse(new TextDecoder().decode(bytes.subarray(HEADER_BYTES, HEADER_BYTES + length))) as ReplayDescriptor;
   const width = view.getUint32(12, true), frames = view.getUint32(16, true), blockFrames = view.getUint32(20, true);
   const env = descriptor.environment;
-  if (width !== env.words + env.obs + descriptor.controls + 2 || frames !== descriptor.horizon + 1 || !blockFrames || blockFrames > 65536) throw new Error('Inconsistent replay descriptor');
+  if (width !== env.words + env.view + env.obs + descriptor.controls + 2 || frames !== descriptor.horizon + 1 || !blockFrames || blockFrames > 65536) throw new Error('Inconsistent replay descriptor');
   return { descriptor, offset, width, frames, blockFrames };
 }
 

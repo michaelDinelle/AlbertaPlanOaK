@@ -1,9 +1,11 @@
-import * as THREE from 'three';
-import { WORLD_NOISE } from './heightfield';
-import { oakUniforms } from './materials';
+import * as THREE from 'three/webgpu';
+import { abs, dot, exp, float, floor, fract, log, max, mix, normalize, positionGeometry, sign, sin, uniform, varying, vec2, vec3 } from 'three/tsl';
+import { oakMaterial, setDeform, type OakMaterial, type OakMaterialOptions } from './materials';
 import { DEFAULT_ORBIT_LIMITS, type OrbitRig, type OrbitRigOptions, type OrbitState } from './rigs';
 import { makeTileBank, type TileBankOptions } from './tiles';
 import type { FrameUpdate, SceneContext, SceneSize } from './types';
+
+type N<T extends string> = THREE.Node<T>;
 
 export type ViewAnchor = readonly [number, number, number];
 
@@ -106,13 +108,22 @@ export function trackPose(frame: FrameUpdate, slot: number): number {
   return sum / weight;
 }
 
+export interface SurfaceSample {
+  p: N<'vec3'>;
+  t: N<'float'>;
+  a: N<'vec3'>;
+  b: N<'vec3'>;
+  color: N<'vec3'>;
+  noise(q: N<'vec2'>): N<'float'>;
+}
+
 export interface ContinuousSurfaceOptions {
   name: string;
   seed?: number;
   colorA: THREE.ColorRepresentation;
   colorB: THREE.ColorRepresentation;
-  height?: string;
-  detail?: string;
+  height?: (p: N<'vec2'>, spacing: N<'float'>) => N<'float'>;
+  detail?: (s: SurfaceSample) => N<'vec3'>;
   roughness?: number;
   metalness?: number;
   emissive?: THREE.ColorRepresentation;
@@ -120,107 +131,40 @@ export interface ContinuousSurfaceOptions {
   radius?: number;
   follow?: boolean;
   anchor?: readonly [number, number];
+  finish?: Omit<OakMaterialOptions, 'wind'>;
 }
 
 export interface ContinuousSurface {
-  mesh: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshStandardMaterial>;
-  material: THREE.MeshStandardMaterial;
+  mesh: THREE.Mesh<THREE.PlaneGeometry, OakMaterial>;
+  material: OakMaterial;
   setView(coverage: ViewCoverage): void;
   setTime(time: number): void;
   dispose(): void;
 }
-
-const SURFACE_NOISE = `
-${WORLD_NOISE}
-float landHash(vec2 p) {
-  return fract(sin(dot(p, vec2(127.1, 311.7)) + uLandSeed) * 43758.5453123);
-}
-float landNoise(vec2 p) {
-  vec2 i = floor(p);
-  vec2 f = fract(p);
-  f = f * f * (3.0 - 2.0 * f);
-  return mix(mix(landHash(i), landHash(i + vec2(1.0, 0.0)), f.x),
-    mix(landHash(i + vec2(0.0, 1.0)), landHash(i + vec2(1.0)), f.x), f.y);
-}
-`;
 
 export function makeContinuousSurface(opts: ContinuousSurfaceOptions): ContinuousSurface {
   const segments = opts.segments ?? 96;
   const geometry = new THREE.PlaneGeometry(2, 2, segments, segments);
   geometry.rotateX(-Math.PI / 2);
   const follow = opts.follow ?? true, anchor = opts.anchor ?? [0, 0];
-  const uniforms = {
-    uLandCenter: { value: new THREE.Vector2(anchor[0], anchor[1]) },
-    uLandRadius: { value: opts.radius ?? DEFAULT_ORBIT_LIMITS.maxDistance * 16 },
-    uLandSegments: { value: segments },
-    uLandSeed: { value: (opts.seed ?? 0) % 65536 },
-    uLandTime: { value: 0 },
-    uLandA: { value: new THREE.Color(opts.colorA) },
-    uLandB: { value: new THREE.Color(opts.colorB) },
+  const center = uniform(new THREE.Vector2(anchor[0], anchor[1])), radius = uniform(opts.radius ?? DEFAULT_ORBIT_LIMITS.maxDistance * 16);
+  const seed = uniform((opts.seed ?? 0) % 65536), time = uniform(0), height = opts.height ?? (() => float(0));
+  const scale = log(radius.add(1)), offset = (x: N<'float'>) => sign(x).mul(exp(abs(x).mul(scale)).sub(1));
+  const land = center.add(vec2(offset(positionGeometry.x), offset(positionGeometry.z))), reach = land.sub(center);
+  const spacing = scale.mul(max(abs(reach.x), abs(reach.y)).add(1)).mul(2).div(uniform(segments));
+  const step = max(0.15, spacing.mul(0.5)), dx = vec2(step, 0), dz = vec2(0, step);
+  const position = vec3(land.x, height(land, spacing), land.y);
+  const material = oakMaterial({ ...(opts.finish ?? { roughness: opts.roughness ?? 0.94, toonSteps: 0 }), color: 0xffffff, metalness: opts.metalness ?? 0, emissive: opts.emissive ?? 0, side: THREE.DoubleSide, name: `${opts.name}Material` });
+  setDeform(material, () => ({ position, normal: normalize(vec3(height(land.sub(dx), spacing).sub(height(land.add(dx), spacing)), step.mul(2), height(land.sub(dz), spacing).sub(height(land.add(dz), spacing)))) }));
+  const hash = (q: N<'vec2'>) => fract(sin(dot(q, vec2(127.1, 311.7)).add(seed)).mul(43758.5453123));
+  const noise = (q: N<'vec2'>) => {
+    const i = floor(q), s = fract(q), f = s.mul(s).mul(float(3).sub(s.mul(2)));
+    return mix(mix(hash(i), hash(i.add(vec2(1, 0))), f.x), mix(hash(i.add(vec2(0, 1))), hash(i.add(1)), f.x), f.y);
   };
-  const height = opts.height ?? 'return 0.0;';
-  const declarations = `
-uniform vec2 uLandCenter;
-uniform float uLandRadius;
-uniform float uLandSegments;
-uniform float uLandSeed;
-uniform float uLandTime;
-varying vec3 vLandPosition;
-float landSpacing = 0.0;
-${SURFACE_NOISE}
-float landHeight(vec2 p) {
-  ${height}
-}
-float landOffset(float p) {
-  return sign(p) * (exp(abs(p) * log(1.0 + uLandRadius)) - 1.0);
-}
-float landSpacingAt(vec2 offset) {
-  return log(1.0 + uLandRadius) * (max(abs(offset.x), abs(offset.y)) + 1.0) * 2.0 / uLandSegments;
-}
-`;
-  const material = new THREE.MeshStandardMaterial({
-    color: 0xffffff,
-    roughness: opts.roughness ?? 0.94,
-    metalness: opts.metalness ?? 0,
-    emissive: opts.emissive ?? 0,
-    side: THREE.DoubleSide,
-  });
-  material.name = `${opts.name}Material`;
-  material.customProgramCacheKey = () => `${opts.name}|${height}|${opts.detail ?? ''}`;
-  material.onBeforeCompile = (shader) => {
-    Object.assign(shader.uniforms, uniforms);
-    shader.vertexShader = shader.vertexShader
-      .replace('#include <common>', `#include <common>\n${declarations}`)
-      .replace('#include <beginnormal_vertex>', `
-vec2 landP = uLandCenter + vec2(landOffset(position.x), landOffset(position.z));
-landSpacing = landSpacingAt(landP - uLandCenter);
-vec2 sampleStep = vec2(max(0.15, landSpacing * 0.5), 0.0);
-vec3 objectNormal = normalize(vec3(
-  landHeight(landP - sampleStep.xy) - landHeight(landP + sampleStep.xy), 2.0 * sampleStep.x,
-  landHeight(landP - sampleStep.yx) - landHeight(landP + sampleStep.yx)));
-`)
-      .replace('#include <begin_vertex>', `
-vec3 transformed = vec3(landP.x, landHeight(landP), landP.y);
-vLandPosition = transformed;
-`);
-    shader.fragmentShader = shader.fragmentShader
-      .replace('#include <common>', `#include <common>
-uniform float uLandSeed;
-uniform float uLandTime;
-uniform vec3 uLandA;
-uniform vec3 uLandB;
-varying vec3 vLandPosition;
-${SURFACE_NOISE}
-`)
-      .replace('#include <color_fragment>', `#include <color_fragment>
-vec3 p = vLandPosition;
-float t = uLandTime;
-float landTone = 0.55 * landNoise(p.xz * 0.027) + 0.3 * landNoise(p.xz * 0.113) + 0.15 * landNoise(p.xz * 0.47);
-vec3 color = mix(uLandA, uLandB, landTone);
-${opts.detail ?? ''}
-diffuseColor.rgb *= color;
-`);
-  };
+  const rgb = (value: THREE.ColorRepresentation) => vec3(new THREE.Vector3().setFromColor(new THREE.Color(value)));
+  const p = varying(position), a = rgb(opts.colorA), b = rgb(opts.colorB);
+  const tone = mix(a, b, noise(p.xz.mul(0.027)).mul(0.55).add(noise(p.xz.mul(0.113)).mul(0.3)).add(noise(p.xz.mul(0.47)).mul(0.15)));
+  material.colorNode = opts.detail?.({ p, t: time, a, b, color: tone, noise }) ?? tone;
   const mesh = new THREE.Mesh(geometry, material);
   mesh.name = opts.name;
   mesh.frustumCulled = false;
@@ -230,14 +174,14 @@ diffuseColor.rgb *= color;
     material,
     setView(coverage) {
       if (!follow) return;
-      const spacing = Math.expm1(2 * Math.log1p(uniforms.uLandRadius.value) / segments);
-      uniforms.uLandCenter.value.set(
+      const spacing = Math.expm1(2 * Math.log1p(radius.value) / segments);
+      center.value.set(
         Math.round(coverage.x / spacing) * spacing,
         Math.round(coverage.z / spacing) * spacing,
       );
     },
-    setTime(time) {
-      uniforms.uLandTime.value = time;
+    setTime(t) {
+      time.value = t;
     },
     dispose() {
       geometry.dispose();
@@ -248,7 +192,6 @@ diffuseColor.rgb *= color;
 }
 
 export type SceneryBankOptions = TileBankOptions & {
-  depth?: THREE.Material;
   tileSize: number;
 };
 
@@ -256,13 +199,10 @@ export function makeSceneryBank(opts: SceneryBankOptions): {
   mesh: THREE.Group;
   setView(coverage: ViewCoverage): void;
   dispose(): void;
-  staticInstances: import('./instances').SpatialInstances[];
 } {
-  const oak = oakUniforms(opts.material);
   const bank = makeTileBank(opts);
   return {
     mesh: bank.mesh,
-    staticInstances: opts.castShadow && !oak?.flags.wind && !(opts.material instanceof THREE.ShaderMaterial) ? [bank.instances] : [],
     setView(coverage) {
       bank.setOrigin(Math.floor(coverage.x / opts.tileSize), Math.floor(coverage.z / opts.tileSize), Math.ceil(coverage.nearRadius / opts.tileSize) + 8);
     },

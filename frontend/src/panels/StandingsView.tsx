@@ -3,7 +3,7 @@ import { baselineId } from '../app';
 import type { Policy } from '../data/layout';
 import { deliveredRate, envLanes, runEnvs } from '../derive';
 import { formatPercent, formatRate } from '../format';
-import { recordedFamilies, configurationName } from '../data/envs';
+import { recordedEnvironments, configurationName } from '../data/envs';
 import { selectEnv, store } from '../store';
 import { POLICY_NAMES, POLICY_ORDER, POLICY_TOKENS } from './charts';
 
@@ -14,8 +14,8 @@ export function StandingsView() {
   const oak = runId === null ? null : recordings[runId] ?? null;
   const rows = useMemo(() => {
     if (oak === null || !catalog.length) return [];
-    const families = recordedFamilies(catalog, runEnvs(oak.meta));
-    const names = new Map(families.flatMap(family => family.configurations.map(env => [env.envId, configurationName(env, family)])));
+    const environments = recordedEnvironments(catalog, runEnvs(oak.meta));
+    const names = new Map(environments.flatMap(environment => environment.configurations.map(env => [env.envId, configurationName(env)])));
     const perEnv = (policy: Policy, env: string): number[] | null => {
       const id = baselineId(oak, policy, env);
       const rec = id === null ? undefined : recordings[id];

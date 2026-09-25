@@ -1,4 +1,4 @@
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
 import { CELL, cellToWorld, type CellFieldHandle, type GridSize, type Vec3Tuple } from './grid';
 
 export const TERRACE_DESCENT = 3.5;

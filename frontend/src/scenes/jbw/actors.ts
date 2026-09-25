@@ -1,36 +1,30 @@
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
+import { abs, diffuseColor, dot, float, length, mat3, materialEmissive, max, normalGeometry, normalView, positionGeometry, positionViewDirection, pow, select, sin, smoothstep, uniform, uv, varying, vec2, vec3, vec4 } from 'three/tsl';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import type { WorldBuilder } from '@kit/world';
 import { JBW_BANANA, JBW_ONION, JBW_JELLY, JBW_WALL, JBW_TREE, JBW_TRUFFLE, JBW_COLOR, jbwCollectible } from '@sim/envs/jbw';
 import { aspenTree, fieldstones } from '@kit/landscape';
+import { setDeform } from '@kit/materials';
 
-export interface ItemModel { geometry: THREE.BufferGeometry; material: THREE.Material; depth?: THREE.MeshDepthMaterial }
+export interface ItemModel { geometry: THREE.BufferGeometry; material: THREE.NodeMaterial }
+
+type N<T extends string> = THREE.Node<T>;
 
 export function itemModels(world: WorldBuilder): Map<number, ItemModel> {
-  const models = new Map<number, ItemModel>(), motion = { value: new THREE.Vector4() };
-  const animate = (material: THREE.Material) => {
-    const compile = material.onBeforeCompile;
-    material.onBeforeCompile = (shader, renderer) => {
-      compile.call(material, shader, renderer); shader.uniforms.uItemMotion = motion;
-      shader.vertexShader = shader.vertexShader.replace('#include <common>', `#include <common>
-uniform vec4 uItemMotion;
-mat3 itemRotation() { return mat3(vec3(uItemMotion.x, 0.0, -uItemMotion.y), vec3(0.0, 1.0, 0.0), vec3(uItemMotion.y, 0.0, uItemMotion.x)); }
-`).replace('#include <begin_vertex>', '#include <begin_vertex>\ntransformed = itemRotation() * transformed; transformed.y += dot(vec2(instanceMatrix[0].x, -instanceMatrix[0].z), uItemMotion.zw) * 0.16;')
-        .replace('#include <beginnormal_vertex>', '#include <beginnormal_vertex>\nobjectNormal = itemRotation() * objectNormal;');
-    };
-  };
+  const models = new Map<number, ItemModel>(), motion = uniform(new THREE.Vector4());
+  const rotation = mat3(vec3(motion.x, 0, motion.y.negate()), vec3(0, 1, 0), vec3(motion.y, 0, motion.x));
+  const animate = (material: THREE.NodeMaterial) => setDeform(material, (matrix) => {
+    const axis = matrix ? matrix.mul(vec4(1, 0, 0, 0)) : vec4(1, 0, 0, 0);
+    return { position: rotation.mul(positionGeometry).add(vec3(0, dot(vec2(axis.x, axis.z.negate()), motion.zw).mul(0.16), 0)), normal: rotation.mul(normalGeometry) };
+  });
   world.time({ setTime(time) { motion.value.set(Math.cos(time * 0.48), Math.sin(time * 0.48), Math.sin(time * 1.6), Math.cos(time * 1.6)); } });
-  const add = (kind: number, geometry: THREE.BufferGeometry, material: THREE.MeshStandardMaterial) => {
+  const add = (kind: number, geometry: THREE.BufferGeometry, material: THREE.MeshStandardNodeMaterial) => {
     world.own(geometry); world.own(material);
     if (jbwCollectible(kind)) {
       geometry.scale(2.1, 2.1, 2.1).translate(0, 1.05, 0);
       material.emissive.copy(material.color); material.emissiveIntensity = 0.16 / (material.color.r * 0.2126 + material.color.g * 0.7152 + material.color.b * 0.0722);
-      material.onBeforeCompile = shader => {
-        shader.fragmentShader = shader.fragmentShader.replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
-float edgeGlow = pow(1.0 - max(dot(normal, normalize(vViewPosition)), 0.0), 3.0);
-totalEmissiveRadiance += diffuseColor.rgb / max(dot(diffuseColor.rgb, vec3(0.2126, 0.7152, 0.0722)), 0.001) * edgeGlow * 0.9;
-`);
-      };
+      const edgeGlow = pow(max(dot(normalView, positionViewDirection), 0).oneMinus(), 3);
+      material.emissiveNode = materialEmissive.add(diffuseColor.rgb.div(max(dot(diffuseColor.rgb, vec3(0.2126, 0.7152, 0.0722)), 0.001)).mul(edgeGlow).mul(0.9));
       const radius = kind === JBW_TRUFFLE ? 1.7 : 0.95;
       const ring = world.own(new THREE.PlaneGeometry(radius * 2, radius * 2).rotateX(-Math.PI / 2).translate(0, 0.035, 0));
       const rgba = new Float32Array(ring.getAttribute('position').count * 4);
@@ -43,31 +37,29 @@ totalEmissiveRadiance += diffuseColor.rgb / max(dot(diffuseColor.rgb, vec3(0.212
         plume.setAttribute('color', new THREE.BufferAttribute(color, 4));
         glow = world.own(mergeGeometries([ring, plume])); plume.dispose();
       }
-      const glowMaterial = world.own(new THREE.MeshBasicMaterial({ color: kind === JBW_TRUFFLE ? 0xffd394 : material.color, vertexColors: true, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide }));
-      glowMaterial.customProgramCacheKey = () => `scent-source-${kind}`;
-      glowMaterial.onBeforeCompile = shader => {
-        shader.vertexShader = shader.vertexShader.replace('#include <common>', '#include <common>\nvarying vec2 vGlowUV;').replace('#include <begin_vertex>', '#include <begin_vertex>\nvGlowUV = uv;');
-        shader.fragmentShader = shader.fragmentShader.replace('#include <common>', '#include <common>\nvarying vec2 vGlowUV;').replace('#include <color_fragment>', `#include <color_fragment>\n${kind === JBW_TRUFFLE ? 'if (vPlumeHeight < 0.05)' : ''} { float radius = length(vGlowUV * 2.0 - 1.0); if (radius >= 1.0) discard; diffuseColor.a *= (1.0 - radius) * (1.0 - radius); }`);
-        if (kind !== JBW_TRUFFLE) return;
-        shader.uniforms.uItemMotion = motion;
-        shader.vertexShader = shader.vertexShader.replace('#include <common>', '#include <common>\nuniform vec4 uItemMotion; varying vec3 vPlumeNormal, vPlumeView; varying float vPlumeHeight;')
-          .replace('#include <begin_vertex>', '#include <begin_vertex>\nvPlumeHeight = position.y; transformed.xz += sin(vec2(position.y * 1.7, position.y * 1.3) + uItemMotion.zw) * position.y * 0.045;')
-          .replace('#include <project_vertex>', '#include <project_vertex>\nvPlumeNormal = normalMatrix * mat3(instanceMatrix) * normal; vPlumeView = -mvPosition.xyz;');
-        shader.fragmentShader = shader.fragmentShader.replace('#include <common>', '#include <common>\nvarying vec3 vPlumeNormal, vPlumeView; varying float vPlumeHeight;')
-          .replace('#include <color_fragment>', '#include <color_fragment>\nif (vPlumeHeight > 0.05) diffuseColor.a *= smoothstep(0.0, 0.7, abs(dot(normalize(vPlumeNormal), normalize(vPlumeView))));');
-      };
+      const glowMaterial = world.own(new THREE.MeshBasicNodeMaterial({ color: kind === JBW_TRUFFLE ? 0xffd394 : material.color, vertexColors: true, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide }));
+      const disc: N<'float'> = length(uv().mul(2).sub(1));
+      const ringFade = disc.oneMinus().mul(disc.oneMinus());
+      if (kind === JBW_TRUFFLE) {
+        const height = varying(positionGeometry.y);
+        setDeform(glowMaterial, () => ({ position: positionGeometry.add(vec3(sin(vec2(positionGeometry.y.mul(1.7), positionGeometry.y.mul(1.3)).add(motion.zw)).mul(positionGeometry.y).mul(0.045), 0).xzy) }));
+        glowMaterial.maskNode = height.greaterThanEqual(0.05).or(disc.lessThan(1));
+        glowMaterial.opacityNode = select(height.lessThan(0.05), ringFade, select(height.greaterThan(0.05), smoothstep(0, 0.7, abs(dot(normalView, positionViewDirection))), float(1)));
+      } else {
+        glowMaterial.maskNode = disc.lessThan(1);
+        glowMaterial.opacityNode = ringFade;
+      }
       models.set(kind + 8, { geometry: glow, material: glowMaterial });
+      animate(material);
     }
-    const depth = world.own(new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking }));
-    if (jbwCollectible(kind)) { animate(material); animate(depth); }
-    models.set(kind, { geometry, material, depth });
+    models.set(kind, { geometry, material });
   };
   const surface = (geometry: THREE.BufferGeometry, tint: (x: number, y: number, z: number) => THREE.Color) => {
     const p = geometry.getAttribute('position'), colors = new Float32Array(p.count * 3);
     for (let i = 0; i < p.count; i++) tint(p.getX(i), p.getY(i), p.getZ(i)).toArray(colors, i * 3);
     geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
   };
-  const fruit = (kind: number, roughness: number) => new THREE.MeshStandardMaterial({ color: new THREE.Color(...JBW_COLOR[kind]!).convertSRGBToLinear(), roughness, vertexColors: true });
+  const fruit = (kind: number, roughness: number) => new THREE.MeshStandardNodeMaterial({ color: new THREE.Color(...JBW_COLOR[kind]!).convertSRGBToLinear(), roughness, vertexColors: true });
   const banana = new THREE.LatheGeometry(Array.from({ length: 17 }, (_, i) => {
     const t = i / 16; return new THREE.Vector2(0.075 * Math.pow(Math.sin(t * Math.PI), 0.4) + 0.005, t * 0.72);
   }), 12);
@@ -91,7 +83,7 @@ totalEmissiveRadiance += diffuseColor.rgb / max(dot(diffuseColor.rgb, vec3(0.212
     jp.setXYZ(i, x * 0.38, y * 0.21 + 0.23 + 0.055 * x * x, z * 0.24 + 0.095 * x * x);
   }
   jelly.computeVertexNormals();
-  add(JBW_JELLY, jelly, new THREE.MeshPhysicalMaterial({ color: new THREE.Color(...JBW_COLOR[JBW_JELLY]!).convertSRGBToLinear(), roughness: 0.24, clearcoat: 0.55, clearcoatRoughness: 0.26, sheen: 0.25, sheenColor: 0xffb8a4 }));
+  add(JBW_JELLY, jelly, new THREE.MeshPhysicalNodeMaterial({ color: new THREE.Color(...JBW_COLOR[JBW_JELLY]!).convertSRGBToLinear(), roughness: 0.24, clearcoat: 0.55, clearcoatRoughness: 0.26, sheen: 0.25, sheenColor: 0xffb8a4 }));
   const stone = fieldstones();
   const wall = (base: THREE.BufferGeometry) => {
     const pieces: THREE.BufferGeometry[] = [], centers: THREE.Vector3[] = [];
@@ -117,7 +109,7 @@ totalEmissiveRadiance += diffuseColor.rgb / max(dot(diffuseColor.rgb, vec3(0.212
     return geometry;
   };
   add(JBW_WALL, wall(stone.geometry), stone.material);
-  const tree = aspenTree(world, []);
+  const tree = aspenTree();
   add(JBW_TREE, tree.geometry, tree.material);
   const truffle = new THREE.SphereGeometry(0.22, 24, 16), tp = truffle.getAttribute('position');
   for (let i = 0; i < tp.count; i++) {

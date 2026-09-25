@@ -1,4 +1,4 @@
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
 import { MeshoptSimplifier } from 'meshoptimizer/simplifier';
 import { celebrationPulse } from '@kit/celebrate';
 import { buildComposer, GLASS_RECTS, type ComposerHandle, type GlassRect } from '@kit/post';
@@ -7,7 +7,7 @@ import { TOKENS } from '@kit/tokens';
 import type { FrameState, FrameUpdate, LegendSpec, SceneContext, SceneModule, SceneSize } from '@kit/types';
 import { EMPTY_EVENT_STREAM, type SimEvent } from '@sim/types';
 import type { EnvDescriptor } from '../data/envs';
-import { SCENES } from '../scenes/table';
+import { sceneOf } from '../scenes/table';
 import { EMPTY_STAGE, patch, setStage } from '../store';
 import { openTape, type Tape } from './tape';
 
@@ -71,9 +71,7 @@ function sample(source: Tape, controlHz: number, position: number, a: Float32Arr
 
 const radii = new WeakMap<Element, number>();
 
-function glassRects(container: HTMLElement): GlassRect[] {
-  const dpr = window.devicePixelRatio || 1;
-  const height = container.clientHeight;
+function glassRects(dpr: number): GlassRect[] {
   const out: GlassRect[] = [];
   for (const el of document.querySelectorAll('.glass')) {
     if (out.length === GLASS_RECTS) break;
@@ -81,7 +79,7 @@ function glassRects(container: HTMLElement): GlassRect[] {
     if (rect.width === 0 || rect.height === 0) continue;
     let radius = radii.get(el);
     if (radius === undefined) radii.set(el, (radius = parseFloat(getComputedStyle(el).borderTopLeftRadius) || 0));
-    out.push({ x: rect.left * dpr, y: (height - rect.bottom) * dpr, width: rect.width * dpr, height: rect.height * dpr, radius: radius * dpr });
+    out.push({ x: rect.left * dpr, y: rect.top * dpr, width: rect.width * dpr, height: rect.height * dpr, radius: radius * dpr });
   }
   return out;
 }
@@ -90,10 +88,11 @@ export function mountStage(container: HTMLElement): Stage {
   const canvas = document.createElement('canvas');
   canvas.className = 'theater-canvas';
   container.appendChild(canvas);
-  const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, alpha: false, powerPreference: 'high-performance', preserveDrawingBuffer: false });
+  const renderer = new THREE.WebGPURenderer({ canvas, antialias: false, alpha: false, powerPreference: 'high-performance' });
   renderer.setClearColor(0x05070c, 1);
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFShadowMap;
+  const ready = renderer.init().then(() => { if (!('isWebGPUBackend' in renderer.backend)) throw new Error('WebGPU is unavailable in this browser'); });
 
   let target: Target | null = null;
   let recording: Tape | null = null;
@@ -132,7 +131,6 @@ export function mountStage(container: HTMLElement): Stage {
     renderer.setPixelRatio(size.dpr);
     renderer.setSize(size.width, size.height, false);
     scene?.resize(size);
-    post?.resize(size.width, size.height, size.dpr);
   };
   const observer = new ResizeObserver(() => { sizeDirty = true; });
   observer.observe(container);
@@ -166,23 +164,26 @@ export function mountStage(container: HTMLElement): Stage {
     setStage({ status: 'error', note: broken });
   };
 
-  const keyOf = (next: Target): string => `${next.environment.envId}/${next.seed}`;
+  const keyOf = (next: Target): string => `${next.runId}/${next.lane}`;
   const buildScene = async (key: string, source: Tape): Promise<void> => {
     if (source.geometry === null || buildingKey === key || sceneKey === key) return;
-    const gen = ++generation, environment = source.environment, spec = SCENES[environment.family]!;
+    const gen = ++generation, environment = source.environment, spec = sceneOf(environment);
     buildingKey = key;
     scene?.dispose(); post?.dispose(); scene = null; post = null; sceneKey = null;
     let module: SceneModule | null = null;
     try {
-      const [loaded] = await Promise.all([spec.load(), MeshoptSimplifier.ready]);
+      const [loaded] = await Promise.all([spec.load(), MeshoptSimplifier.ready, ready]);
       if (destroyed || gen !== generation) return;
       module = loaded.default();
       const context: SceneContext = { renderer, canvas, size: sizeOf(), tokens: TOKENS, envId: environment.envId, environment, geometry: source.geometry, seed: source.seed, time: () => seconds };
       await module.init(context);
       if (destroyed || gen !== generation || target === null || keyOf(target) !== key) { module.dispose(); return; }
+      const composer = buildComposer(renderer, module.scene, module.camera, module.post);
+      applySize();
+      await composer.compile();
+      if (destroyed || gen !== generation || target === null || keyOf(target) !== key) { composer.dispose(); module.dispose(); return; }
       scene = module;
-      renderer.compile(module.scene, module.camera);
-      post = buildComposer(renderer, module.scene, module.camera, module.post, sizeOf());
+      post = composer;
       sceneKey = key; buildingKey = null;
       module.setDebug(debug); applySize(); resetCursor(); publish();
     } catch (error) {
@@ -213,7 +214,7 @@ export function mountStage(container: HTMLElement): Stage {
     }
     if (!source.hasFrame(position)) {
       awaitingFrame = true;
-      post.render(0);
+      post.render();
       frame.requestedStep = Math.floor(position);
       for (const listener of frameListeners) listener(frame);
       return;
@@ -244,8 +245,8 @@ export function mountStage(container: HTMLElement): Stage {
     hasPrevious = true;
     scene.update(update);
     post.setBloomPulse(celebrationPulse(scene.scene).bloom);
-    if (--glassCountdown <= 0) { glassCountdown = GLASS_EVERY_FRAMES; post.setGlass(glassRects(container)); }
-    post.render(dt);
+    if (--glassCountdown <= 0) { glassCountdown = GLASS_EVERY_FRAMES; post.setGlass(glassRects(renderer.getPixelRatio())); }
+    post.render();
     frame.step = state.step;
     frame.simTime = state.simTime;
     frame.requestedStep = Math.floor(position);
@@ -261,7 +262,7 @@ export function mountStage(container: HTMLElement): Stage {
       if (recording !== null) { recording.onChange = () => {}; recording.drop(); recording = null; }
       if (next === null || key !== sceneKey && key !== buildingKey) {
         generation++; buildingKey = null; sceneKey = null;
-        scene?.dispose(); post?.dispose(); scene = null; post = null; renderer.clear();
+        scene?.dispose(); post?.dispose(); scene = null; post = null;
       }
       target = next; broken = null; resetCursor(); lastWall = 0;
       if (!sameEnvironment) { position = 0; seconds = 0; frame.step = -1; }
@@ -301,7 +302,6 @@ export function mountStage(container: HTMLElement): Stage {
       scene?.dispose();
       post?.dispose();
       renderer.dispose();
-      renderer.forceContextLoss();
       canvas.remove();
     },
   };

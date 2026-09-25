@@ -57,6 +57,7 @@ export interface EnvFrame {
   step: number;
   done: number;
   words: Uint32Array;
+  view: Uint32Array;
   observations: Float32Array;
   actions: Float32Array;
   reward: number;

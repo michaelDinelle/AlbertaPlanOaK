@@ -2,7 +2,7 @@ import { blockOf, frameOf, type Block } from '@sim/events';
 import { emptyStream, NO_EVENTS, SIM_EVENT_TYPES, type EnvDecoder, type EnvFrame, type EnvGeometry, type EventStream, type SimEvent } from '@sim/types';
 import type { EnvDescriptor } from '../data/envs';
 import type { TapeHeader } from '../data/replay';
-import { SCENES } from '../scenes/table';
+import { sceneOf } from '../scenes/table';
 import type { Tick } from './recording';
 import type { TapeMessage, TapeRequest } from './tape.worker';
 
@@ -28,9 +28,7 @@ export interface Tape {
 }
 
 export function openTape(runId: string, lane: number, environment: EnvDescriptor, seed: number, horizon: number, hash: bigint): Tape {
-  const row = SCENES[environment.family];
-  if (!row) throw new Error(`No scene is registered for the ${environment.family} family`);
-  const decoder = row.decoder;
+  const decoder = sceneOf(environment).decoder;
   const worker = new Worker('/workers/tape.worker.js', { type: 'module' });
   const blocks = new Map<number, Block>();
   const events = emptyStream();
@@ -75,7 +73,8 @@ export function openTape(runId: string, lane: number, environment: EnvDescriptor
         const type = SIM_EVENT_TYPES[block.kinds[at]!]!;
         if (type === 'collection') out.push({ type, item: (['banana', 'onion', 'jellyBean', 'truffle'] as const)[block.values[at]!]!, reward: frameAt(step).reward as -1 | 0 | 1, x: block.cellX[at]!, y: block.cellY[at]! });
         else if (type === 'cue') out.push({ type, value: block.values[at]! });
-        else if (type === 'key' || type === 'door') throw new Error('Unexpected replay event');
+        else if (type === 'key') out.push({ type, index: block.values[at]! });
+        else if (type === 'door') out.push({ type, index: block.values[at]! & 0xffff, open: block.values[at]! >>> 16 !== 0 });
         else out.push({ type });
       }
       return out;

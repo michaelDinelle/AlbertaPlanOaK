@@ -7,11 +7,13 @@ import type { GridSize } from '@kit/grid';
 import { clamp01, envelope } from '@kit/mix';
 import type { OrbitRigOptions } from '@kit/rigs';
 import { StageScene, type Stage } from '@kit/stage';
-import type { FrameUpdate, LegendSpec, SceneContext, SceneFactory, SceneSize, ScenePost } from '@kit/types';
+import type { FrameUpdate, LegendSpec, SceneContext, SceneFactory, SceneModule, SceneSize, ScenePost } from '@kit/types';
 import { DEEPSEA_COL } from '@sim/envs/deepsea';
+import { configurationName } from '../../data/envs';
 import { formatSigned } from '../../format';
+import { TheAbyssScene } from './abyss/index';
 import { Wisp } from '@kit/wisp';
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
 import type { GridCell, GridGeometry } from '@sim/types';
 import { buildBubble, buildClam, type BubbleHandle, type ClamHandle } from './actors';
 import {
@@ -343,4 +345,22 @@ export function gape(time: number, dive: DiveCell, grid: GridSize): number {
   return clamp01(GAPE_BASE + GAPE_BREATH * breath + GAPE_PROXIMITY * depth * near);
 }
 
-export default ((() => new SunlitDescentScene()) satisfies SceneFactory);
+class DeepSeaScene implements SceneModule {
+  private look: SceneModule = new SunlitDescentScene();
+  get scene() { return this.look.scene; }
+  get camera() { return this.look.camera; }
+  get post() { return this.look.post; }
+  get controlHz() { return this.look.controlHz; }
+  get legend() { return this.look.legend; }
+  init(ctx: SceneContext): Promise<void> {
+    if (configurationName(ctx.environment) === 'DeepSea-16') this.look = new TheAbyssScene();
+    return this.look.init(ctx);
+  }
+  update(frame: FrameUpdate): void { this.look.update(frame); }
+  resize(size: SceneSize): void { this.look.resize(size); }
+  resetCamera(): void { this.look.resetCamera(); }
+  setDebug(on: boolean): void { this.look.setDebug(on); }
+  dispose(): void { this.look.dispose(); }
+}
+
+export default ((() => new DeepSeaScene()) satisfies SceneFactory);

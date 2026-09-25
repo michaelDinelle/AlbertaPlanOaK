@@ -204,3 +204,16 @@ void garnet_oracle(uint32_t instance, uint32_t seed, uint32_t step, const uint32
     if (extra[GARNET_GREEDY_EPOCH] != m.epoch + 1u) { garnet_solve(k, m); extra[GARNET_GREEDY_EPOCH] = m.epoch + 1u; }
     ctrl[0] = (float)m.greedy[words[0]];
 }
+
+uint32_t garnet_view(uint32_t instance, const uint32_t *words, const uint32_t *extra, const float *shared, uint32_t *out) {
+    (void)words; (void)shared;
+    const garnetKnobs *k = &GARNET_KNOBS[instance];
+    uint32_t pairs = k->states * k->actions, edges = pairs * k->branching, count = 1u + 2u * edges + pairs;
+    if (!out) return count;
+    garnetModel m = garnet_model(k, (uint32_t *)extra);
+    out[0] = m.epoch;
+    __builtin_memcpy(out + 1u, m.next, edges * sizeof(uint32_t));
+    __builtin_memcpy(out + 1u + edges, m.prob, edges * sizeof(float));
+    __builtin_memcpy(out + 1u + 2u * edges, m.reward, pairs * sizeof(float));
+    return count;
+}

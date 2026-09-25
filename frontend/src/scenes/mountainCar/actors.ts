@@ -10,7 +10,7 @@ import { makeAmbientParticles, type AmbientParticlesHandle } from '@kit/particle
 import { mergeColoredParts, type ColoredPart } from '@kit/parts';
 import { radialSprite } from '@kit/textures';
 import type { Palette } from '@kit/tokens';
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
 import { MC_MAX_SPEED } from '@sim/envs/mountainCar';
 
 const WHEEL_R = 0.034;
@@ -38,7 +38,6 @@ export interface CartHandle {
   setTime(t: number): void;
   setDustKick(env01: number): void;
   setLanternGain(gain: number): void;
-  setPixelRatio(dpr: number): void;
   dispose(): void;
 }
 
@@ -310,10 +309,6 @@ export function buildCart(opts: CartOptions): CartHandle {
 
     setLanternGain(gain) {
       setEmissiveIntensity(flameMaterial, LANTERN_BASE_HDR * (gain > 0 ? gain : 0));
-    },
-
-    setPixelRatio(dpr) {
-      dust.setPixelRatio(dpr);
     },
 
     dispose() {

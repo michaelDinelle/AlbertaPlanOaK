@@ -1,4 +1,6 @@
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
+import { instancedMesh } from '@kit/instances';
+import { abs, float, length, max, min, mix, select, sin, smoothstep, vec2, vec3 } from 'three/tsl';
 import type { LightRig } from '@kit/lighting';
 import { oakMaterial, oakUniforms, setMaterialsTime, type OakMaterial } from '@kit/materials';
 import { blendTokens, smoothstep01, TOKEN_WHITE } from '@kit/mix';
@@ -13,7 +15,7 @@ import { streamFor } from '@kit/rng';
 import type { SkyHandle } from '@kit/sky';
 import { makeTerrain } from '@kit/terrain';
 import { mountainStyle } from '@kit/mountains';
-import { makeHeightField } from '@kit/heightfield';
+import { makeHeightField, worldNoiseAt } from '@kit/heightfield';
 import { extendVegetation, makeLandscape, makeSceneTerrain } from '@kit/landscape';
 import { iceMaterial } from '@kit/props/ice';
 import type { ViewCoverage } from '@kit/view';
@@ -84,7 +86,7 @@ export interface WorldHandle extends WorldCore {
 
 export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   const palette: Palette = ctx.tokens.palettes.dusk;
-  const accent = ctx.tokens.accents['mountainCar'] ?? ctx.tokens.celebrationGold;
+  const accent = ctx.tokens.accents['MountainCar'] ?? ctx.tokens.celebrationGold;
   const heightAt = heightResolver(ctx.geometry);
   const slip = parameter(ctx.environment, 'slip') > 0;
 
@@ -115,23 +117,21 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   const ridge = makeRidgeHeight(heightAt, ridgeField.heightAt);
   const terrain = makeSceneTerrain({ follow: false,
     name: 'alpineRidge', seed: ctx.seed, colorA: cValley, colorB: cMeadow, segments: 160,
-    height: `
-float base = sin(p.x * 3.0) * 0.45 + 0.55;
-float az = abs(p.y);
-float lateral = smoothstep(0.34, 0.94, az);
-float outside = max(0.0, max(-1.2 - p.x, p.x - 0.6));
-float w = max(lateral, smoothstep(0.0, 0.45, outside));
-float behind = -p.y;
-float swell = behind <= 0.0 ? behind * 0.46 : behind * 0.115 + behind * behind * 0.022;
-float amp = behind <= 0.0 ? 0.05 : 0.08 + 0.08 * min(2.2, az);
-float ridge;
-{ ${ridgeField.glsl.replace('return h;', 'ridge = h;')} }
-float local = base + w * (swell + 2.0 * amp * ridge);
-float mountain;
-{ ${farField.glsl.replace('return h;', 'mountain = h;')} }
-return mix(local, mountain, smoothstep(5.0, 14.0, length(p)));
-`,
-    detail: `float ragged = worldNoise(p.xz * 1.35 + vec2(3.1, 7.7), 64.0, ${ctx.seed >>> 0}u) - 0.5; float snow = smoothstep(0.65, 0.87, p.y + ragged * 0.16); color = mix(uLandA, uLandB, smoothstep(0.08, 0.54, p.y)); color = mix(color, vec3(${cSnow.r}, ${cSnow.g}, ${cSnow.b}), snow);`,
+    height: (p, spacing) => {
+      const base = sin(p.x.mul(3)).mul(0.45).add(0.55);
+      const az = abs(p.y);
+      const w = max(smoothstep(0.34, 0.94, az), smoothstep(0, 0.45, max(0, max(float(-1.2).sub(p.x), p.x.sub(0.6)))));
+      const behind = p.y.negate();
+      const swell = select(behind.lessThanEqual(0), behind.mul(0.46), behind.mul(0.115).add(behind.mul(behind).mul(0.022)));
+      const amp = select(behind.lessThanEqual(0), float(0.05), min(2.2, az).mul(0.08).add(0.08));
+      const local = base.add(w.mul(swell.add(amp.mul(2).mul(ridgeField.height(p, spacing)))));
+      return mix(local, farField.height(p, spacing), smoothstep(5, 14, length(p)));
+    },
+    detail: (s) => {
+      const ragged = worldNoiseAt(s.p.xz.mul(1.35).add(vec2(3.1, 7.7)), 64, ctx.seed).sub(0.5);
+      const snow = smoothstep(0.65, 0.87, s.p.y.add(ragged.mul(0.16)));
+      return mix(mix(s.a, s.b, smoothstep(0.08, 0.54, s.p.y)), vec3(cSnow.r, cSnow.g, cSnow.b), snow);
+    },
   }, (x, z) => {
     const t = smoothstep01((Math.hypot(x, z) - 5) / 9);
     return ridge(x, z) * (1 - t) + farField.heightAt(x, z) * t;
@@ -338,12 +338,12 @@ return mix(local, mountain, smoothstep(5.0, 14.0, length(p)));
     ctx.tokens.uiCyan,
     TOKEN_WHITE,
     accent,
-    ctx.tokens.accents['hall'] ?? ctx.tokens.celebrationGold,
+    ctx.tokens.accents['FourRooms'] ?? ctx.tokens.celebrationGold,
     ctx.tokens.celebrationGold,
   ];
   const PER_STRING = 11;
   const FLAG_COUNT = PER_STRING * guys.length;
-  const flags = new THREE.InstancedMesh(flagGeometry, flagMaterial, FLAG_COUNT);
+  const flags = instancedMesh(flagGeometry, flagMaterial, FLAG_COUNT);
   flags.name = 'prayerFlags';
   flags.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(FLAG_COUNT * 3), 3);
   {
@@ -438,7 +438,7 @@ return mix(local, mountain, smoothstep(5.0, 14.0, length(p)));
     name: 'meadowPollen',
   });
   w.add(pollen.points);
-  w.size(w.time(w.own(pollen)));
+  w.time(w.own(pollen));
 
   const glitter: AmbientParticlesHandle = makeAmbientParticles({
     preset: 'snow',
@@ -454,7 +454,7 @@ return mix(local, mountain, smoothstep(5.0, 14.0, length(p)));
     name: 'snowGlitter',
   });
   w.add(glitter.points);
-  w.size(w.time(w.own(glitter)));
+  w.time(w.own(glitter));
 
   const eagle = new THREE.Group();
   eagle.name = 'eagle';

@@ -1,33 +1,31 @@
-import * as THREE from 'three';
-import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
-import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
-import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
-import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
-import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
-import type { FogRecipe, ScenePost, SceneSize } from './types';
+import * as THREE from 'three/webgpu';
+import { Break, Fn, If, Loop, abs, convertToTexture, distance, dot, float, length, max, min, mix, pass, renderOutput, screenSize, smoothstep, uniform, uniformArray, uv, vec2, vec3, vec4 } from 'three/tsl';
+import { bloom } from 'three/addons/tsl/display/BloomNode.js';
+import type { FogRecipe, ScenePost } from './types';
 import { TOKENS } from './tokens';
 import { prepareInstances } from './instances';
-export const MSAA_SAMPLES = 2;
+export const MSAA_SAMPLES = 4;
 
 const BLOOM_THRESHOLD = 0.85;
+const BLOOM_SCALE = 3;
 
-function resolveFog(recipe: FogRecipe): number {
+function resolveFog(recipe: FogRecipe): THREE.Color {
   const color = new THREE.Color(TOKENS.palettes[recipe.from[0]][recipe.from[1]]);
   for (const [token, k] of recipe.blend ?? []) {
     color.lerp(new THREE.Color(TOKENS.palettes[token[0]][token[1]]), k);
   }
-  return color.getHex();
+  return color;
 }
 
 export interface ComposerHandle {
   setBloomPulse(t01: number): void;
-  render(deltaTime: number): void;
+  render(): void;
   setGlass(rects: readonly GlassRect[]): void;
-  resize(width: number, height: number, dpr: number): void;
+  compile(): Promise<void>;
   dispose(): void;
 }
 
-export const BLOOM_RESOLUTION_SCALE = 0.25;
+export const BLOOM_RESOLUTION_SCALE = 0.125;
 
 export function pulsedBloomStrength(base: number, t01: number): number {
   const t = t01 < 0 ? 0 : t01 > 1 ? 1 : t01;
@@ -44,173 +42,111 @@ export interface GlassRect {
 
 export const GLASS_RECTS = 16;
 
-const GLASS_SHADER = {
-  uniforms: {
-    tDiffuse: { value: null as THREE.Texture | null },
-    uResolution: { value: new THREE.Vector2() },
-    uCount: { value: 0 },
-    uRects: { value: Array.from({ length: GLASS_RECTS }, () => new THREE.Vector4()) },
-    uRadii: { value: new Float32Array(GLASS_RECTS) },
-  },
-  vertexShader: `
-varying vec2 vUv;
-void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
-  fragmentShader: `
-uniform sampler2D tDiffuse;
-uniform vec2 uResolution;
-uniform int uCount;
-uniform vec4 uRects[${GLASS_RECTS}];
-uniform float uRadii[${GLASS_RECTS}];
-varying vec2 vUv;
-const float SCALE = -112.0;
-const float CHROMA = 6.0;
-const float BORDER = 0.07;
-const float MAP_BLUR = 12.0;
-const float BLUR = 3.0;
-const float SATURATE = 1.5;
-float rounded(vec2 p, vec4 rect, float inset, float radius) {
-  vec2 half_ = rect.zw * 0.5;
-  float r = max(radius - inset, 2.0);
-  vec2 q = abs(p - rect.xy - half_) - (half_ - inset - r);
-  return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
-}
-float coverage(vec2 p, vec4 rect, float radius) {
-  float sd = rounded(p, rect, BORDER * min(rect.z, rect.w), radius);
-  return 0.93 * (1.0 - smoothstep(-MAP_BLUR, MAP_BLUR, sd));
-}
-vec3 blurred(vec2 px) {
-  vec2 t = 1.0 / uResolution;
-  vec2 uv = px * t;
-  return (texture2D(tDiffuse, uv + vec2(BLUR, 0.0) * t).rgb + texture2D(tDiffuse, uv - vec2(BLUR, 0.0) * t).rgb
-        + texture2D(tDiffuse, uv + vec2(0.0, BLUR) * t).rgb + texture2D(tDiffuse, uv - vec2(0.0, BLUR) * t).rgb) * 0.25;
-}
-void main() {
-  vec2 px = vUv * uResolution;
-  vec4 rect = vec4(0.0);
-  float radius = 0.0;
-  float best = 1e30;
-  for (int i = 0; i < ${GLASS_RECTS}; i++) {
-    if (i >= uCount) break;
-    vec4 r = uRects[i];
-    if (rounded(px, r, 0.0, uRadii[i]) > 0.0) continue;
-    float area = r.z * r.w;
-    if (area < best) { best = area; rect = r; radius = uRadii[i]; }
-  }
-  if (best == 1e30) { gl_FragColor = texture2D(tDiffuse, vUv); return; }
-  vec2 centred = (px - rect.xy) / rect.zw - 0.5;
-  float open = 1.0 - coverage(px, rect, radius);
-  vec3 col;
-  col.r = blurred(px + SCALE * open * centred).r;
-  col.g = blurred(px + (SCALE + CHROMA) * open * centred).g;
-  col.b = blurred(px + (SCALE + 2.0 * CHROMA) * open * centred).b;
-  float luma = dot(col, vec3(0.2126, 0.7152, 0.0722));
-  gl_FragColor = vec4(mix(vec3(luma), col, SATURATE), 1.0);
-}`,
+const SCALE = -112;
+const CHROMA = 6;
+const BORDER = 0.07;
+const MAP_BLUR = 12;
+const BLUR = 3;
+const SATURATE = 1.5;
+
+type N<T extends string> = THREE.Node<T>;
+
+const rounded = (p: N<'vec2'>, rect: N<'vec4'>, inset: N<'float'> | number, radius: N<'float'>): N<'float'> => {
+  const half = rect.zw.mul(0.5);
+  const r = max(radius.sub(inset), 2);
+  const q = abs(p.sub(rect.xy).sub(half)).sub(half.sub(inset).sub(r));
+  return length(max(q, 0)).add(min(max(q.x, q.y), 0)).sub(r);
 };
 
 export function buildComposer(
-  renderer: THREE.WebGLRenderer,
+  renderer: THREE.WebGPURenderer,
   scene: THREE.Scene,
   camera: THREE.Camera,
   post: ScenePost,
-  size: SceneSize,
 ): ComposerHandle {
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = TOKENS.exposure;
 
-  const width = Math.max(1, Math.floor(size.width));
-  const height = Math.max(1, Math.floor(size.height));
-  const dpr = size.dpr > 0 ? size.dpr : 1;
-  const bloomStrength = post.bloom;
-
-  const target = new THREE.WebGLRenderTarget(width, height, {
-    type: THREE.HalfFloatType,
-    samples: MSAA_SAMPLES,
-    depthBuffer: true,
-    stencilBuffer: false,
-  });
-  target.texture.name = 'oakComposer.rt';
-
-  const composer = new EffectComposer(renderer, target);
-  composer.setPixelRatio(dpr);
-  composer.setSize(width, height);
-
-  const renderPass = new RenderPass(scene, camera);
+  const scenePass = pass(scene, camera, { samples: MSAA_SAMPLES });
   const beforeRender = scene.onBeforeRender;
-  scene.onBeforeRender = (...args) => { beforeRender.apply(scene, args); prepareInstances(scene, renderer, args[2]); };
-  composer.addPass(renderPass);
+  scene.onBeforeRender = (...args) => { beforeRender.apply(scene, args); prepareInstances(scene, args[2], args[3] as unknown as THREE.RenderTarget | null); };
+  const color = scenePass.getTextureNode('output');
+  const glow = bloom(color, post.bloom * BLOOM_SCALE, 0.6, BLOOM_THRESHOLD);
+  glow.setResolutionScale(BLOOM_RESOLUTION_SCALE);
 
-  const bloom = new UnrealBloomPass(
-    new THREE.Vector2(
-      Math.max(1, Math.round(width * dpr * BLOOM_RESOLUTION_SCALE)),
-      Math.max(1, Math.round(height * dpr * BLOOM_RESOLUTION_SCALE)),
-    ),
-    bloomStrength,
-    0.6,
-    BLOOM_THRESHOLD,
-  );
-  composer.addPass(bloom);
+  const tint = uniform(resolveFog(post.fog));
+  const graded = Fn(() => {
+    const col = max(color.rgb.add(glow.rgb), 0).toVar();
+    col.addAssign(vec3(0.004).mul(smoothstep(0, 0.35, col).oneMinus()));
+    col.assign(mix(col, col.mul(tint), 0.14));
+    col.mulAssign(smoothstep(0.34, 0.86, distance(uv(), vec2(0.5))).mul(0.34).oneMinus());
+    return vec4(max(col, 0), 1);
+  })();
+  const display = convertToTexture(renderOutput(graded));
 
-  const outputPass = new OutputPass();
-  outputPass.uniforms.uTint = { value: new THREE.Color(resolveFog(post.fog)) };
-  outputPass.material.fragmentShader = outputPass.material.fragmentShader
-    .replace('uniform sampler2D tDiffuse;', 'uniform sampler2D tDiffuse; uniform vec3 uTint;')
-    .replace('gl_FragColor = texture2D( tDiffuse, vUv );', `
-vec3 col = max(texture2D(tDiffuse, vUv).rgb, 0.0);
-col += vec3(0.004) * (1.0 - smoothstep(0.0, 0.35, col));
-col = mix(col, col * uTint, 0.14);
-col *= 1.0 - 0.34 * smoothstep(0.34, 0.86, distance(vUv, vec2(0.5)));
-gl_FragColor = vec4(max(col, 0.0), 1.0);
-`);
-  composer.addPass(outputPass);
-
-  const glass = new ShaderPass(GLASS_SHADER);
-  glass.uniforms.uResolution!.value.set(width * dpr, height * dpr);
-  composer.addPass(glass);
-
-  const resizeBloom = (w: number, h: number, ratio: number) => {
-    bloom.setSize(
-      Math.max(1, Math.round(w * ratio * BLOOM_RESOLUTION_SCALE)),
-      Math.max(1, Math.round(h * ratio * BLOOM_RESOLUTION_SCALE)),
-    );
+  const rects = uniformArray(Array.from({ length: GLASS_RECTS }, () => new THREE.Vector4()), 'vec4' as const);
+  const radii = uniformArray(new Array<number>(GLASS_RECTS).fill(0), 'float' as const);
+  const count = uniform(0, 'int');
+  const blurred = (px: N<'vec2'>): N<'vec3'> => {
+    const t = vec2(1).div(screenSize), at = px.mul(t);
+    return display.sample(at.add(vec2(BLUR, 0).mul(t))).rgb.add(display.sample(at.sub(vec2(BLUR, 0).mul(t))).rgb)
+      .add(display.sample(at.add(vec2(0, BLUR).mul(t))).rgb).add(display.sample(at.sub(vec2(0, BLUR).mul(t))).rgb).mul(0.25);
   };
-  resizeBloom(width, height, dpr);
+  const glass = Fn(() => {
+    const px = uv().mul(screenSize);
+    const rect = vec4(0).toVar(), radius = float(0).toVar(), best = float(1e30).toVar();
+    Loop(GLASS_RECTS, ({ i }) => {
+      If(i.greaterThanEqual(count), () => { Break(); });
+      const r = rects.element(i);
+      If(rounded(px, r, 0, radii.element(i)).lessThanEqual(0).and(r.z.mul(r.w).lessThan(best)), () => {
+        best.assign(r.z.mul(r.w));
+        rect.assign(r);
+        radius.assign(radii.element(i));
+      });
+    });
+    const out = display.sample(uv()).toVar();
+    If(best.lessThan(1e30), () => {
+      const centred = px.sub(rect.xy).div(rect.zw).sub(0.5);
+      const open = smoothstep(-MAP_BLUR, MAP_BLUR, rounded(px, rect, min(rect.z, rect.w).mul(BORDER), radius)).oneMinus().mul(0.93).oneMinus();
+      const col = vec3(
+        blurred(px.add(centred.mul(open.mul(SCALE)))).r,
+        blurred(px.add(centred.mul(open.mul(SCALE + CHROMA)))).g,
+        blurred(px.add(centred.mul(open.mul(SCALE + 2 * CHROMA)))).b,
+      );
+      out.assign(vec4(mix(vec3(dot(col, vec3(0.2126, 0.7152, 0.0722))), col, SATURATE), 1));
+    });
+    return out;
+  })();
+
+  const pipeline = new THREE.RenderPipeline(renderer, glass);
+  pipeline.outputColorTransform = false;
 
   return {
     setBloomPulse(t01: number) {
-      bloom.strength = pulsedBloomStrength(bloomStrength, t01);
+      glow.strength.value = pulsedBloomStrength(post.bloom, t01) * BLOOM_SCALE;
     },
-    render(deltaTime: number) {
-      composer.render(deltaTime);
+    render() {
+      pipeline.render();
     },
-    setGlass(rects) {
-      const count = Math.min(GLASS_RECTS, rects.length);
-      glass.uniforms.uCount!.value = count;
-      for (let i = 0; i < count; i++) {
-        const r = rects[i]!;
-        (glass.uniforms.uRects!.value as THREE.Vector4[])[i]!.set(r.x, r.y, r.width, r.height);
-        (glass.uniforms.uRadii!.value as Float32Array)[i] = r.radius;
+    setGlass(list) {
+      count.value = Math.min(GLASS_RECTS, list.length);
+      for (let i = 0; i < count.value; i++) {
+        const r = list[i]!;
+        (rects.array[i] as THREE.Vector4).set(r.x, r.y, r.width, r.height);
+        radii.array[i] = r.radius;
       }
     },
-    resize(w: number, h: number, ratio: number) {
-      const rw = Math.max(1, Math.floor(w));
-      const rh = Math.max(1, Math.floor(h));
-      composer.setPixelRatio(ratio);
-      composer.setSize(rw, rh);
-      resizeBloom(rw, rh, ratio);
-      glass.uniforms.uResolution!.value.set(rw * ratio, rh * ratio);
+    async compile() {
+      const target = renderer.getRenderTarget();
+      renderer.setRenderTarget(scenePass.renderTarget);
+      await renderer.compileAsync(scene, camera);
+      renderer.setRenderTarget(target);
     },
     dispose() {
-      composer.removePass(renderPass);
-      composer.removePass(bloom);
-      composer.removePass(outputPass);
-      composer.removePass(glass);
-      renderPass.dispose(); scene.onBeforeRender = beforeRender;
-      bloom.dispose();
-      outputPass.dispose();
-      glass.dispose();
-      composer.dispose();
-      target.dispose();
+      scene.onBeforeRender = beforeRender;
+      pipeline.dispose();
+      glow.dispose();
+      scenePass.dispose();
     },
   };
 }

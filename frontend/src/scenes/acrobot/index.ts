@@ -84,7 +84,7 @@ class AlpineLakeScene extends StageScene<WorldHandle> {
       this.lastStep = state.step;
       if (!frame.scrubbed && slipDraw(ctx.seed, state.step, world.slip) !== null) { this.skidAt = time; pool.burst(arm.elbowWorld, 0xdcf4ff, 0.3, time); }
     }
-    for (const event of frame.events) if (event.type === 'goal') { this.goalAt = time; pool.burst(arm.tipWorld, 0x98e1cd, 0.35, time); pool.ripple(arm.elbowWorld, ctx.tokens.accents['acrobot'] ?? ctx.tokens.celebrationGold, 0.3, time); }
+    for (const event of frame.events) if (event.type === 'goal') { this.goalAt = time; pool.burst(arm.tipWorld, 0x98e1cd, 0.35, time); pool.ripple(arm.elbowWorld, ctx.tokens.accents['Acrobot'] ?? ctx.tokens.celebrationGold, 0.3, time); }
     const skid = envelope(time - this.skidAt, SKID_SECONDS, 2.2), goal = envelope(time - this.goalAt, GOAL_SECONDS, 1.6);
     const spin = Math.min(1, Math.hypot(state.pose[ACROBOT_W1] ?? 0, state.pose[ACROBOT_W2] ?? 0) / this.omegaMax);
     const th1 = state.pose[ACROBOT_TH1] ?? 0, th2 = state.pose[ACROBOT_TH2] ?? 0;

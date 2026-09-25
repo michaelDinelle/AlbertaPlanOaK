@@ -1,4 +1,5 @@
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
+import { texture } from 'three/tsl';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { buildAurora } from './aurora';
 import { simulateWater } from './fluid';
@@ -68,13 +69,13 @@ export function spruce(world: WorldBuilder) {
   for (const geometry of [...wood, ...needles]) geometry.dispose();
   const coverage = world.own(new THREE.TextureLoader().load('/textures/alpine-spruce.webp'));
   coverage.anisotropy = 4;
-  const bark = world.own(new THREE.MeshStandardMaterial({ color: 0x746350, roughness: 1 }));
-  const leaf = world.own(new THREE.MeshStandardMaterial({ map: coverage, color: 0x527961, side: THREE.DoubleSide, alphaTest: 0.4, alphaToCoverage: true, roughness: 0.92 }));
-  leaf.onBeforeCompile = shader => { shader.fragmentShader = shader.fragmentShader.replace('#include <map_fragment>', 'diffuseColor.a *= texture2D(map, vMapUv).a;'); };
+  const bark = world.own(new THREE.MeshStandardNodeMaterial({ color: 0x746350, roughness: 1 }));
+  const leaf = world.own(new THREE.MeshStandardNodeMaterial({ color: 0x527961, side: THREE.DoubleSide, alphaTest: 0.4, alphaToCoverage: true, roughness: 0.92 }));
+  leaf.opacityNode = texture(coverage).a;
   return [{ geometry: trunk, material: bark }, { geometry: foliage, material: leaf }];
 }
 
-export function scatter(world: WorldBuilder, geometry: THREE.BufferGeometry, material: THREE.Material, transforms: THREE.Matrix4[], name: string) {
+export function scatter(world: WorldBuilder, geometry: THREE.BufferGeometry, material: THREE.NodeMaterial, transforms: THREE.Matrix4[], name: string) {
   const instances = world.own(new SpatialInstances([{ geometry, material, padding: 1 }]));
   instances.group.name = name;
   instances.scatter(Float32Array.from(transforms.flatMap(matrix => matrix.elements)));
@@ -82,7 +83,7 @@ export function scatter(world: WorldBuilder, geometry: THREE.BufferGeometry, mat
 }
 
 export function alpineMaterial(world: WorldBuilder) {
-  return world.own(new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 1 }));
+  return world.own(new THREE.MeshStandardNodeMaterial({ vertexColors: true, roughness: 1 }));
 }
 
 export type Placer = (x: number, y: number, z: number, scale: readonly [number, number, number], yaw: number, tilt?: readonly [number, number]) => void;

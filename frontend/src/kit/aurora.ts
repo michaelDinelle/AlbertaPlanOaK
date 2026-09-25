@@ -1,4 +1,5 @@
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
+import { abs, asin, atan, clamp, color, exp, max, mix, pow, sin, smoothstep, uniform, vec3 } from 'three/tsl';
 import type { SkyHandle } from '@kit/sky';
 
 export interface AuroraHandle {
@@ -7,34 +8,26 @@ export interface AuroraHandle {
   dispose(): void;
 }
 
-export function buildAurora(sky: SkyHandle, color: THREE.ColorRepresentation, azimuth = 0): AuroraHandle {
-  const gain = { value: 1 };
-  sky.material.uniforms.uAuroraGain = gain;
-  sky.material.uniforms.uAuroraColor = { value: new THREE.Color(color) };
-  sky.material.uniforms.uAuroraAzimuth = { value: azimuth };
-  sky.material.fragmentShader = `uniform float uAuroraGain;\nuniform vec3 uAuroraColor;\nuniform float uAuroraAzimuth;\n${sky.material.fragmentShader}`.replace(
-    'gl_FragColor = vec4( col, 1.0 );',
-    `float longitude = atan(dir.z,dir.x) + uAuroraAzimuth;
-float elevation = asin(clamp(dir.y,-1.,1.));
-if(elevation > .008) {
-vec3 aurora = vec3(0.);
-for(int band=0; band<3; band++) {
-  float b = float(band);
-  float fold = sin(longitude*2. + b*2.1 + uTime*.019);
-  float edge = .072 + b*.048 + fold*.057 + sin(longitude*5. - uTime*.013)*.018;
-  float above = elevation-edge;
-  float hem = exp(-abs(above)*115.);
-  float veil = smoothstep(-.015,.025,above)*exp(-max(above,0.)*28.);
-  float rays = .58 + .25*sin(longitude*82.+fold*9.+uTime*.11) + .17*sin(longitude*157.-uTime*.06);
-  float reach = pow(.5 + .5*sin(longitude*2.+b*.9),1.6);
-  vec3 tint = mix(uAuroraColor,vec3(.64,.3,.61),smoothstep(.03,.13,above));
-  aurora += tint*(hem*.28+veil*rays*.5)*reach;
-}
-col += aurora*uAuroraGain*smoothstep(.008,.028,elevation);
-}
-gl_FragColor = vec4(col,1.);`,
-  );
-  sky.material.needsUpdate = true;
+export function buildAurora(sky: SkyHandle, tint: THREE.ColorRepresentation, azimuth = 0): AuroraHandle {
+  const gain = uniform(1);
+  const base = color(new THREE.Color(tint));
+  sky.add((dir, time) => {
+    const longitude = atan(dir.z, dir.x).add(azimuth);
+    const elevation = asin(clamp(dir.y, -1, 1));
+    let aurora: THREE.Node<'vec3'> = vec3(0);
+    for (let band = 0; band < 3; band++) {
+      const fold = sin(longitude.mul(2).add(band * 2.1).add(time.mul(0.019)));
+      const edge = fold.mul(0.057).add(0.072 + band * 0.048).add(sin(longitude.mul(5).sub(time.mul(0.013))).mul(0.018));
+      const above = elevation.sub(edge);
+      const hem = exp(abs(above).mul(-115));
+      const veil = smoothstep(-0.015, 0.025, above).mul(exp(max(above, 0).mul(-28)));
+      const rays = sin(longitude.mul(82).add(fold.mul(9)).add(time.mul(0.11))).mul(0.25).add(0.58).add(sin(longitude.mul(157).sub(time.mul(0.06))).mul(0.17));
+      const reach = pow(sin(longitude.mul(2).add(band * 0.9)).mul(0.5).add(0.5), 1.6);
+      const shade = mix(base, vec3(0.64, 0.3, 0.61), smoothstep(0.03, 0.13, above));
+      aurora = aurora.add(shade.mul(hem.mul(0.28).add(veil.mul(rays).mul(0.5))).mul(reach));
+    }
+    return aurora.mul(gain).mul(smoothstep(0.008, 0.028, elevation));
+  });
   return {
     setGain(value) { gain.value = value; },
     setTime(t) { sky.uniforms.uTime.value = t; },

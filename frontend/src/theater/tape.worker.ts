@@ -1,7 +1,7 @@
 import { blockOf, deriveBlock, frameOf } from '@sim/events';
 import type { EnvDecoder, EnvFrame, EventBlock } from '@sim/types';
 import { readHeader, readVerdict, VERDICT_BYTES, type TapeHeader } from '../data/replay';
-import { SCENES } from '../scenes/table';
+import { sceneOf } from '../scenes/table';
 import { tickAccumulator, type Tick } from './recording';
 
 export type TapeMessage =
@@ -18,6 +18,7 @@ export type TapeRequest =
 const PROGRESS_MS = 250;
 const PROBE_BYTES = 32768;
 const FETCH_BYTES = 1024 * 1024;
+const HISTORY_BLOCKS = 16;
 
 let request: Extract<TapeRequest, { type: 'open' }>;
 let header: TapeHeader | null = null, decoder: EnvDecoder;
@@ -81,9 +82,7 @@ function consume(chunk: Uint8Array): void {
     if (header === null) return;
     const d = header.descriptor;
     if (d.environment.envId !== request.envId || d.seed !== request.seed || d.horizon !== request.horizon) throw new Error('Replay does not match the selected lane');
-    const row = SCENES[d.environment.family];
-    if (!row) throw new Error(`No scene is registered for the ${d.environment.family} family`);
-    decoder = row.decoder;
+    decoder = sceneOf(d.environment).decoder;
     accumulator = tickAccumulator(d.horizon);
     bytes = pending.subarray(header.offset);
     pending = new Uint8Array(0);
@@ -124,11 +123,14 @@ async function range(first: number, last: number): Promise<ArrayBuffer> {
   return bytes;
 }
 
-async function fetchBlock(index: number, frames: boolean): Promise<void> {
-  const from = blockStart(index), start = Math.max(0, from - 1), end = from + blockCount(from);
+async function fetchBlocks(first: number, last: number, frames: boolean): Promise<void> {
+  const start = Math.max(0, blockStart(first) - 1), end = blockStart(last) + blockCount(blockStart(last));
   const bytes = await range(header!.offset + start * rowBytes(), header!.offset + end * rowBytes() - 1);
-  const prev = from > 0 ? frameOf(blockOf(bytes), 0, start, header!) : null;
-  emitBlock(bytes.slice((from - start) * rowBytes()), from, prev, frames);
+  for (let index = first; index <= last; index++) {
+    const from = blockStart(index), at = from - start;
+    const prev = from > 0 ? frameOf(blockOf(bytes.slice((at - 1) * rowBytes(), at * rowBytes())), 0, from - 1, header!) : null;
+    emitBlock(bytes.slice(at * rowBytes(), (at + blockCount(from)) * rowBytes()), from, prev, frames);
+  }
 }
 
 async function seek(): Promise<void> {
@@ -138,9 +140,10 @@ async function seek(): Promise<void> {
     for (;;) {
       const target = blockIndex(Math.min(wanted, header.frames - 1));
       if (decoder.sequential) {
-        while (!stopped && eventsThrough + 1 < header.frames && blockIndex(eventsThrough + 1) < target) { await fetchBlock(blockIndex(eventsThrough + 1), false); progress(); }
+        while (!stopped && eventsThrough + 1 < header.frames && blockIndex(eventsThrough + 1) < target) { await fetchBlocks(blockIndex(eventsThrough + 1), blockIndex(eventsThrough + 1), false); progress(); }
       }
-      if (!loaded.has(target)) await fetchBlock(target, true);
+      const first = Math.max(0, target - HISTORY_BLOCKS);
+      if (!loaded.has(target) || !loaded.has(first)) await fetchBlocks(first, target, true);
       progress(true);
       if (blockIndex(Math.min(wanted, header.frames - 1)) === target) break;
     }
@@ -159,6 +162,10 @@ async function load(): Promise<void> {
   }
   for await (const chunk of response.body) { cursor += chunk.length; consume(chunk); }
   if (cached) {
+    while (header === null && cursor < totalBytes) {
+      const last = Math.min(totalBytes - 1, cursor + PROBE_BYTES - 1);
+      const bytes = await range(cursor, last); cursor = last + 1; consume(new Uint8Array(bytes));
+    }
     if (header === null) throw new Error('Replay descriptor is incomplete');
     verdict(new Uint8Array(await range(totalBytes - VERDICT_BYTES, totalBytes - 1)));
     void seek();

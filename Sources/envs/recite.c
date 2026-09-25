@@ -93,3 +93,10 @@ void recite_oracle(uint32_t instance, uint32_t seed, uint32_t step, const uint32
     recite_check(words, extra);
     ctrl[0] = words[1] >= k->length ? (float)recite_symbol(k, extra[1], words[1]) : 0.0f;
 }
+
+uint32_t recite_view(uint32_t instance, const uint32_t *words, const uint32_t *extra, const float *shared, uint32_t *out) {
+    (void)instance; (void)words; (void)shared;
+    if (!out) return 1u;
+    out[0] = extra[1];
+    return 1u;
+}

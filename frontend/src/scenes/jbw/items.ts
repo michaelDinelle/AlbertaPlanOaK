@@ -1,17 +1,15 @@
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
 import type { WorldBuilder } from '@kit/world';
 import { SpatialInstances, type InstanceModel } from '@kit/instances';
 import { jbwCollectible, JBW_BLOCK, JBW_TREE, JBW_WALL } from '@sim/envs/jbw';
 import { cellKey, TILE_CELLS, visitBlock } from './fieldmath';
 import type { CollectionLog } from './collectionlog';
 import { itemModels } from './actors';
-import { biomeAt } from './ambience';
 import type { ViewCoverage } from '@kit/view';
 
-interface Tile { x: number; y: number; cells: number[]; matrices: Map<number, Float32Array>; colors: Float32Array; stamp: number }
+interface Tile { x: number; y: number; cells: number[]; matrices: Map<number, Float32Array>; stamp: number }
 
 export class ItemField {
-  readonly staticInstances: SpatialInstances[] = [];
   private readonly models;
   private readonly batches = new Map<number, SpatialInstances>();
   private readonly dirty = new Set<number>();
@@ -35,7 +33,6 @@ export class ItemField {
       if (companion) layers.push({ ...companion, padding: 0.5 });
       const batch = world.own(new SpatialInstances(layers));
       this.batches.set(kind, batch); world.add(batch.group);
-      if (kind === JBW_TREE || kind === JBW_WALL) this.staticInstances.push(batch);
     }
   }
 
@@ -61,12 +58,6 @@ export class ItemField {
     }
     tile.matrices.clear();
     for (const [kind, matrices] of groups) tile.matrices.set(kind, Float32Array.from(matrices));
-    const trees = tile.matrices.get(JBW_TREE), tint = new THREE.Color(), green = new THREE.Color(0xf4e6ff), amber = new THREE.Color(0xffffff), cool = new THREE.Color(0xd6e9ff);
-    tile.colors = new Float32Array((trees?.length ?? 0) / 16 * 3);
-    for (let i = 0; trees && i < trees.length; i += 16) {
-      const [autumn, woodland] = biomeAt(trees[i + 12]!, trees[i + 14]!, this.seed);
-      tint.copy(green).lerp(amber, autumn).lerp(cool, woodland).toArray(tile.colors, i / 16 * 3);
-    }
   }
 
   update(coverage: ViewCoverage, camera: THREE.PerspectiveCamera, step: number, log: CollectionLog): void {
@@ -99,7 +90,7 @@ export class ItemField {
     while (this.pending.length && performance.now() - start < 1.5) {
       const next = this.pending.pop()!, cells: number[] = [];
       for (let by = next.y * TILE_CELLS / JBW_BLOCK; by < (next.y + 1) * TILE_CELLS / JBW_BLOCK; by++) for (let bx = next.x * TILE_CELLS / JBW_BLOCK; bx < (next.x + 1) * TILE_CELLS / JBW_BLOCK; bx++) visitBlock(this.seed, bx, by, (x, y, kind) => cells.push(x, y, kind));
-      const tile: Tile = { ...next, cells, matrices: new Map(), colors: new Float32Array(), stamp: -1 };
+      const tile: Tile = { ...next, cells, matrices: new Map(), stamp: -1 };
       this.tiles.set(cellKey(next.x, next.y), tile);
     }
     for (const tile of this.tiles.values()) this.populate(tile, step, log);
@@ -107,7 +98,7 @@ export class ItemField {
       const tile = this.tiles.get(key);
       for (const [kind, batch] of this.batches) {
         const matrices = tile?.matrices.get(kind);
-        if (matrices) batch.set(key, matrices, kind === JBW_TREE ? tile!.colors : undefined);
+        if (matrices) batch.set(key, matrices);
         else batch.delete(key);
       }
     }

@@ -1,4 +1,4 @@
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
 import { TOKENS } from './tokens';
 
 export const TOKEN_WHITE = TOKENS.palettes.noon.sun;

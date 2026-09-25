@@ -1,5 +1,5 @@
 import { lastEvent } from '@sim/events';
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
 import { PULSE_SECONDS } from '@kit/celebrate';
 import type { GroundTruthOptions } from '@kit/debug';
 import type { OrbitRigOptions } from '@kit/rigs';
