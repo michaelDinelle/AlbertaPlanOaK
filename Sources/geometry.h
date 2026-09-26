@@ -2,63 +2,58 @@
 #define OAK_GEOMETRY_H
 #include "env.h"
 
-#if defined(OAK_PRESET_BASE)
-#define OAK_CAPACITY 32u
-#define OAK_PRESET_NAME "base"
-#elif defined(OAK_PRESET_PRO)
 #define OAK_CAPACITY 64u
-#define OAK_PRESET_NAME "pro"
-#elif defined(OAK_PRESET_MAX)
-#define OAK_CAPACITY 128u
-#define OAK_PRESET_NAME "max"
-#elif defined(OAK_PRESET_ULTRA)
-#define OAK_CAPACITY 160u
-#define OAK_PRESET_NAME "ultra"
-#else
-#error "Choose a geometry preset: base, pro, max, or ultra"
-#endif
 
-_Static_assert(OAK_CAPACITY % 32u == 0u, "");
+_Static_assert(OAK_CAPACITY % 4u == 0u, "");
 
-#define OAK_CANDIDATES_PER_SLOT 7u
-#define OAK_CONSTRUCTED_PER_PERCEPT 2u
-#define OAK_TRACE_LEVELS OAK_CANDIDATES_PER_SLOT
-#define OAK_FEATURES_PER_PERCEPT (1u + OAK_CONSTRUCTED_PER_PERCEPT * OAK_CANDIDATES_PER_SLOT)
-#define OAK_ACTIVE_PER_PERCEPT (1u + OAK_CONSTRUCTED_PER_PERCEPT)
-#define OAK_TIMESCALE_PER_PERCEPT (1u + OAK_CANDIDATES_PER_SLOT)
-
+#define OAK_TRACE_LEVELS 7u
 #define OAK_ACTION_PARAMS (2u * OAK_ENV_ACT_MAX)
 #define OAK_POLICY_MAX OAK_ENV_ACT_MAX
-#define OAK_OBSERVATION_CAPACITY OAK_CAPACITY
-#define OAK_OBSERVATION_LIMIT (OAK_ENV_OBS_MAX < OAK_OBSERVATION_CAPACITY ? OAK_ENV_OBS_MAX : OAK_OBSERVATION_CAPACITY)
-#define OAK_SOURCE_MAX (OAK_OBSERVATION_CAPACITY + OAK_ACTION_PARAMS + 2u)
-#define OAK_PERCEPT_MAX (((OAK_SOURCE_MAX + OAK_CAPACITY - 1u) / OAK_CAPACITY) * OAK_CAPACITY)
-#define OAK_FEATURE_CAPACITY (OAK_PERCEPT_MAX * OAK_FEATURES_PER_PERCEPT)
-#define OAK_ACTIVE_CAPACITY (OAK_PERCEPT_MAX * OAK_ACTIVE_PER_PERCEPT)
-#define OAK_TRACE_CAPACITY (OAK_TRACE_LEVELS * OAK_OBSERVATION_CAPACITY)
-#define OAK_FEATURE_STATES (2u * (OAK_FEATURE_CAPACITY + OAK_TRACE_CAPACITY))
-#define OAK_POLICY_BANK (OAK_FEATURE_CAPACITY * OAK_POLICY_MAX)
-#define OAK_ACTIVE_STATES (2u * OAK_ACTIVE_CAPACITY)
-
+#define OAK_OBSERVATION_LIMIT OAK_ENV_OBS_MAX
+#define OAK_UNITS (OAK_CAPACITY)
+#define OAK_FANIN (32u)
+_Static_assert(OAK_FANIN % 4u == 0u, "");
+_Static_assert(OAK_UNITS % 8u == 0u, "");
+#define OAK_PROJECTED_COUNT(obs) ((obs) + OAK_ACTION_PARAMS + 2u)
+#define OAK_PROJECTED(obs) (((OAK_PROJECTED_COUNT(obs) + 3u) / 4u) * 4u)
+#define OAK_INPUTS(obs) (((OAK_PROJECTED(obs) + (obs) * OAK_TRACE_LEVELS + 7u) / 8u) * 8u)
+#define OAK_PROJECTED_MAX OAK_PROJECTED(OAK_OBSERVATION_LIMIT)
+#define OAK_INPUT_MAX OAK_INPUTS(OAK_OBSERVATION_LIMIT)
+#define OAK_FEATURE_MAX (OAK_INPUT_MAX + OAK_UNITS)
+#define OAK_FEATURE_TIMESCALE (OAK_CAPACITY * (1u + OAK_TRACE_LEVELS))
+#define OAK_ELIGIBILITY_DECAY (1.0f - 1.0f / (float)(1u << 1u))
+#define OAK_TABLE_BITS 14u
+#define OAK_TABLE (1u << OAK_TABLE_BITS)
+#define OAK_TRACKED_TUPLES (2u * (1u + OAK_TRACE_LEVELS))
+#define OAK_TUPLES (OAK_TRACKED_TUPLES + OAK_TRACE_LEVELS)
+#define OAK_CELLS (OAK_TUPLES + 2u * OAK_OBSERVATION_LIMIT)
+#define OAK_CELL_STRIDE 8u
+#define OAK_HEADS 3u
+#define OAK_KEYS 2u
+#define OAK_TABLE_ARMS 5u
+#define OAK_ARMS (OAK_HEADS + OAK_TABLE_ARMS)
+_Static_assert(OAK_ARMS <= 8u, "");
+#define OAK_QTABLE_BITS 14u
+#define OAK_QTABLE (1u << OAK_QTABLE_BITS)
+#define OAK_QROW (2u * OAK_CELL_STRIDE)
+#define OAK_PLAN_BUDGET OAK_FEATURE_TIMESCALE
+#define OAK_BLOCK OAK_FEATURE_TIMESCALE
+_Static_assert(OAK_CELL_STRIDE > OAK_POLICY_MAX, "");
 #define OAK_ACTOR_ALPHA_DENOM ((float)(OAK_ACTION_PARAMS * OAK_CAPACITY))
-#define OAK_SAMPLE_SIGMA (1.0f / (float)OAK_ACTION_PARAMS)
 
 typedef struct {
-    uint32_t percepts, featureCapacity, activeCapacity, featureTimescale, traceChannels;
+    uint32_t projected, inputs, features;
     float trackingRate, metaRate, ridgeFloor;
 } OakGeometry;
 
 static inline OakGeometry oak_geometry(uint32_t obs) {
     OakGeometry g;
-    uint32_t sources = obs + OAK_ACTION_PARAMS + 2u;
-    g.percepts = ((sources + OAK_CAPACITY - 1u) / OAK_CAPACITY) * OAK_CAPACITY;
-    g.featureCapacity = g.percepts * OAK_FEATURES_PER_PERCEPT;
-    g.activeCapacity = g.percepts * OAK_ACTIVE_PER_PERCEPT;
-    g.featureTimescale = g.percepts * OAK_TIMESCALE_PER_PERCEPT;
-    g.traceChannels = OAK_TRACE_LEVELS * obs;
-    g.trackingRate = 1.0f / (float)g.featureTimescale;
-    g.metaRate = g.trackingRate / (float)(g.featureTimescale + OAK_ACTION_PARAMS);
-    g.ridgeFloor = 1.0f / (float)(2u * g.percepts);
+    g.projected = OAK_PROJECTED(obs);
+    g.inputs = OAK_INPUTS(obs);
+    g.features = g.inputs + OAK_UNITS;
+    g.trackingRate = 1.0f / (float)OAK_FEATURE_TIMESCALE;
+    g.metaRate = g.trackingRate / (float)(OAK_FEATURE_TIMESCALE + OAK_ACTION_PARAMS);
+    g.ridgeFloor = 1.0f / (float)(2u * OAK_CAPACITY);
     return g;
 }
 
