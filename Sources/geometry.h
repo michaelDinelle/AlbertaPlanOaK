@@ -10,6 +10,7 @@ _Static_assert(OAK_CAPACITY % 4u == 0u, "");
 #define OAK_ACTION_PARAMS (2u * OAK_ENV_ACT_MAX)
 #define OAK_POLICY_MAX OAK_ENV_ACT_MAX
 #define OAK_OBSERVATION_LIMIT OAK_ENV_OBS_MAX
+#define OAK_CHANNELS (((OAK_OBSERVATION_LIMIT + 1u + 3u) / 4u) * 4u)
 #define OAK_UNITS (OAK_CAPACITY)
 #define OAK_FANIN (32u)
 _Static_assert(OAK_FANIN % 4u == 0u, "");
@@ -26,6 +27,7 @@ _Static_assert(OAK_UNITS % 8u == 0u, "");
 #define OAK_TABLE (1u << OAK_TABLE_BITS)
 #define OAK_TRACKED_TUPLES (2u * (1u + OAK_TRACE_LEVELS))
 #define OAK_TUPLES (OAK_TRACKED_TUPLES + OAK_TRACE_LEVELS)
+#define OAK_TUPLE_LANES (((OAK_TUPLES + 3u) / 4u) * 4u)
 #define OAK_CELLS (OAK_TUPLES + 2u * OAK_OBSERVATION_LIMIT)
 #define OAK_CELL_STRIDE 8u
 #define OAK_HEADS 3u

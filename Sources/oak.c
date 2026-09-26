@@ -58,7 +58,8 @@ typedef struct {
     uint32_t headBlocks[OAK_ARMS], activeHead, learner, blockSteps, blockCount, self;
     float control[OAK_OBSERVATION_LIMIT * OAK_POLICY_MAX];
     uint32_t cellActive[2u * OAK_CELLS];
-    Channel channel[OAK_OBSERVATION_LIMIT + 1u], actorMeta[OAK_HEADS];
+    Channel actorMeta[OAK_HEADS];
+    float channelMean[OAK_CHANNELS], channelSecond[OAK_CHANNELS], channelAlpha[OAK_CHANNELS], channelBeta[OAK_CHANNELS], channelTrace[OAK_CHANNELS], channelEnergy[OAK_CHANNELS];
     float actionSignal[OAK_ACTION_PARAMS];
     float actorCredit[OAK_POLICY_MAX], actorCreditStaging[OAK_POLICY_MAX], logit[OAK_POLICY_MAX];
     float reward, td, tdNormalized, tdSquare, advantage, advantageCenter, averageReward, actorStep, betaFloor;
@@ -124,16 +125,34 @@ static inline void metaStep(Channel *c, float signal, float inverseAge, float me
     }
 }
 
-static inline float standardizeChannel(Channel *c, float x, float inverseAge, float floorRate, float metaRate, float decay, float betaFloor, float ridgeFloor) {
-    int finite = isfinite(x);
-    float signal = x - c->mean;
-    if (finite) metaStep(c, signal, inverseAge, metaRate, decay, betaFloor);
-    float rate = fmaxf(floorRate, c->alpha);
-    if (finite) {
-        c->mean += rate * (x - c->mean);
-        c->second += rate * (x * x - c->second);
-    }
-    return (x - c->mean) * oak_rsqrt(fmaxf(c->second - c->mean * c->mean, 0.0f) + ridgeFloor);
+static inline float4 keep4(float4 old, float4 next) { return select4(oak_finite4(next), next, old); }
+static inline float4 oak_rsqrt4(float4 x) { return splat4(1.0f) / __builtin_elementwise_sqrt(x); }
+static inline float4 standardizeChannels(OakAgent *a, uint32_t o, float4 x, float inverseAge, float floorRate, float metaRate, float decay, float betaFloor, float ridgeFloor) {
+    float4 mean = oak_load4(a->channelMean + o), second = oak_load4(a->channelSecond + o), alpha = oak_load4(a->channelAlpha + o);
+    float4 beta = oak_load4(a->channelBeta + o), trace = oak_load4(a->channelTrace + o), energy = oak_load4(a->channelEnergy + o);
+    lane4 finite = oak_finite4(x);
+    float4 signal = x - mean;
+    float4 metaGradient = signal * trace;
+    float4 gradEnergy = keep4(energy, energy + splat4(inverseAge) * (metaGradient * metaGradient - energy));
+    float4 normalized = metaGradient * oak_rsqrt4(__builtin_elementwise_max(gradEnergy, splat4(0.0f)) + splat4(inverseAge));
+    float4 nextBeta = keep4(beta, __builtin_elementwise_min(__builtin_elementwise_max(beta + splat4(metaRate) * normalized, splat4(betaFloor)), splat4(0.0f)));
+    float4 nextAlpha = keep4(alpha, oak_exp4(nextBeta));
+    float4 nextTrace = keep4(trace, splat4(1.0f - decay) * __builtin_elementwise_max(splat4(0.0f), splat4(1.0f) - alpha) * trace + alpha * signal);
+    lane4 commit = finite & oak_finite4(signal);
+    alpha = select4(commit, nextAlpha, alpha);
+    beta = select4(commit, nextBeta, beta);
+    trace = select4(commit, nextTrace, trace);
+    energy = select4(commit, gradEnergy, energy);
+    float4 rate = __builtin_elementwise_max(splat4(floorRate), alpha);
+    mean = select4(finite, mean + rate * (x - mean), mean);
+    second = select4(finite, second + rate * (x * x - second), second);
+    oak_store4(a->channelMean + o, mean);
+    oak_store4(a->channelSecond + o, second);
+    oak_store4(a->channelAlpha + o, alpha);
+    oak_store4(a->channelBeta + o, beta);
+    oak_store4(a->channelTrace + o, trace);
+    oak_store4(a->channelEnergy + o, energy);
+    return (x - mean) * oak_rsqrt4(__builtin_elementwise_max(second - mean * mean, splat4(0.0f)) + splat4(ridgeFloor));
 }
 
 static inline uint32_t tableCell(uint32_t hash) {
@@ -188,14 +207,31 @@ static __attribute__((noinline)) void encode(OakAgent *a, const float *x, const 
         fineCode[c] = cellCode(coded[c], 1u);
         coarseCode[c] = cellCode(coded[c], 0u);
     }
-    uint32_t *cells = a->cellActive + a->slot * OAK_CELLS, hash[OAK_TUPLES];
-    for (uint32_t tuple = 0u; tuple < OAK_TUPLES; tuple++) hash[tuple] = (tuple + 1u) * 0x9E3779B9u;
-    for (uint32_t o = 0u; o < observationCount; o++)
-        for (uint32_t tuple = 0u; tuple < OAK_TUPLES; tuple++) hash[tuple] = (hash[tuple] ^ ((tuple & 1u) && tuple < OAK_TRACKED_TUPLES ? fineCode : coarseCode)[o]) * 0x01000193u;
+    uint32_t *cells = a->cellActive + a->slot * OAK_CELLS, hash[OAK_TUPLE_LANES];
+    lane4 chain[OAK_TUPLE_LANES / 4u], fineLane[OAK_TUPLE_LANES / 4u], ledLane[OAK_TUPLE_LANES / 4u];
+    for (uint32_t v = 0u; v < OAK_TUPLE_LANES / 4u; v++)
+        for (uint32_t r = 0u; r < 4u; r++) {
+            uint32_t tuple = 4u * v + r;
+            chain[v][r] = (tuple + 1u) * 0x9E3779B9u;
+            fineLane[v][r] = (tuple & 1u) && tuple < OAK_TRACKED_TUPLES ? ~0u : 0u;
+            ledLane[v][r] = tuple >= 2u && tuple < OAK_TUPLES ? ~0u : 0u;
+        }
     for (uint32_t o = 0u; o < observationCount; o++) {
-        for (uint32_t tuple = 2u; tuple < OAK_TRACKED_TUPLES; tuple++) hash[tuple] = (hash[tuple] ^ (((tuple & 1u) ? fineCode : coarseCode)[(tuple >> 1u) * observationCount + o] + 8u)) * 0x01000193u;
-        for (uint32_t tuple = OAK_TRACKED_TUPLES; tuple < OAK_TUPLES; tuple++) hash[tuple] = (hash[tuple] ^ (settledCode[(tuple - OAK_TRACKED_TUPLES) * observationCount + o] + 8u)) * 0x01000193u;
+        lane4 fine = fineCode[o], coarse = coarseCode[o];
+        for (uint32_t v = 0u; v < OAK_TUPLE_LANES / 4u; v++) chain[v] = (chain[v] ^ ((fine & fineLane[v]) | (coarse & ~fineLane[v]))) * 0x01000193u;
     }
+    for (uint32_t o = 0u; o < observationCount; o++) {
+        uint32_t code[OAK_TUPLE_LANES] = { 0u };
+        for (uint32_t tuple = 2u; tuple < OAK_TRACKED_TUPLES; tuple++) code[tuple] = ((tuple & 1u) ? fineCode : coarseCode)[(tuple >> 1u) * observationCount + o] + 8u;
+        for (uint32_t tuple = OAK_TRACKED_TUPLES; tuple < OAK_TUPLES; tuple++) code[tuple] = settledCode[(tuple - OAK_TRACKED_TUPLES) * observationCount + o] + 8u;
+        for (uint32_t v = 0u; v < OAK_TUPLE_LANES / 4u; v++) {
+            lane4 codes;
+            __builtin_memcpy(&codes, code + 4u * v, sizeof codes);
+            lane4 next = (chain[v] ^ codes) * 0x01000193u;
+            chain[v] = (next & ledLane[v]) | (chain[v] & ~ledLane[v]);
+        }
+    }
+    for (uint32_t v = 0u; v < OAK_TUPLE_LANES / 4u; v++) __builtin_memcpy(hash + 4u * v, &chain[v], sizeof chain[v]);
     for (uint32_t tuple = 0u; tuple < OAK_TUPLES; tuple++) {
         uint32_t mixed = hash[tuple];
         mixed ^= mixed >> 15u;
@@ -263,12 +299,15 @@ static __attribute__((noinline)) void encode(OakAgent *a, const float *x, const 
 static __attribute__((noinline)) void perceive(OakAgent *a, const float *obs) {
     OakGeometry g = a->g;
     uint32_t observationCount = a->observationCount;
-    float standardized[OAK_OBSERVATION_LIMIT + 1u];
+    float standardized[OAK_CHANNELS];
     uint32_t metaAge = a->stepCount < OAK_FEATURE_TIMESCALE ? a->stepCount : OAK_FEATURE_TIMESCALE;
     float inverseAge = 1.0f / ((float)metaAge + 1.0f);
     float floorRate = 1.0f / ((float)a->stepCount + 1.0f);
-    for (uint32_t o = 0u; o <= observationCount; o++)
-        standardized[o] = standardizeChannel(a->channel + o, o < observationCount ? obs[o] : a->reward, inverseAge, floorRate, g.metaRate, g.trackingRate, a->betaFloor, g.ridgeFloor);
+    for (uint32_t o = 0u; o <= observationCount; o += 4u) {
+        float4 value;
+        for (uint32_t r = 0u; r < 4u; r++) value[r] = o + r < observationCount ? obs[o + r] : o + r == observationCount ? a->reward : 0.0f;
+        oak_store4(standardized + o, standardizeChannels(a, o, value, inverseAge, floorRate, g.metaRate, g.trackingRate, a->betaFloor, g.ridgeFloor));
+    }
     float *x = features(a, a->slot);
     for (uint32_t o = 0u; o < observationCount; o++) x[o] = finiteOrZero(standardized[o]);
     for (uint32_t d = 0u; d < OAK_ACTION_PARAMS; d++) x[observationCount + d] = finiteOrZero(a->actionSignal[d]);
@@ -779,8 +818,8 @@ void oak_init(uint32_t *state, uint32_t lane, uint32_t env, uint32_t seed, const
     for (uint32_t h = 0u; h < OAK_HEADS; h++) a->policy[(h * OAK_POLICY_MAX + action) * OAK_FEATURE_MAX] = sign * (1.0f / (float)OAK_ACTION_PARAMS);
     float logAlpha = oak_log(g.ridgeFloor);
     for (uint32_t o = 0u; o <= observationCount; o++) {
-        a->channel[o].alpha = g.ridgeFloor;
-        a->channel[o].beta = logAlpha;
+        a->channelAlpha[o] = g.ridgeFloor;
+        a->channelBeta[o] = logAlpha;
     }
     for (uint32_t h = 0u; h < OAK_HEADS; h++) a->actorMeta[h].alpha = 1.0f;
 }
