@@ -1,7 +1,7 @@
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
 import type { WorldBuilder } from './world';
 import { oakMaterial, oakUniforms } from './materials';
-import { SpatialInstances, type InstanceModel } from './instances';
+import { SpatialInstances, type InstanceModel, instancedMesh } from './instances';
 import { streamFor } from './rng';
 
 export interface ScatterArea {
@@ -37,7 +37,6 @@ export interface ScatterOptions {
 export interface VegetationHandle {
   group: THREE.Group;
   models: InstanceModel[];
-  staticInstances: SpatialInstances[];
   setTime(t: number): void;
   setWind(amplitude: number, frequency?: number): void;
   dispose(): void;
@@ -150,7 +149,6 @@ function buildScatter(
   const models = instances.flatMap(source => source.models);
   return {
     group, models,
-    staticInstances: instances.filter(source => source.models[0]!.castShadow && !windAmp),
     setTime(t) {
       for (const model of models) oakUniforms(model.material)?.setTime(t);
     },
@@ -421,7 +419,7 @@ export function excludeAny(...tests: readonly (ExcludeFn | undefined)[]): Exclud
 export function plantInstances(world: WorldBuilder, name: string, geometry: THREE.BufferGeometry, material: THREE.Material, count: number) {
   world.own(material);
   world.own(geometry);
-  const mesh = world.add(world.own(new THREE.InstancedMesh(geometry, material, count)));
+  const mesh = world.add(world.own(instancedMesh(geometry, material, count)));
   mesh.name = name;
   mesh.count = 0;
   const transform = new THREE.Object3D();

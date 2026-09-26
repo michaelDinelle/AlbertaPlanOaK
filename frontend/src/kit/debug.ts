@@ -1,9 +1,9 @@
-import * as THREE from 'three';
-import { CHEETAH_BONES, FK_FLOATS, FK_POINT_INDEX } from '@sim/fk/cheetah';
+import * as THREE from 'three/webgpu';
+import { instancedMesh } from './instances';
 import type { EnvGeometry, GridCell, GridGeometry } from '@sim/types';
 import { cellToWorld, type Vec3Tuple } from './grid';
 import { TOKENS } from './tokens';
-import type { FrameState } from './types';
+import type { FrameState, FrameUpdate } from './types';
 
 export const DEBUG_LAYER = 31;
 
@@ -27,20 +27,37 @@ export interface GroundTruthOptions {
   goalCell?(state: FrameState): GridCell | null;
   keyCells?(state: FrameState): readonly GridCell[] | null;
   doorStates?(state: FrameState): readonly boolean[] | null;
-  agentPos?(state: FrameState): readonly [number, number, number] | null;
+  agentPos?(state: FrameState): THREE.Vector3Like | null;
+  floor?: readonly [number, number];
   profileRange?: readonly [number, number];
-  fkToWorld?(x: number, z: number, out: Vec3Tuple): Vec3Tuple;
   maxKeys?: number;
   frame?(state: FrameState): DebugFrame | null;
   cellCapacity?: number;
   name?: string;
+  lattice?: DebugLattice;
+  debug?(frame: FrameUpdate, kit: DebugKit): void;
+}
+
+export interface DebugLattice {
+  w: number;
+  h: number;
+  origin: Vec3Tuple;
+  u: Vec3Tuple;
+  v: Vec3Tuple;
+}
+
+export interface DebugKit {
+  bars(name: string, count: number): DebugBars;
+  marks(name: string, count: number): DebugMarks;
+  trail(name: string, capacity: number, color: THREE.ColorRepresentation): DebugTrail;
+  curve(name: string, samples: number, color: THREE.ColorRepresentation): DebugCurve;
 }
 
 export interface DebugFrame {
   originX: number;
   originY: number;
   originZ: number;
-  agent: Vec3Tuple;
+  agent: THREE.Vector3Like;
   cone: Float32Array;
   coneCount: number;
 }
@@ -179,6 +196,7 @@ function segments(count: number, material: THREE.LineBasicMaterial, name: string
 
 export class GroundTruthOverlay {
   readonly group = new THREE.Group();
+  private readonly anchor = new THREE.Group();
 
   private readonly materials: THREE.LineBasicMaterial[] = [];
   private readonly geometries: THREE.BufferGeometry[] = [];
@@ -207,12 +225,6 @@ export class GroundTruthOverlay {
   private doorMarkerAttr: THREE.BufferAttribute | null = null;
   private readonly maxKeys: number;
 
-  private skeletonPos: Float32Array | null = null;
-  private skeletonAttr: THREE.BufferAttribute | null = null;
-  private toesPos: Float32Array | null = null;
-  private toesAttr: THREE.BufferAttribute | null = null;
-  private readonly fkOut = new Float32Array(FK_FLOATS);
-
   private classicMarker: THREE.LineSegments | null = null;
   private classicMarkerPos: Float32Array | null = null;
   private classicMarkerAttr: THREE.BufferAttribute | null = null;
@@ -220,6 +232,13 @@ export class GroundTruthOverlay {
   private readonly scratch: Vec3Tuple = [0, 0, 0];
   private readonly scratchB: Vec3Tuple = [0, 0, 0];
   private _visible = false;
+  private readonly primitives = new Map<string, DebugPrimitive>();
+  readonly kit: DebugKit = {
+    bars: (name, count) => this.primitive(`bars:${name}`, () => new DebugBars(count, name)),
+    marks: (name, count) => this.primitive(`marks:${name}`, () => new DebugMarks(count, name)),
+    trail: (name, capacity, color) => this.primitive(`trail:${name}`, () => new DebugTrail(capacity, color, name)),
+    curve: (name, samples, color) => this.primitive(`curve:${name}`, () => new DebugCurve(samples, color, name)),
+  };
 
   constructor(geometry: EnvGeometry, opts: GroundTruthOptions = {}) {
     this.geometry = geometry;
@@ -227,6 +246,7 @@ export class GroundTruthOverlay {
     this.camera = opts.camera ?? null;
     this.maxKeys = Math.max(1, opts.maxKeys ?? 4);
     this.group.name = opts.name ?? 'oakGroundTruth';
+    this.group.add(this.anchor);
     this.anchored = opts.frame !== undefined;
     this.grid = this.anchored ? null : (geometry.grid ?? null);
 
@@ -245,7 +265,11 @@ export class GroundTruthOverlay {
       this.buildMarkers(main, goal);
     }
     if (this.grid) this.buildGrid(this.grid, main, wall, goal);
-    if (geometry.cheetah) this.buildCheetah(main, goal);
+    else if (opts.lattice) this.buildPlane(opts.lattice, wall);
+    else if (opts.floor) {
+      this.buildLattice(opts.floor[0], opts.floor[1], wall);
+      if (!this.anchored) this.buildMarkers(main, goal);
+    }
     if (geometry.classic) this.buildClassic(main, goal);
 
     applyDebugLayer(this.group);
@@ -271,7 +295,7 @@ export class GroundTruthOverlay {
     this.materials.push(material);
     const boxes = new CellBoxes(capacity, name, material);
     this.geometries.push(boxes.geometry);
-    this.group.add(boxes.object);
+    this.anchor.add(boxes.object);
     applyDebugLayer(boxes.object);
     return boxes;
   }
@@ -280,7 +304,7 @@ export class GroundTruthOverlay {
     const frame = this.opts.frame?.(state) ?? null;
     const p = this.conePos;
     if (!frame || !p) return;
-    this.group.position.set(frame.originX, frame.originY, frame.originZ);
+    this.anchor.position.set(frame.originX, frame.originY, frame.originZ);
     let o = 0;
     const n = Math.min(frame.coneCount, Math.floor(frame.cone.length / 3), Math.floor(p.length / 3));
     for (let i = 0; i < n; i++) {
@@ -301,18 +325,55 @@ export class GroundTruthOverlay {
 
   setState(state: FrameState): void {
     if (this.anchored) this.updateFrame(state);
-    if (this.grid) this.updateGrid(state, this.grid);
-    if (this.skeletonPos) this.updateCheetah(state);
+    else if (this.grid) this.updateGrid(state, this.grid);
+    else if (this.opts.floor) this.updateCross(null, null, this.opts.agentPos?.(state) ?? null);
     if (this.classicMarker) this.updateClassic(state);
   }
 
+  update(frame: FrameUpdate): void {
+    this.setState(frame.state);
+    if (!this.opts.debug) return;
+    for (const primitive of this.primitives.values()) primitive.begin();
+    this.opts.debug(frame, this.kit);
+    for (const primitive of this.primitives.values()) primitive.commit();
+  }
+
+  private primitive<T extends DebugPrimitive>(name: string, make: () => T): T {
+    const existing = this.primitives.get(name);
+    if (existing) return existing as T;
+    const created = make();
+    this.primitives.set(name, created);
+    applyDebugLayer(created.object);
+    this.group.add(created.object);
+    return created;
+  }
+
   dispose(): void {
+    for (const primitive of this.primitives.values()) primitive.dispose();
+    this.primitives.clear();
     for (const g of this.geometries) g.dispose();
     for (const m of this.materials) m.dispose();
     this.geometries.length = 0;
     this.materials.length = 0;
     this.group.removeFromParent();
     this.group.clear();
+  }
+
+  private buildPlane(lattice: DebugLattice, material: THREE.LineBasicMaterial): void {
+    const { w, h, origin, u, v } = lattice;
+    const lines = segments(w + 1 + h + 1, material, 'oakDebugPlane');
+    const p = lines.positions;
+    let o = 0;
+    for (let i = 0; i <= w; i++) {
+      p[o++] = origin[0] + u[0] * i; p[o++] = origin[1] + u[1] * i; p[o++] = origin[2] + u[2] * i;
+      p[o++] = origin[0] + u[0] * i + v[0] * h; p[o++] = origin[1] + u[1] * i + v[1] * h; p[o++] = origin[2] + u[2] * i + v[2] * h;
+    }
+    for (let j = 0; j <= h; j++) {
+      p[o++] = origin[0] + v[0] * j; p[o++] = origin[1] + v[1] * j; p[o++] = origin[2] + v[2] * j;
+      p[o++] = origin[0] + v[0] * j + u[0] * w; p[o++] = origin[1] + v[1] * j + u[1] * w; p[o++] = origin[2] + v[2] * j + u[2] * w;
+    }
+    lines.attr.needsUpdate = true;
+    this.add(lines.object);
   }
 
   private buildGrid(
@@ -322,25 +383,7 @@ export class GroundTruthOverlay {
     goalMat: THREE.LineBasicMaterial,
   ): void {
     const y = 0.02;
-    const lattice = segments(grid.w + 1 + grid.h + 1, wallMat, 'oakDebugLattice');
-    {
-      const p = lattice.positions;
-      let o = 0;
-      const x0 = -grid.w / 2;
-      const z0 = -grid.h / 2;
-      for (let i = 0; i <= grid.w; i++) {
-        const x = x0 + i;
-        p[o++] = x; p[o++] = y; p[o++] = z0;
-        p[o++] = x; p[o++] = y; p[o++] = z0 + grid.h;
-      }
-      for (let j = 0; j <= grid.h; j++) {
-        const z = z0 + j;
-        p[o++] = x0; p[o++] = y; p[o++] = z;
-        p[o++] = x0 + grid.w; p[o++] = y; p[o++] = z;
-      }
-      lattice.attr.needsUpdate = true;
-    }
-    this.add(lattice.object);
+    this.buildLattice(grid.w, grid.h, wallMat);
 
     let walls = 0;
     for (let i = 0; i < grid.w * grid.h; i++) if ((grid.walls[i] ?? 0) !== 0) walls++;
@@ -402,6 +445,29 @@ export class GroundTruthOverlay {
     this.buildMarkers(main, goalMat);
   }
 
+  private buildLattice(width: number, height: number, material: THREE.LineBasicMaterial): void {
+    const w = Math.ceil(width);
+    const h = Math.ceil(height);
+    const y = 0.02;
+    const lattice = segments(w + 1 + h + 1, material, 'oakDebugLattice');
+    const p = lattice.positions;
+    let o = 0;
+    const x0 = -w / 2;
+    const z0 = -h / 2;
+    for (let i = 0; i <= w; i++) {
+      const x = x0 + i;
+      p[o++] = x; p[o++] = y; p[o++] = z0;
+      p[o++] = x; p[o++] = y; p[o++] = z0 + h;
+    }
+    for (let j = 0; j <= h; j++) {
+      const z = z0 + j;
+      p[o++] = x0; p[o++] = y; p[o++] = z;
+      p[o++] = x0 + w; p[o++] = y; p[o++] = z;
+    }
+    lattice.attr.needsUpdate = true;
+    this.add(lattice.object);
+  }
+
   private buildMarkers(main: THREE.LineBasicMaterial, goalMat: THREE.LineBasicMaterial): void {
     const cross = segments(3, main, 'oakDebugAgentCross');
     this.agentCross = cross.object;
@@ -428,22 +494,22 @@ export class GroundTruthOverlay {
     this.add(doors.object);
   }
 
-  private updateCross(grid: GridGeometry | null, cell: GridCell | null, at: Vec3Tuple | null): void {
+  private updateCross(grid: GridGeometry | null, cell: GridCell | null, at: THREE.Vector3Like | null): void {
     const cp = this.agentCrossPos;
     if (!cp || !this.agentCross || !this.agentCrossAttr) return;
-    if (grid && !cell) {
+    if (grid ? !cell : !at) {
       this.agentCross.visible = false;
       this.agentCrossAttr.needsUpdate = true;
       return;
     }
-    let cx = at ? at[0] : 0;
-    let cz = at ? at[2] : 0;
+    let cx = at ? at.x : 0;
+    let cz = at ? at.z : 0;
     if (grid && cell) {
       cellToWorld(cell.x, cell.y, grid, this.scratch);
       cx = this.scratch[0];
       cz = this.scratch[2];
     }
-    const y = (at ? at[1] : 0) + 0.03;
+    const y = (at ? at.y : 0) + 0.03;
     const r = 0.38;
     let o = 0;
     cp[o++] = cx - r; cp[o++] = y; cp[o++] = cz - r;
@@ -536,55 +602,6 @@ export class GroundTruthOverlay {
     }
   }
 
-  private buildCheetah(main: THREE.LineBasicMaterial, goalMat: THREE.LineBasicMaterial): void {
-    const bones = segments(CHEETAH_BONES.length, main, 'oakDebugSkeleton');
-    this.skeletonPos = bones.positions;
-    this.skeletonAttr = bones.attr;
-    this.add(bones.object);
-
-    const toe = segments(4, goalMat, 'oakDebugToes');
-    this.toesPos = toe.positions;
-    this.toesAttr = toe.attr;
-    this.add(toe.object);
-  }
-
-  private updateCheetah(state: FrameState): void {
-    const cheetah = this.geometry.cheetah;
-    const sp = this.skeletonPos;
-    if (!cheetah || !sp || !this.skeletonAttr) return;
-    cheetah.fk(state.pose, this.fkOut);
-    const toWorld = this.opts.fkToWorld ?? defaultFkToWorld;
-
-    let o = 0;
-    for (const bone of CHEETAH_BONES) {
-      const a = bone[0];
-      const b = bone[1];
-      toWorld(this.fkOut[a * 2] ?? 0, this.fkOut[a * 2 + 1] ?? 0, this.scratch);
-      toWorld(this.fkOut[b * 2] ?? 0, this.fkOut[b * 2 + 1] ?? 0, this.scratchB);
-      sp[o++] = this.scratch[0]; sp[o++] = this.scratch[1]; sp[o++] = this.scratch[2];
-      sp[o++] = this.scratchB[0]; sp[o++] = this.scratchB[1]; sp[o++] = this.scratchB[2];
-    }
-    this.skeletonAttr.needsUpdate = true;
-
-    const tp = this.toesPos;
-    if (tp && this.toesAttr) {
-      let t = 0;
-      const r = 0.06;
-      for (const name of ['toe_b', 'toe_f'] as const) {
-        const idx = FK_POINT_INDEX[name];
-        toWorld(this.fkOut[idx * 2] ?? 0, this.fkOut[idx * 2 + 1] ?? 0, this.scratch);
-        const x = this.scratch[0];
-        const yy = this.scratch[1];
-        const z = this.scratch[2];
-        tp[t++] = x - r; tp[t++] = yy; tp[t++] = z;
-        tp[t++] = x + r; tp[t++] = yy; tp[t++] = z;
-        tp[t++] = x; tp[t++] = yy - r; tp[t++] = z;
-        tp[t++] = x; tp[t++] = yy + r; tp[t++] = z;
-      }
-      this.toesAttr.needsUpdate = true;
-    }
-  }
-
   private buildClassic(main: THREE.LineBasicMaterial, goalMat: THREE.LineBasicMaterial): void {
     const classic = this.geometry.classic;
     if (!classic) return;
@@ -655,23 +672,160 @@ export class GroundTruthOverlay {
     }
     const r = 0.14;
     let o = 0;
-    p[o++] = pos[0] - r; p[o++] = pos[1]; p[o++] = pos[2];
-    p[o++] = pos[0] + r; p[o++] = pos[1]; p[o++] = pos[2];
-    p[o++] = pos[0]; p[o++] = pos[1] - r; p[o++] = pos[2];
-    p[o++] = pos[0]; p[o++] = pos[1] + r; p[o++] = pos[2];
+    p[o++] = pos.x - r; p[o++] = pos.y; p[o++] = pos.z;
+    p[o++] = pos.x + r; p[o++] = pos.y; p[o++] = pos.z;
+    p[o++] = pos.x; p[o++] = pos.y - r; p[o++] = pos.z;
+    p[o++] = pos.x; p[o++] = pos.y + r; p[o++] = pos.z;
     this.classicMarker.visible = true;
     this.classicMarkerAttr.needsUpdate = true;
   }
 
   private add(object: THREE.LineSegments): void {
     this.geometries.push(object.geometry);
-    this.group.add(object);
+    this.anchor.add(object);
   }
 }
 
-export function defaultFkToWorld(x: number, z: number, out: Vec3Tuple): Vec3Tuple {
-  out[0] = x;
-  out[1] = z;
-  out[2] = 0;
-  return out;
+interface DebugPrimitive {
+  readonly object: THREE.Object3D;
+  begin(): void;
+  commit(): void;
+  dispose(): void;
+}
+
+function solidMaterial(): THREE.MeshBasicMaterial {
+  const m = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.92, depthTest: false, depthWrite: false, toneMapped: false, fog: false });
+  m.name = 'oakDebugSolid';
+  return m;
+}
+
+class DebugInstances implements DebugPrimitive {
+  readonly object: THREE.InstancedMesh;
+  protected used = 0;
+  private readonly matrix = new THREE.Matrix4();
+  private readonly quaternion = new THREE.Quaternion();
+  private readonly position = new THREE.Vector3();
+  private readonly scale = new THREE.Vector3();
+  private readonly color = new THREE.Color();
+  private readonly material: THREE.MeshBasicMaterial;
+
+  constructor(geometry: THREE.BufferGeometry, private readonly capacity: number, name: string) {
+    this.material = solidMaterial();
+    this.object = instancedMesh(geometry, this.material, capacity);
+    this.object.name = name;
+    this.object.frustumCulled = false;
+    this.object.renderOrder = 998;
+    this.object.count = 0;
+    this.object.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(capacity * 3).fill(1), 3);
+  }
+
+  begin(): void { this.used = 0; }
+
+  protected place(x: number, y: number, z: number, sx: number, sy: number, sz: number, color: THREE.ColorRepresentation): void {
+    if (this.used >= this.capacity) throw new Error(`${this.object.name} holds ${this.capacity} instances`);
+    this.matrix.compose(this.position.set(x, y, z), this.quaternion, this.scale.set(sx, sy, sz));
+    this.object.setMatrixAt(this.used, this.matrix);
+    this.object.setColorAt(this.used, this.color.set(color));
+    this.used++;
+  }
+
+  commit(): void {
+    this.object.count = this.used;
+    this.object.instanceMatrix.needsUpdate = true;
+    if (this.object.instanceColor) this.object.instanceColor.needsUpdate = true;
+  }
+
+  dispose(): void {
+    this.object.geometry.dispose();
+    this.material.dispose();
+    this.object.removeFromParent();
+  }
+}
+
+export class DebugBars extends DebugInstances {
+  constructor(capacity: number, name: string) {
+    super(new THREE.BoxGeometry(1, 1, 1).translate(0, 0.5, 0), capacity, name);
+  }
+
+  set(x: number, y: number, z: number, height: number, color: THREE.ColorRepresentation, width = 0.12, depth = width): void {
+    const up = height >= 0;
+    this.place(x, y, z, width, Math.max(0.01, Math.abs(height)) * (up ? 1 : -1), depth, color);
+  }
+}
+
+export class DebugMarks extends DebugInstances {
+  constructor(capacity: number, name: string) {
+    super(new THREE.OctahedronGeometry(1, 0), capacity, name);
+  }
+
+  set(x: number, y: number, z: number, size: number, color: THREE.ColorRepresentation): void {
+    this.place(x, y, z, size, size, size, color);
+  }
+}
+
+class DebugPolyline implements DebugPrimitive {
+  readonly object: THREE.Line;
+  protected readonly positions: Float32Array;
+  protected readonly attr: THREE.BufferAttribute;
+  protected used = 0;
+  private readonly material: THREE.LineBasicMaterial;
+
+  constructor(readonly capacity: number, color: THREE.ColorRepresentation, name: string) {
+    this.positions = new Float32Array(capacity * 3);
+    this.attr = new THREE.BufferAttribute(this.positions, 3);
+    this.attr.setUsage(THREE.DynamicDrawUsage);
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', this.attr);
+    geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 1e4);
+    geometry.setDrawRange(0, 0);
+    this.material = lineMaterial(color, 0.95);
+    this.object = new THREE.Line(geometry, this.material);
+    this.object.name = name;
+    this.object.frustumCulled = false;
+    this.object.renderOrder = 999;
+  }
+
+  begin(): void {}
+
+  commit(): void {
+    this.object.geometry.setDrawRange(0, this.used);
+    this.attr.needsUpdate = true;
+  }
+
+  dispose(): void {
+    this.object.geometry.dispose();
+    this.material.dispose();
+    this.object.removeFromParent();
+  }
+}
+
+export class DebugCurve extends DebugPolyline {
+  override begin(): void { this.used = 0; }
+
+  point(x: number, y: number, z: number): void {
+    if (this.used >= this.capacity) throw new Error(`${this.object.name} holds ${this.capacity} points`);
+    const o = this.used * 3;
+    this.positions[o] = x; this.positions[o + 1] = y; this.positions[o + 2] = z;
+    this.used++;
+  }
+}
+
+export class DebugTrail extends DebugPolyline {
+  private lastX = NaN;
+  private lastY = NaN;
+  private lastZ = NaN;
+
+  push(x: number, y: number, z: number): void {
+    if (x === this.lastX && y === this.lastY && z === this.lastZ) return;
+    this.lastX = x; this.lastY = y; this.lastZ = z;
+    if (this.used >= this.capacity) {
+      this.positions.copyWithin(0, 3);
+      this.used = this.capacity - 1;
+    }
+    const o = this.used * 3;
+    this.positions[o] = x; this.positions[o + 1] = y; this.positions[o + 2] = z;
+    this.used++;
+  }
+
+  clear(): void { this.used = 0; this.lastX = NaN; }
 }

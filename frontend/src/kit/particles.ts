@@ -1,4 +1,5 @@
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
+import { abs, attribute, clamp, cos, float, length, max, mod, positionView, pow, screenDPR, sin, smoothstep, step, texture, uniform, uv, varying, vec2, vec3 } from 'three/tsl';
 import { fbm } from './textures';
 import { mulberry32 } from './rng';
 
@@ -47,73 +48,24 @@ export interface AmbientParticlesOptions {
   opacity?: number;
   rise?: number;
   swirl?: number;
+  twinkle?: number;
   name?: string;
 }
 
 export interface AmbientParticlesHandle {
-  points: THREE.Points;
-  material: THREE.ShaderMaterial;
+  points: THREE.Sprite;
+  material: THREE.PointsNodeMaterial;
   count: number;
   setTime(t: number): void;
   setColor(color: THREE.ColorRepresentation): void;
   setIntensity(i: number): void;
   setDensity(f01: number): void;
-  setPixelRatio(ratio: number): void;
   dispose(): void;
 }
 
-const AMBIENT_VERT =  `
-#include <common>
-uniform float uTime;
-uniform float uPixelRatio;
-uniform float uSize;
-uniform vec3 uHalf;
-uniform float uRise;
-uniform float uSwirl;
-uniform float uSwirlFreq;
-uniform float uTwinkle;
-uniform float uDensity;
-attribute float aSeed;
-attribute float aPhase;
-attribute float aSize;
-varying float vAlpha;
-void main() {
-	vec3 p = position;
+const MAX_POINT_PIXELS = 511;
 
-	float span = max( uHalf.y * 2.0, 0.0001 );
-	float y = mod( ( p.y + uHalf.y ) + uRise * uTime, span ) - uHalf.y;
-
-	float s = uTime * uSwirlFreq + aPhase * 6.2831853;
-	p.x += sin( s ) * uSwirl * ( 0.45 + aSeed );
-	p.z += cos( s * 0.83 + aSeed * 3.1 ) * uSwirl * ( 0.45 + aSeed );
-	p.y = y;
-
-	vec4 mv = modelViewMatrix * vec4( p, 1.0 );
-	float twinkle = 1.0 - uTwinkle * 0.5 * ( 1.0 + sin( uTime * 2.3 + aSeed * 31.0 ) );
-	float live = step( aSeed, uDensity );
-	vAlpha = twinkle * live;
-	gl_PointSize = live * uSize * aSize * uPixelRatio * ( 60.0 / max( -mv.z, 0.001 ) );
-	gl_Position = projectionMatrix * mv;
-}
-`;
-
-const AMBIENT_FRAG =  `
-#include <common>
-uniform vec3 uColor;
-uniform float uIntensity;
-uniform float uSoftness;
-uniform float uOpacity;
-varying float vAlpha;
-void main() {
-	vec2 d = gl_PointCoord - vec2( 0.5 );
-	float r = length( d ) * 2.0;
-	float a = pow( clamp( 1.0 - r, 0.0, 1.0 ), uSoftness ) * vAlpha * uOpacity;
-	if ( a <= 0.004 ) discard;
-	gl_FragColor = vec4( uColor * uIntensity, a );
-	#include <tonemapping_fragment>
-	#include <colorspace_fragment>
-}
-`;
+export const pointSize = (pixels: THREE.Node<'float'>): THREE.Node<'float'> => clamp(pixels.mul(screenDPR), 1, MAX_POINT_PIXELS).div(screenDPR);
 
 export function makeAmbientParticles(opts: AmbientParticlesOptions): AmbientParticlesHandle {
   const spec = PARTICLE_PRESETS[opts.preset];
@@ -138,43 +90,39 @@ export function makeAmbientParticles(opts: AmbientParticlesOptions): AmbientPart
     sizes[i] = 0.55 + rng() * 0.9;
   }
 
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  geometry.setAttribute('aSeed', new THREE.BufferAttribute(seeds, 1));
-  geometry.setAttribute('aPhase', new THREE.BufferAttribute(phases, 1));
-  geometry.setAttribute('aSize', new THREE.BufferAttribute(sizes, 1));
-  geometry.setDrawRange(0, count);
-  geometry.boundingSphere = new THREE.Sphere(
-    new THREE.Vector3(0, 0, 0),
-    Math.sqrt(b.halfX * b.halfX + b.halfY * b.halfY + b.halfZ * b.halfZ) + Math.max(1, spec.swirl * 2),
-  );
-
-  const material = new THREE.ShaderMaterial({
-    uniforms: {
-      uTime: { value: 0 },
-      uPixelRatio: { value: 1 },
-      uSize: { value: opts.size ?? spec.size },
-      uHalf: { value: new THREE.Vector3(b.halfX, b.halfY, b.halfZ) },
-      uRise: { value: opts.rise ?? spec.rise },
-      uSwirl: { value: opts.swirl ?? spec.swirl },
-      uSwirlFreq: { value: spec.swirlFreq },
-      uTwinkle: { value: spec.twinkle },
-      uDensity: { value: 1 },
-      uColor: { value: new THREE.Color(opts.color ?? spec.color) },
-      uIntensity: { value: opts.intensity ?? spec.intensity },
-      uSoftness: { value: spec.softness },
-      uOpacity: { value: opts.opacity ?? spec.opacity },
-    },
-    vertexShader: AMBIENT_VERT,
-    fragmentShader: AMBIENT_FRAG,
+  const time = uniform(0), size = uniform(opts.size ?? spec.size), halfY = uniform(b.halfY), rise = uniform(opts.rise ?? spec.rise);
+  const swirl = uniform(opts.swirl ?? spec.swirl), swirlFreq = uniform(spec.swirlFreq), twinkle = uniform(opts.twinkle ?? spec.twinkle), density = uniform(1);
+  const tint = uniform(new THREE.Color(opts.color ?? spec.color)), intensity = uniform(opts.intensity ?? spec.intensity), softness = uniform(spec.softness), opacity = uniform(opts.opacity ?? spec.opacity);
+  const p = attribute<'vec3'>('aPosition', 'vec3'), seed = attribute<'float'>('aSeed', 'float');
+  const s = time.mul(swirlFreq).add(attribute<'float'>('aPhase', 'float').mul(6.2831853));
+  const live = step(seed, density);
+  const material = new THREE.PointsNodeMaterial({
     transparent: true,
     depthWrite: false,
     blending: spec.additive ? THREE.AdditiveBlending : THREE.NormalBlending,
     fog: false,
+    sizeAttenuation: false,
+    alphaTest: 0.004,
+    positionNode: vec3(
+      p.x.add(sin(s).mul(swirl).mul(seed.add(0.45))),
+      mod(p.y.add(halfY).add(rise.mul(time)), max(halfY.mul(2), 0.0001)).sub(halfY),
+      p.z.add(cos(s.mul(0.83).add(seed.mul(3.1))).mul(swirl).mul(seed.add(0.45))),
+    ),
+    sizeNode: pointSize(live.mul(size).mul(attribute<'float'>('aSize', 'float')).mul(float(60).div(max(positionView.z.negate(), 0.001)))),
+    colorNode: tint.mul(intensity),
+    opacityNode: pow(clamp(length(uv().sub(0.5)).mul(2).oneMinus(), 0, 1), softness)
+      .mul(varying(twinkle.mul(0.5).mul(sin(time.mul(2.3).add(seed.mul(31))).add(1)).oneMinus().mul(live))).mul(opacity),
   });
   material.name = opts.name ?? `oakParticles:${opts.preset}`;
 
-  const points = new THREE.Points(geometry, material);
+  const points = new THREE.Sprite(material as unknown as THREE.SpriteMaterial);
+  const geometry = points.geometry.clone();
+  geometry.setAttribute('aPosition', new THREE.InstancedBufferAttribute(positions, 3));
+  geometry.setAttribute('aSeed', new THREE.InstancedBufferAttribute(seeds, 1));
+  geometry.setAttribute('aPhase', new THREE.InstancedBufferAttribute(phases, 1));
+  geometry.setAttribute('aSize', new THREE.InstancedBufferAttribute(sizes, 1));
+  points.geometry = geometry;
+  points.count = count;
   points.name = material.name;
   points.position.set(cx, cy, cz);
   points.frustumCulled = false;
@@ -185,19 +133,16 @@ export function makeAmbientParticles(opts: AmbientParticlesOptions): AmbientPart
     material,
     count,
     setTime(t) {
-      (material.uniforms.uTime as { value: number }).value = t;
+      time.value = t;
     },
     setColor(color) {
-      (material.uniforms.uColor as { value: THREE.Color }).value.set(color);
+      tint.value.set(color);
     },
     setIntensity(i) {
-      (material.uniforms.uIntensity as { value: number }).value = i;
+      intensity.value = i;
     },
     setDensity(f01) {
-      (material.uniforms.uDensity as { value: number }).value = f01 < 0 ? 0 : f01 > 1 ? 1 : f01;
-    },
-    setPixelRatio(ratio) {
-      (material.uniforms.uPixelRatio as { value: number }).value = ratio > 0 ? ratio : 1;
+      density.value = f01 < 0 ? 0 : f01 > 1 ? 1 : f01;
     },
     dispose() {
       geometry.dispose();
@@ -223,55 +168,13 @@ export interface MistPlanesOptions {
 
 export interface MistPlanesHandle {
   group: THREE.Group;
-  material: THREE.ShaderMaterial;
+  material: THREE.MeshBasicNodeMaterial;
   layers: number;
   setTime(t: number): void;
   setOpacity(o: number): void;
   setColor(color: THREE.ColorRepresentation): void;
   dispose(): void;
 }
-
-const MIST_VERT =  `
-#include <common>
-varying vec2 vMistUv;
-varying float vDepth;
-void main() {
-	vMistUv = uv;
-	vec4 mv = modelViewMatrix * vec4( position, 1.0 );
-	vDepth = -mv.z;
-	gl_Position = projectionMatrix * mv;
-}
-`;
-
-const MIST_FRAG =  `
-#include <common>
-uniform sampler2D uNoise;
-uniform vec3 uColor;
-uniform float uTime;
-uniform float uOpacity;
-uniform float uSpeed;
-uniform float uScale;
-uniform float uNearFade;
-varying vec2 vMistUv;
-varying float vDepth;
-void main() {
-	vec2 uv = vMistUv * uScale;
-	float a = texture2D( uNoise, uv + vec2( uTime * uSpeed, uTime * uSpeed * 0.6 ) ).r;
-	float b = texture2D( uNoise, uv * 1.7 - vec2( uTime * uSpeed * 0.8, 0.0 ) ).r;
-	float n = clamp( a * 0.65 + b * 0.55 - 0.28, 0.0, 1.0 );
-
-	vec2 e = abs( vMistUv - 0.5 ) * 2.0;
-	float edge = ( 1.0 - smoothstep( 0.55, 1.0, e.x ) ) * ( 1.0 - smoothstep( 0.55, 1.0, e.y ) );
-
-	float near = smoothstep( 0.0, max( uNearFade, 0.001 ), vDepth );
-
-	float alpha = n * edge * near * uOpacity;
-	if ( alpha <= 0.004 ) discard;
-	gl_FragColor = vec4( uColor, alpha );
-	#include <tonemapping_fragment>
-	#include <colorspace_fragment>
-}
-`;
 
 export function makeMistPlanes(opts: MistPlanesOptions): MistPlanesHandle {
   const group = new THREE.Group();
@@ -283,22 +186,22 @@ export function makeMistPlanes(opts: MistPlanesOptions): MistPlanesHandle {
   const spread = opts.spread ?? 1.4;
 
   const noise = fbm(opts.seed ^ 0x2c1b3a95, { size: 256, frequency: 4, octaves: 4, gain: 0.55 });
-  const material = new THREE.ShaderMaterial({
-    uniforms: {
-      uNoise: { value: noise },
-      uColor: { value: new THREE.Color(opts.color) },
-      uTime: { value: 0 },
-      uOpacity: { value: opts.opacity ?? 0.28 },
-      uSpeed: { value: opts.speed ?? 0.012 },
-      uScale: { value: opts.scale ?? 2.5 },
-      uNearFade: { value: opts.nearFade ?? 3 },
-    },
-    vertexShader: MIST_VERT,
-    fragmentShader: MIST_FRAG,
+  const tint = uniform(new THREE.Color(opts.color)), time = uniform(0), opacity = uniform(opts.opacity ?? 0.28);
+  const speed = uniform(opts.speed ?? 0.012), scale = uniform(opts.scale ?? 2.5), nearFade = uniform(opts.nearFade ?? 3);
+  const st = uv().mul(scale), drift = time.mul(speed), e = abs(uv().sub(0.5)).mul(2);
+  const a = texture(noise, st.add(vec2(drift, drift.mul(0.6)))).r;
+  const b = texture(noise, st.mul(1.7).sub(vec2(drift.mul(0.8), 0))).r;
+  const material = new THREE.MeshBasicNodeMaterial({
     transparent: true,
     depthWrite: false,
     side: THREE.DoubleSide,
     fog: false,
+    alphaTest: 0.004,
+    colorNode: tint,
+    opacityNode: clamp(a.mul(0.65).add(b.mul(0.55)).sub(0.28), 0, 1)
+      .mul(smoothstep(0.55, 1, e.x).oneMinus().mul(smoothstep(0.55, 1, e.y).oneMinus()))
+      .mul(smoothstep(0, max(nearFade, 0.001), positionView.z.negate()))
+      .mul(opacity),
   });
   material.name = 'oakMistPlane';
 
@@ -325,13 +228,13 @@ export function makeMistPlanes(opts: MistPlanesOptions): MistPlanesHandle {
     material,
     layers,
     setTime(t) {
-      (material.uniforms.uTime as { value: number }).value = t;
+      time.value = t;
     },
     setOpacity(o) {
-      (material.uniforms.uOpacity as { value: number }).value = o;
+      opacity.value = o;
     },
     setColor(color) {
-      (material.uniforms.uColor as { value: THREE.Color }).value.set(color);
+      tint.value.set(color);
     },
     dispose() {
       geometry.dispose();

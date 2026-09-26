@@ -1,4 +1,4 @@
-export const POLICIES = ['oak', 'ppo', 'random'] as const;
+export const POLICIES = ['oak', 'ppo', 'random', 'oracle'] as const;
 export type Policy = (typeof POLICIES)[number];
 export type Baseline = Exclude<Policy, 'oak'>;
 
@@ -8,12 +8,11 @@ export interface Meta {
   batch: number;
   window: number;
   policy: Policy;
-  preset: string;
   startedAt: string;
   finishedAt?: string;
+  timingOnly?: boolean;
   stepsPerSecond?: number;
-  envSchedule: { envId: string; seedStart: number; seedEnd: number }[];
-  envCatalog: unknown;
+  envSchedule: { envId: string; seedStart: number; seedEnd: number; obs?: number; actions?: number; box?: number }[];
 }
 
 export type Baselines = Partial<Record<Baseline, Record<string, string>>>;
@@ -27,6 +26,7 @@ export const ENGINE_FILES = {
 } as const;
 
 export const JUDGE_FILE = 'baselines.json';
+export const RECORDED_ENGINE = 'oak';
 export const HEALTH_ALIVE = 0xffffffff;
 
 export interface RunIndexEntry {
@@ -36,7 +36,6 @@ export interface RunIndexEntry {
   startedAt: string;
   inFlight: boolean;
   policy: Policy;
-  preset: string;
   role: 'best' | null;
 }
 

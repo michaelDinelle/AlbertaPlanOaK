@@ -1,26 +1,24 @@
 import { useSyncExternalStore } from 'react';
-import type { EnvId } from './data/envs';
+import type { EnvDescriptor } from './data/envs';
 import type { Policy, Recording, RunIndexEntry } from './data/layout';
-import type { Tick } from './theater/recording';
 
 export type Panel = 'reward' | 'standings' | 'health';
 
 export interface StageMeta {
-  status: 'empty' | 'loading' | 'ready' | 'error';
+  status: 'empty' | 'loading' | 'buffering' | 'ready' | 'error';
   note: string | null;
-  frameCount: number;
   totalSteps: number;
-  ticks: Tick[];
 }
 
-export const EMPTY_STAGE: StageMeta = { status: 'empty', note: null, frameCount: 1, totalSteps: 0, ticks: [] };
+export const EMPTY_STAGE: StageMeta = { status: 'empty', note: null, totalSteps: 0 };
 
 export interface State {
   runs: RunIndexEntry[] | null;
+  catalog: EnvDescriptor[];
   recordings: Record<string, Recording>;
   runId: string | null;
   policy: Policy;
-  envId: EnvId | null;
+  envId: string | null;
   seed: number | null;
   panel: Panel;
   panelOpen: boolean;
@@ -31,18 +29,28 @@ export interface State {
   error: string | null;
 }
 
+const link = new URLSearchParams(location.search);
+let linkedStep = link.has('step') ? Number(link.get('step')) : null;
+
+export function takeLinkedStep(): number | null {
+  const step = linkedStep;
+  linkedStep = null;
+  return step;
+}
+
 let value: State = {
   runs: null,
+  catalog: [],
   recordings: {},
   runId: null,
   policy: 'oak',
-  envId: null,
-  seed: null,
+  envId: link.get('env'),
+  seed: link.has('seed') ? Number(link.get('seed')) : null,
   panel: 'reward',
   panelOpen: true,
-  playing: true,
+  playing: linkedStep === null,
   speed: 1,
-  debug: false,
+  debug: link.get('debug') === '1',
   stage: EMPTY_STAGE,
   error: null,
 };
@@ -62,7 +70,7 @@ export function patch(part: Partial<State>): void {
 export const store = { get, use: <T = State>(select: (state: State) => T = (state) => state as unknown as T): T => useSyncExternalStore(subscribe, () => select(value)) };
 
 export const selectRun = (runId: string): void => patch({ runId, seed: null });
-export const selectEnv = (envId: EnvId): void => patch({ envId, seed: null });
+export const selectEnv = (envId: string): void => patch({ envId, seed: null });
 export const selectSeed = (seed: number | null): void => patch({ seed });
 export const selectPolicy = (policy: Policy): void => patch({ policy });
 export const SPEEDS = [1, 4, 16, 64, 256, 1024];

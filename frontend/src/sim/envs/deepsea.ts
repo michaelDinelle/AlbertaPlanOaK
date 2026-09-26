@@ -1,87 +1,29 @@
-import { philoxDraw, STREAM_RESET } from '../philox';
-import { POSE_LEN } from '../../data/oak';
-import { NO_EVENTS, type EnvDecoder, type EnvFrame, type EnvGeometry, type SimEvent } from '../types';
-
-export const DEEPSEA_N = 8;
-export const DEEPSEA_LAST_ROW = DEEPSEA_N - 2;
+import { parameter } from '../../data/envs';
+import { NO_EVENTS, type EnvDecoder } from '../types';
 
 export const DEEPSEA_ROW = 0;
 export const DEEPSEA_COL = 1;
-export const DEEPSEA_ACTION = 4;
+export const DEEPSEA_ACTION = 2;
 
-export interface DeepSeaStatic {
-  seed: number;
-  maskLo: number;
-  maskHi: number;
-  mask: Uint8Array;
-}
-
-export function deepSeaMaskWords(seed: number): [number, number] {
-  const raw = philoxDraw(seed, STREAM_RESET, 0, 0);
-  return [raw[0], raw[1]];
-}
-
-export function deepSeaMask(maskLo: number, maskHi: number): Uint8Array {
-  const mask = new Uint8Array(DEEPSEA_N * DEEPSEA_N);
-  for (let i = 0; i < mask.length; i++) {
-    mask[i] = i < 32 ? (maskLo >>> i) & 1 : (maskHi >>> (i - 32)) & 1;
-  }
-  return mask;
-}
-
-export function deepSeaBit(st: DeepSeaStatic, r: number, c: number): number {
-  return st.mask[r * DEEPSEA_N + c] ?? 0;
-}
+export interface DeepSeaStatic { width: number; mask: Uint8Array }
 
 export function deepSeaNextCol(st: DeepSeaStatic, r: number, c: number, action: number): number {
-  const dc = (action & 1) === deepSeaBit(st, r, c) ? 1 : -1;
-  return Math.min(Math.max(c + dc, 0), DEEPSEA_N - 1);
+  const dc = (action & 1) === st.mask[r * st.width + c] ? 1 : -1;
+  return Math.min(Math.max(c + dc, 0), st.width - 1);
 }
 
-export const deepSeaDecoder: EnvDecoder<DeepSeaStatic> = {
-  envId: 'DeepSea-cont-v0',
-  seedGeometry: true,
-
-  initStatic(seed: number): DeepSeaStatic {
-    const [maskLo, maskHi] = deepSeaMaskWords(seed);
-    return { seed, maskLo, maskHi, mask: deepSeaMask(maskLo, maskHi) };
+export const deepseaDecoder: EnvDecoder = {
+  slots: 3,
+  discrete: true,
+  decode(frame, out) { out[DEEPSEA_ROW] = frame.words[0]!; out[DEEPSEA_COL] = frame.words[1]!; out[DEEPSEA_ACTION] = frame.actions[0]!; },
+  geometry({ environment }, initial) {
+    const n = parameter(environment, 'extent') + 1, mask = new Uint8Array(n * n);
+    if (initial.words.length < 3 + Math.ceil(n * n / 32)) throw new Error('DeepSea state does not carry its action map');
+    for (let i = 0; i < n * n; i++) mask[i] = (initial.words[3 + (i >>> 5)]! >>> (i & 31)) & 1;
+    return { grid: { w: n, h: n, walls: new Uint8Array(n * n), goal: { x: n - 1, y: n - 1 }, actionMask: mask } };
   },
-
-  geometry(st: DeepSeaStatic): EnvGeometry {
-    return {
-      grid: {
-        w: DEEPSEA_N,
-        h: DEEPSEA_N,
-        walls: new Uint8Array(DEEPSEA_N * DEEPSEA_N),
-        goal: { x: DEEPSEA_N - 1, y: DEEPSEA_N - 1 },
-        actionMask: st.mask,
-      },
-    };
-  },
-
-  initFrame(): EnvFrame {
-    const pose = new Float32Array(POSE_LEN);
-    pose[2] = DEEPSEA_N - 1;
-    pose[3] = DEEPSEA_N - 1;
-    return {
-      step: -1,
-      done: 0,
-      pose,
-    };
-  },
-
-  deriveEvents(
-    prev: EnvFrame,
-    next: EnvFrame,
-    st: DeepSeaStatic,
-  ): SimEvent[] {
-    const row = prev.pose[DEEPSEA_ROW] ?? 0;
-    if (row !== DEEPSEA_LAST_ROW) return NO_EVENTS;
-    const action = Math.trunc(next.pose[DEEPSEA_ACTION] ?? 0);
-    const landed = deepSeaNextCol(st, row, prev.pose[DEEPSEA_COL] ?? 0, action);
-    const out: SimEvent[] = [];
-    if (landed === DEEPSEA_N - 1) out.push({ type: 'goal' });
-    out.push({ type: 'resurface' });
-    return out;
+  deriveEvents(prev, next) {
+    if (next.words[0] !== 0 || prev.words[0] === 0) return NO_EVENTS;
+    return next.reward > 0 ? [{ type: 'goal' }, { type: 'resurface' }] : [{ type: 'resurface' }];
   },
 };

@@ -1,5 +1,4 @@
 import { memo, useCallback, useMemo, type PointerEvent, type RefObject } from 'react';
-import type { EnvId } from '../data/envs';
 import type { Recording } from '../data/layout';
 import { cached, deathStep, deliveredRate, envLanes, rateWindow, windowedRates } from '../derive';
 import { formatCount, formatRate, formatSigned, formatStep } from '../format';
@@ -87,7 +86,7 @@ export interface Comparison {
   runId: string;
 }
 
-const seriesFor = (rec: Recording, envId: EnvId) =>
+const seriesFor = (rec: Recording, envId: string) =>
   cached(rec, `reward/${envId}`, () => {
     const lanes = envLanes(rec.meta, envId);
     const rates = windowedRates(rec, lanes.lanes, rateWindow(rec.meta.steps));
@@ -97,7 +96,7 @@ const seriesFor = (rec: Recording, envId: EnvId) =>
     return { lanes, rates, rows };
   });
 
-export function RewardView({ stage, runId, envId, seed, compare }: { stage: RefObject<Stage | null>; runId: string; envId: EnvId; seed: number; compare: Comparison[] }) {
+export function RewardView({ stage, runId, envId, seed, compare }: { stage: RefObject<Stage | null>; runId: string; envId: string; seed: number; compare: Comparison[] }) {
   const picked = store.use((s) => s.seed);
   const recordings = store.use((s) => s.recordings);
   const active = recordings[runId]!;

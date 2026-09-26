@@ -1,6 +1,7 @@
 import {
   emissiveMaterial,
   oakMaterial,
+  setEmissiveColor,
   setEmissiveIntensity,
   type EmissiveMaterial,
   type OakMaterial,
@@ -8,7 +9,7 @@ import {
 import { blendTokens, clampRange } from '@kit/mix';
 import { mergeColoredParts, type ColoredPart } from '@kit/parts';
 import type { Palette } from '@kit/tokens';
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
 import {
   CAP_R,
   EYE_DROP,
@@ -39,6 +40,7 @@ export interface LanternRigHandle {
   readonly flameWorld: THREE.Vector3;
   setState(theta: number, thetaDot: number, torque: number): void;
   setGlow(serenity: number): void;
+  setChill(amount: number): void;
   setTime(t: number): void;
   dispose(): void;
 }
@@ -194,12 +196,14 @@ export function buildLanternRig(opts: LanternRigOptions): LanternRigHandle {
   curlRoot.add(curlPos, curlNeg);
 
   const flameWorld = new THREE.Vector3();
+  const curlBase = new THREE.Color(blendTokens(palette.hemiSky, accent, 0.55)), curlChill = new THREE.Color(0xbfefff), curlLive = new THREE.Color();
   let glow = 1;
   let breath = 0;
   let spin = 0;
+  let chill = 0;
 
   const applyFlame = (): void => {
-    const flicker = 1 + 0.07 * Math.sin(breath * 3.1) + 0.04 * Math.sin(breath * 7.7 + 1.1);
+    const flicker = 1 + 0.07 * Math.sin(breath * 3.1) + 0.04 * Math.sin(breath * 7.7 + 1.1) - 0.5 * chill * (0.5 + 0.5 * Math.sin(breath * 31));
     const level = glow * flicker;
     setEmissiveIntensity(paperMaterial, PAPER_BASE_HDR * (0.035 + 0.965 * level));
     setEmissiveIntensity(flameMaterial, PAPER_BASE_HDR * 1.5 * (0.02 + 0.98 * level));
@@ -235,6 +239,12 @@ export function buildLanternRig(opts: LanternRigOptions): LanternRigHandle {
 
     setGlow(serenity) {
       glow = clampRange(serenity, 0, 1);
+      applyFlame();
+    },
+
+    setChill(amount) {
+      chill = clampRange(amount, 0, 1);
+      setEmissiveColor(curlMaterial, curlLive.copy(curlBase).lerp(curlChill, chill));
       applyFlame();
     },
 

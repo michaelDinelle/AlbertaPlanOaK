@@ -1,9 +1,5 @@
+import type { EnvDescriptor } from './envs';
 import { unpackRecording, type Recording, type RunIndexEntry } from './layout';
-
-export const FRAME_FLOATS = 10;
-export const OFF_DONE = 0;
-export const OFF_POSE = 1;
-export const POSE_LEN = 9;
 
 async function api(path: string): Promise<Response> {
   const response = await fetch(`/api${path}`);
@@ -18,3 +14,5 @@ export async function fetchRuns(): Promise<RunIndexEntry[]> {
 export async function fetchRecording(id: string): Promise<Recording> {
   return unpackRecording(id, await (await api(`/runs/${encodeURIComponent(id)}`)).arrayBuffer());
 }
+
+export async function fetchCatalog(): Promise<EnvDescriptor[]> { return (await api('/catalog')).json(); }

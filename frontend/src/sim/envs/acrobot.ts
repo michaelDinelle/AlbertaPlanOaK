@@ -1,5 +1,5 @@
-import { POSE_LEN } from '../../data/oak';
 import { NO_EVENTS, type EnvDecoder, type EnvFrame, type EnvGeometry, type SimEvent } from '../types';
+import { wordFloat } from '../words';
 
 export const AB_L1 = 1;
 export const AB_L2 = 1;
@@ -16,17 +16,7 @@ export function acrobotTorque(action: number): number {
   return ((Math.trunc(action) >>> 0) % AB_ACTIONS) - 1;
 }
 
-export interface AcrobotStatic {
-  l1: number;
-  l2: number;
-  successHeight: number;
-}
 
-const STATIC: AcrobotStatic = Object.freeze({
-  l1: AB_L1,
-  l2: AB_L2,
-  successHeight: AB_SUCCESS_HEIGHT,
-});
 
 const ANCHORS: Record<string, readonly [number, number, number]> = Object.freeze({
   pivot: [0, 0, 0],
@@ -41,32 +31,20 @@ const GEOMETRY: EnvGeometry = Object.freeze({
   classic: Object.freeze({ anchors: ANCHORS }),
 });
 
-export const acrobotDecoder: EnvDecoder<AcrobotStatic> = {
-  envId: 'Acrobot-cont-v0',
-  seedGeometry: false,
-
-  initStatic(): AcrobotStatic {
-    return STATIC;
+export const acrobotDecoder: EnvDecoder = {
+  slots: 5,
+  wrap: 0b11,
+  decode(frame, out) {
+    for (let i = 0; i < 4; i++) out[i] = wordFloat(frame.words[i]!);
+    out[ACROBOT_ACTION] = frame.actions[0]!;
   },
-
   geometry(): EnvGeometry {
     return GEOMETRY;
   },
 
-  initFrame(): EnvFrame {
-    const pose = new Float32Array(POSE_LEN);
-    return {
-      step: -1,
-      done: 0,
-      pose,
-    };
-  },
 
-  deriveEvents(prev: EnvFrame, next: EnvFrame): SimEvent[] {
-    if (next.done === 0 && prev.done === 0) return NO_EVENTS;
-    const out: SimEvent[] = [];
-    if (next.done !== 0) out.push({ type: 'goal' }, { type: 'done' });
-    if (prev.done !== 0) out.push({ type: 'teleport' });
-    return out;
+  deriveEvents(_prev: EnvFrame, next: EnvFrame): SimEvent[] {
+    if (next.done === 0) return NO_EVENTS;
+    return next.reward > 0 ? [{ type: 'goal' }, { type: 'done' }, { type: 'teleport' }] : [{ type: 'harm' }, { type: 'done' }, { type: 'teleport' }];
   },
 };

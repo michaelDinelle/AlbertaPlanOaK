@@ -1,4 +1,7 @@
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
+import { abs, attribute, clamp, float, length, max, mix, positionView, pow, smoothstep, step, texture, uniform, uv, varying, vec3 } from 'three/tsl';
+import type { NumberUniform } from './materials';
+import { pointSize } from './particles';
 import { mulberry32 } from './rng';
 import { radialSprite } from './textures';
 import { TOKENS } from './tokens';
@@ -48,80 +51,11 @@ export interface CelebrationPoolOptions {
   name?: string;
 }
 
-const BURST_VERT =  `
-#include <common>
-uniform float uTime;
-uniform float uPixelRatio;
-attribute vec3 aDir;
-attribute vec3 aColor;
-attribute float aStart;
-attribute float aLife;
-attribute float aSize;
-attribute float aScale;
-attribute float aGravity;
-varying vec3 vColor;
-varying float vAlpha;
-void main() {
-	float age = uTime - aStart;
-	float live = step( 0.0, aStart ) * step( 0.0, age ) * step( age, aLife );
-	float t = clamp( age / max( aLife, 0.0001 ), 0.0, 1.0 );
-	float travel = 1.0 - pow( 1.0 - t, 2.4 );
-	vec3 p = position + aDir * ( aScale * travel );
-	p.y -= aGravity * aScale * t * t;
-	vec4 mv = modelViewMatrix * vec4( p, 1.0 );
-	vColor = aColor;
-	vAlpha = live * ( 1.0 - t ) * ( 1.0 - t );
-	gl_PointSize = live * aSize * aScale * uPixelRatio * ( 220.0 / max( -mv.z, 0.001 ) );
-	gl_Position = projectionMatrix * mv;
-}
-`;
-
-const BURST_FRAG =  `
-#include <common>
-uniform sampler2D uSprite;
-uniform float uIntensity;
-varying vec3 vColor;
-varying float vAlpha;
-void main() {
-	float a = texture2D( uSprite, gl_PointCoord ).a * vAlpha;
-	if ( a <= 0.004 ) discard;
-	gl_FragColor = vec4( vColor * uIntensity, a );
-	#include <tonemapping_fragment>
-	#include <colorspace_fragment>
-}
-`;
-
-const RIPPLE_VERT =  `
-#include <common>
-varying vec2 vUvR;
-void main() {
-	vUvR = uv;
-	gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
-}
-`;
-
-const RIPPLE_FRAG =  `
-#include <common>
-uniform vec3 uColor;
-uniform float uProgress;
-uniform float uIntensity;
-varying vec2 vUvR;
-void main() {
-	float r = length( vUvR - vec2( 0.5 ) ) * 2.0;
-	float width = mix( 0.42, 0.08, uProgress );
-	float band = 1.0 - smoothstep( 0.0, width, abs( r - 1.0 ) );
-	float fade = ( 1.0 - uProgress ) * ( 1.0 - uProgress );
-	float a = band * fade;
-	if ( a <= 0.004 ) discard;
-	gl_FragColor = vec4( uColor * uIntensity, a );
-	#include <tonemapping_fragment>
-	#include <colorspace_fragment>
-}
-`;
-
 interface RippleSlot {
   mesh: THREE.Mesh;
-  material: THREE.ShaderMaterial;
+  material: THREE.MeshBasicNodeMaterial;
+  color: THREE.Color;
+  progress: NumberUniform;
   start: number;
   life: number;
   scale: number;
@@ -137,23 +71,22 @@ export class CelebrationPool {
   private readonly sighRadius: number;
   private readonly sighHeight: number;
 
-  private readonly points: THREE.Points | null;
-  private readonly pointsMaterial: THREE.ShaderMaterial | null;
-  private readonly pointsGeometry: THREE.BufferGeometry | null;
-  private readonly sprite: THREE.DataTexture | null;
+  private readonly pointsMaterial: THREE.PointsNodeMaterial;
+  private readonly pointsGeometry: THREE.BufferGeometry;
+  private readonly sprite: THREE.DataTexture;
+  private readonly clock = uniform(0);
 
   private readonly posArray: Float32Array;
   private readonly dirArray: Float32Array;
   private readonly colorArray: Float32Array;
   private readonly startArray: Float32Array;
   private readonly lifeArray: Float32Array;
-  private readonly sizeArray: Float32Array;
   private readonly scaleArray: Float32Array;
   private readonly gravityArray: Float32Array;
   private readonly attrs: THREE.BufferAttribute[] = [];
 
   private readonly ripples: RippleSlot[] = [];
-  private readonly rippleGeometry: THREE.BufferGeometry | null;
+  private readonly rippleGeometry: THREE.BufferGeometry;
 
   private cursor = 0;
   private rippleCursor = 0;
@@ -172,14 +105,13 @@ export class CelebrationPool {
     this.group.name = opts.name ?? 'oakCelebrations';
 
     const n = this.capacity;
-    this.posArray = new Float32Array(Math.max(1, n) * 3);
-    this.dirArray = new Float32Array(Math.max(1, n) * 3);
-    this.colorArray = new Float32Array(Math.max(1, n) * 3);
-    this.startArray = new Float32Array(Math.max(1, n)).fill(-1);
-    this.lifeArray = new Float32Array(Math.max(1, n)).fill(1);
-    this.sizeArray = new Float32Array(Math.max(1, n)).fill(1);
-    this.scaleArray = new Float32Array(Math.max(1, n)).fill(1);
-    this.gravityArray = new Float32Array(Math.max(1, n));
+    this.posArray = new Float32Array(n * 3);
+    this.dirArray = new Float32Array(n * 4);
+    this.colorArray = new Float32Array(n * 3);
+    this.startArray = new Float32Array(n).fill(-1);
+    this.lifeArray = new Float32Array(n).fill(1);
+    this.scaleArray = new Float32Array(n).fill(1);
+    this.gravityArray = new Float32Array(n);
 
     const rng = mulberry32((opts.seed ?? 0) ^ 0x51a3f7);
     for (let i = 0; i < n; i++) {
@@ -187,74 +119,65 @@ export class CelebrationPool {
       const a = rng() * Math.PI * 2;
       const r = Math.sqrt(Math.max(0, 1 - u * u));
       const y = Math.abs(u) * 0.85 + 0.15;
-      this.dirArray[i * 3] = Math.cos(a) * r;
-      this.dirArray[i * 3 + 1] = y;
-      this.dirArray[i * 3 + 2] = Math.sin(a) * r;
-      this.sizeArray[i] = 0.5 + rng() * 0.9;
+      this.dirArray[i * 4] = Math.cos(a) * r;
+      this.dirArray[i * 4 + 1] = y;
+      this.dirArray[i * 4 + 2] = Math.sin(a) * r;
+      this.dirArray[i * 4 + 3] = 0.5 + rng() * 0.9;
     }
 
-    if (n > 0) {
-      this.sprite = radialSprite(64, 2.2);
-      this.pointsGeometry = new THREE.BufferGeometry();
-      const add = (name: string, array: Float32Array, size: number): void => {
-        const attr = new THREE.BufferAttribute(array, size);
-        attr.setUsage(THREE.DynamicDrawUsage);
-        this.pointsGeometry?.setAttribute(name, attr);
-        this.attrs.push(attr);
-      };
-      add('position', this.posArray, 3);
-      add('aDir', this.dirArray, 3);
-      add('aColor', this.colorArray, 3);
-      add('aStart', this.startArray, 1);
-      add('aLife', this.lifeArray, 1);
-      add('aSize', this.sizeArray, 1);
-      add('aScale', this.scaleArray, 1);
-      add('aGravity', this.gravityArray, 1);
-      this.pointsGeometry.setDrawRange(0, n);
-      this.pointsGeometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 1e4);
+    this.sprite = radialSprite(64, 2.2);
+    const start = attribute<'float'>('aStart', 'float'), life = attribute<'float'>('aLife', 'float'), scale = attribute<'float'>('aScale', 'float'), dir = attribute<'vec4'>('aDir', 'vec4');
+    const age = this.clock.sub(start);
+    const live = step(0, start).mul(step(0, age)).mul(step(age, life));
+    const t = clamp(age.div(max(life, 0.0001)), 0, 1);
+    const p = attribute<'vec3'>('aPosition', 'vec3').add(dir.xyz.mul(scale.mul(pow(t.oneMinus(), 2.4).oneMinus())));
+    this.pointsMaterial = new THREE.PointsNodeMaterial({
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      fog: false,
+      sizeAttenuation: false,
+      alphaTest: 0.004,
+      positionNode: vec3(p.x, p.y.sub(attribute<'float'>('aGravity', 'float').mul(scale).mul(t).mul(t)), p.z),
+      sizeNode: pointSize(live.mul(dir.w).mul(scale).mul(float(220).div(max(positionView.z.negate(), 0.001)))),
+      colorNode: attribute<'vec3'>('aColor', 'vec3').mul(2.4),
+      opacityNode: texture(this.sprite, uv()).a.mul(varying(live.mul(t.oneMinus()).mul(t.oneMinus()))),
+    });
+    this.pointsMaterial.name = 'oakCelebrationBurst';
+    const points = new THREE.Sprite(this.pointsMaterial as unknown as THREE.SpriteMaterial);
+    this.pointsGeometry = points.geometry.clone();
+    const add = (name: string, array: Float32Array, size: number): void => {
+      const attr = new THREE.InstancedBufferAttribute(array, size);
+      this.pointsGeometry.setAttribute(name, attr);
+      this.attrs.push(attr);
+    };
+    add('aPosition', this.posArray, 3);
+    add('aDir', this.dirArray, 4);
+    add('aColor', this.colorArray, 3);
+    add('aStart', this.startArray, 1);
+    add('aLife', this.lifeArray, 1);
+    add('aScale', this.scaleArray, 1);
+    add('aGravity', this.gravityArray, 1);
+    points.geometry = this.pointsGeometry;
+    points.count = n;
+    points.name = 'oakCelebrationBurst';
+    points.frustumCulled = false;
+    this.group.add(points);
 
-      this.pointsMaterial = new THREE.ShaderMaterial({
-        uniforms: {
-          uTime: { value: 0 },
-          uPixelRatio: { value: 1 },
-          uSprite: { value: this.sprite },
-          uIntensity: { value: 2.4 },
-        },
-        vertexShader: BURST_VERT,
-        fragmentShader: BURST_FRAG,
-        transparent: true,
-        depthWrite: false,
-        blending: THREE.AdditiveBlending,
-        fog: false,
-      });
-      this.pointsMaterial.name = 'oakCelebrationBurst';
-      this.points = new THREE.Points(this.pointsGeometry, this.pointsMaterial);
-      this.points.name = 'oakCelebrationBurst';
-      this.points.frustumCulled = false;
-      this.group.add(this.points);
-    } else {
-      this.points = null;
-      this.pointsMaterial = null;
-      this.pointsGeometry = null;
-      this.sprite = null;
-    }
-
-    this.rippleGeometry = new THREE.PlaneGeometry(1, 1);
+    this.rippleGeometry = new THREE.PlaneGeometry(1.5, 1.5);
     this.rippleGeometry.rotateX(-Math.PI / 2);
+    const radius = length(uv().sub(0.5)).mul(3);
     for (let i = 0; i < RIPPLE_CAPACITY; i++) {
-      const material = new THREE.ShaderMaterial({
-        uniforms: {
-          uColor: { value: new THREE.Color(TOKENS.celebrationGold) },
-          uProgress: { value: 1 },
-          uIntensity: { value: 1.8 },
-        },
-        vertexShader: RIPPLE_VERT,
-        fragmentShader: RIPPLE_FRAG,
+      const color = new THREE.Color(TOKENS.celebrationGold), progress = uniform(1);
+      const material = new THREE.MeshBasicNodeMaterial({
         transparent: true,
         depthWrite: false,
         side: THREE.DoubleSide,
         blending: THREE.AdditiveBlending,
         fog: false,
+        alphaTest: 0.004,
+        colorNode: uniform(color).mul(1.8),
+        opacityNode: smoothstep(0, mix(0.42, 0.08, progress), abs(radius.sub(1))).oneMinus().mul(progress.oneMinus().mul(progress.oneMinus())),
       });
       material.name = 'oakCelebrationRipple';
       const mesh = new THREE.Mesh(this.rippleGeometry, material);
@@ -263,7 +186,7 @@ export class CelebrationPool {
       mesh.frustumCulled = false;
       mesh.renderOrder = 2;
       this.group.add(mesh);
-      this.ripples.push({ mesh, material, start: -1, life: 1, scale: 1 });
+      this.ripples.push({ mesh, material, color, progress, start: -1, life: 1, scale: 1 });
     }
   
   }
@@ -280,14 +203,13 @@ export class CelebrationPool {
 
   setTime(time: number): void {
     this.time = time;
-    if (this.pointsMaterial) (this.pointsMaterial.uniforms.uTime as { value: number }).value = time;
+    this.clock.value = time;
   }
 
   burst(pos: { x: number; y: number; z: number }, color: THREE.ColorRepresentation, scale = 1, now?: number): void {
     if (now !== undefined) this.setTime(now);
     this.burstsFired++;
     this.pulse.fire(Math.min(1, scale));
-    if (!this.points || this.capacity === 0) return;
     this.color.set(color);
     const count = Math.max(1, Math.min(this.capacity, Math.round(this.burstSize * Math.max(0.25, scale))));
     const life = 0.75 + 0.5 * scale;
@@ -322,8 +244,8 @@ export class CelebrationPool {
     slot.start = this.time;
     slot.life = 0.85 + 0.35 * scale;
     slot.scale = 3.2 * scale;
-    (slot.material.uniforms.uColor as { value: THREE.Color }).value.set(color);
-    (slot.material.uniforms.uProgress as { value: number }).value = 0;
+    slot.color.set(color);
+    slot.progress.value = 0;
     slot.mesh.position.set(groundPos.x, groundPos.y + 0.02, groundPos.z);
     slot.mesh.scale.setScalar(0.001);
     slot.mesh.visible = true;
@@ -332,7 +254,6 @@ export class CelebrationPool {
   sigh(strength = 1, center?: { x: number; y: number; z: number }, now?: number): void {
     if (now !== undefined) this.setTime(now);
     this.pulse.fireSigh(Math.min(1, strength));
-    if (!this.points || this.capacity === 0) return;
     this.color.set(TOKENS.failureBlue);
     const cx = center?.x ?? 0;
     const cy = center?.y ?? 0;
@@ -341,9 +262,9 @@ export class CelebrationPool {
     for (let k = 0; k < count; k++) {
       const i = this.cursor;
       this.cursor = (this.cursor + 1) % this.capacity;
-      const dx = this.dirArray[i * 3] ?? 0;
-      const dz = this.dirArray[i * 3 + 2] ?? 0;
-      const dy = this.dirArray[i * 3 + 1] ?? 0;
+      const dx = this.dirArray[i * 4] ?? 0;
+      const dz = this.dirArray[i * 4 + 2] ?? 0;
+      const dy = this.dirArray[i * 4 + 1] ?? 0;
       this.posArray[i * 3] = cx + dx * this.sighRadius;
       this.posArray[i * 3 + 1] = cy + this.sighHeight * (0.4 + 0.6 * dy);
       this.posArray[i * 3 + 2] = cz + dz * this.sighRadius;
@@ -358,14 +279,10 @@ export class CelebrationPool {
     this.markParticlesDirty();
   }
 
-  setPixelRatio(ratio: number): void {
-    if (this.pointsMaterial) (this.pointsMaterial.uniforms.uPixelRatio as { value: number }).value = ratio;
-  }
-
   update(dt: number, time: number): void {
     this.time = time;
     this.pulse.update(dt);
-    if (this.pointsMaterial) (this.pointsMaterial.uniforms.uTime as { value: number }).value = time;
+    this.clock.value = time;
     for (const slot of this.ripples) {
       if (!slot.mesh.visible) continue;
       const age = time - slot.start;
@@ -374,7 +291,7 @@ export class CelebrationPool {
         continue;
       }
       const t = age / slot.life;
-      (slot.material.uniforms.uProgress as { value: number }).value = t;
+      slot.progress.value = t;
       slot.mesh.scale.setScalar(Math.max(0.001, slot.scale * (0.15 + 0.85 * Math.sqrt(t))));
     }
   }
@@ -390,10 +307,10 @@ export class CelebrationPool {
   }
 
   dispose(): void {
-    this.pointsGeometry?.dispose();
-    this.pointsMaterial?.dispose();
-    this.sprite?.dispose();
-    this.rippleGeometry?.dispose();
+    this.pointsGeometry.dispose();
+    this.pointsMaterial.dispose();
+    this.sprite.dispose();
+    this.rippleGeometry.dispose();
     for (const slot of this.ripples) slot.material.dispose();
     this.ripples.length = 0;
     this.group.removeFromParent();

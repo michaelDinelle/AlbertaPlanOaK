@@ -7,6 +7,7 @@
   --color-ink: oklch(96% 0 0);
   --color-ink-dim: oklch(88% 0 0);
   --color-ink-faint: oklch(77% 0 0);
+  --color-emblem: #e24d85;
   --color-accent: oklch(77.7% 0.128 238.9);
   --color-seed: oklch(88% 0.135 86.1);
   --color-good: oklch(79.4% 0.149 142.9);
@@ -15,6 +16,7 @@
   --color-best: oklch(74% 0.19 145);
   --color-ppo: oklch(64.4% 0.146 288.5);
   --color-random: oklch(66.2% 0.039 257.4);
+  --color-oracle: oklch(80% 0.12 85);
   --color-crit: oklch(64.8% 0.162 30.2);
   --color-ramp-2: oklch(56.1% 0.109 240.1);
   --color-ramp-4: oklch(80% 0.098 232.1);

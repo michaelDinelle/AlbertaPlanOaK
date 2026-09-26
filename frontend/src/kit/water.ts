@@ -1,6 +1,9 @@
-import * as THREE from 'three';
-import { Reflector } from 'three/addons/objects/Reflector.js';
+import * as THREE from 'three/webgpu';
+import { Fn, abs, attribute, cameraPosition, cameraProjectionMatrix, clamp, cos, dot, exp, float, fract, fwidth, length, max, min, mix, modelViewMatrix, modelWorldMatrix, normalize, positionGeometry, positionView, positionWorld, pow, reflector, sin, smoothstep, uniform, varying, vec2, vec3, vec4 } from 'three/tsl';
 import type { Palette } from './tokens';
+import type { ViewCoverage } from './view';
+
+type N<T extends string> = THREE.Node<T>;
 
 const REFLECTION_DISTORTION = 0.055;
 
@@ -25,9 +28,16 @@ export interface WaterOptions {
   bedHeight?: (x: number, z: number) => number;
 }
 
+export interface WaterFluid {
+  sample(p: N<'vec2'>): N<'vec4'>;
+  flow: N<'vec2'>;
+}
+
 export type WaterHandle = ReturnType<typeof makeWater>;
 
-const WAVES: readonly (readonly [number, number, number, number])[] = [
+type Wave = readonly [number, number, number, number];
+
+const WAVES: readonly Wave[] = [
   [1.0, 0.15, 0.9, 0.55],
   [-0.35, 1.0, 1.35, 0.42],
   [0.7, -0.7, 2.6, 0.95],
@@ -38,125 +48,40 @@ const WAVE_AMPS: readonly number[] = [0.55, 0.3, 0.11, 0.06];
 export function waterHeightAt(x: number, z: number, time: number, amplitude: number, waveScale: number, speed: number): number {
   let h = 0;
   for (let i = 0; i < WAVES.length; i++) {
-    const w = WAVES[i] as readonly [number, number, number, number];
+    const w = WAVES[i] as Wave;
     const amp = WAVE_AMPS[i] as number;
     h += amp * Math.sin((x * w[0] + z * w[1]) * w[2] * waveScale + time * w[3] * speed);
   }
   return h * amplitude;
 }
 
-const WAVE_GLSL =  `
-const int OAK_WAVES = ${WAVES.length};
-const vec4 OAK_WAVE[ OAK_WAVES ] = vec4[ OAK_WAVES ](${WAVES.map(w => `vec4(${w.map(n => n.toFixed(2)).join(',')})`).join(',')});
-const float OAK_WAVE_AMP[ OAK_WAVES ] = float[ OAK_WAVES ](${WAVE_AMPS.join(',')});
+const heading = (w: Wave) => vec2(w[0], w[1]);
 
-float oakWaveHeight( vec2 p, float t, float scale, float speed ) {
-	float h = 0.0;
-	for ( int i = 0; i < OAK_WAVES; i ++ ) {
-		vec4 w = OAK_WAVE[ i ];
-		h += OAK_WAVE_AMP[ i ] * sin( dot( p, w.xy ) * w.z * scale + t * w.w * speed );
-	}
-	return h;
+function waveHeight(p: N<'vec2'>, t: N<'float'>, scale: N<'float'>, speed: N<'float'>): N<'float'> {
+  return WAVES.reduce<N<'float'>>((h, w, i) => h.add(sin(dot(p, heading(w)).mul(w[2]).mul(scale).add(t.mul(w[3]).mul(speed))).mul(WAVE_AMPS[i]!)), float(0));
 }
 
-vec2 oakWaveSlope( vec2 p, float t, float scale, float speed ) {
-	vec2 g = vec2( 0.0 );
-	for ( int i = 0; i < OAK_WAVES; i ++ ) {
-		vec4 w = OAK_WAVE[ i ];
-		float k = w.z * scale;
-		float c = cos( dot( p, w.xy ) * k + t * w.w * speed );
-		g += OAK_WAVE_AMP[ i ] * c * k * w.xy;
-	}
-	return g;
-}
-`;
-
-const WATER_VERT =  `
-#include <common>
-#include <fog_pars_vertex>
-uniform float uTime;
-uniform float uAmplitude;
-uniform float uWaveScale;
-uniform float uSpeed;
-varying vec3 vWorld;
-varying vec3 vNormalW;
-varying float vHeight;
-varying float vDepth;
-${WAVE_GLSL}
-void main() {
-	vec3 p = position;
-	vec4 world4 = modelMatrix * vec4( p, 1.0 );
-	vec2 wp = world4.xz;
-	float h = oakWaveHeight( wp, uTime, uWaveScale, uSpeed ) * uAmplitude;
-	world4.y += h;
-	vec2 slope = oakWaveSlope( wp, uTime, uWaveScale, uSpeed ) * uAmplitude;
-	vNormalW = normalize( vec3( -slope.x, 1.0, -slope.y ) );
-	vWorld = world4.xyz;
-	vHeight = h;
-	vec4 mv = viewMatrix * world4;
-	vDepth = -mv.z;
-	gl_Position = projectionMatrix * mv;
-	#ifdef USE_FOG
-		vFogDepth = -mv.z;
-	#endif
-}
-`;
-
-const WATER_FRAG =  `
-#include <common>
-#include <fog_pars_fragment>
-uniform vec3 uShallow;
-uniform vec3 uDeep;
-uniform vec3 uSky;
-uniform vec3 uCaustic;
-uniform float uTime;
-uniform float uFresnel;
-uniform float uCausticStrength;
-uniform float uDepthFalloff;
-uniform float uOpacity;
-uniform float uWaveScale;
-uniform float uSpeed;
-uniform vec3 uSunDir;
-uniform float uSpecular;
-varying vec3 vWorld;
-varying vec3 vNormalW;
-varying float vHeight;
-varying float vDepth;
-
-float oakCaustic( vec2 p, float t ) {
-	vec2 a = p * 1.7 + vec2( t * 0.09, t * 0.06 );
-	vec2 b = p * 2.3 - vec2( t * 0.07, t * 0.11 );
-	float ca = abs( fract( a.x + a.y ) - 0.5 ) + abs( fract( a.x - a.y ) - 0.5 );
-	float cb = abs( fract( b.x + b.y ) - 0.5 ) + abs( fract( b.x - b.y ) - 0.5 );
-	float c = 1.0 - clamp( min( ca, cb ) * 2.4, 0.0, 1.0 );
-	return pow( c, 3.0 );
+function waveSlope(p: N<'vec2'>, t: N<'float'>, scale: N<'float'>, speed: N<'float'>): N<'vec2'> {
+  return WAVES.reduce<N<'vec2'>>((g, w, i) => {
+    const k = scale.mul(w[2]);
+    return g.add(cos(dot(p, heading(w)).mul(k).add(t.mul(w[3]).mul(speed))).mul(WAVE_AMPS[i]!).mul(k).mul(heading(w)));
+  }, vec2(0));
 }
 
-void main() {
-	vec3 n = normalize( vNormalW );
-	vec3 viewDir = normalize( cameraPosition - vWorld );
-
-	float byDepth = 1.0 - exp( -vDepth / max( uDepthFalloff, 0.001 ) );
-	float byTrough = clamp( 0.5 - vHeight * 6.0, 0.0, 1.0 );
-	vec3 col = mix( uShallow, uDeep, clamp( byDepth * 0.75 + byTrough * 0.35, 0.0, 1.0 ) );
-
-	float caustic = oakCaustic( vWorld.xz * uWaveScale, uTime * uSpeed );
-	col += uCaustic * ( caustic * uCausticStrength * ( 1.0 - byDepth * 0.7 ) );
-
-	float f = pow( clamp( 1.0 - dot( n, viewDir ), 0.0, 1.0 ), 3.0 );
-	col = mix( col, uSky, f * uFresnel );
-
-	vec3 halfV = normalize( normalize( uSunDir ) + viewDir );
-	float spec = pow( clamp( dot( n, halfV ), 0.0, 1.0 ), 96.0 );
-	col += uSky * ( spec * uSpecular );
-
-	float alpha = clamp( uOpacity + f * 0.35, 0.0, 1.0 );
-	gl_FragColor = vec4( col, alpha );
-	#include <tonemapping_fragment>
-	#include <colorspace_fragment>
-	#include <fog_fragment>
+function caustic(p: N<'vec2'>, t: N<'float'>): N<'float'> {
+  const a = p.mul(1.7).add(vec2(t.mul(0.09), t.mul(0.06))), b = p.mul(2.3).sub(vec2(t.mul(0.07), t.mul(0.11)));
+  const ca = abs(fract(a.x.add(a.y)).sub(0.5)).add(abs(fract(a.x.sub(a.y)).sub(0.5)));
+  const cb = abs(fract(b.x.add(b.y)).sub(0.5)).add(abs(fract(b.x.sub(b.y)).sub(0.5)));
+  return pow(clamp(min(ca, cb).mul(2.4), 0, 1).oneMinus(), 3);
 }
-`;
+
+interface Surface {
+  world: ((p: N<'vec2'>) => N<'float'>) | null;
+  fluid: WaterFluid | null;
+  shade(): void;
+}
+
+const surfaces = new WeakMap<THREE.Material, Surface>();
 
 export function makeWater(opts: WaterOptions) {
   const sizeX = typeof opts.size === 'number' ? opts.size : opts.size[0];
@@ -173,31 +98,24 @@ export function makeWater(opts: WaterOptions) {
   sun.normalize();
 
   const uniforms = {
-    uTime: { value: 0 },
-    uShallow: { value: new THREE.Color(opts.shallow ?? p.skyHorizon).lerp(new THREE.Color(p.groundB), 0.35) },
-    uDeep: { value: new THREE.Color(opts.deep ?? p.fog).lerp(new THREE.Color(p.skyBottom), 0.55) },
-    uSky: { value: new THREE.Color(opts.sky ?? p.skyHorizon) },
-    uCaustic: { value: new THREE.Color(opts.caustic ?? p.sun) },
-    uAmplitude: { value: amplitude },
-    uWaveScale: { value: waveScale },
-    uSpeed: { value: speed },
-    uFresnel: { value: opts.fresnel ?? 0.55 },
-    uCausticStrength: { value: opts.caustics ?? 0.35 },
-    uDepthFalloff: { value: opts.depthFalloff ?? 9 },
-    uOpacity: { value: opts.opacity ?? 0.86 },
-    uSunDir: { value: sun },
-    uSpecular: { value: 1.6 },
+    uTime: uniform(0),
+    uShallow: uniform(new THREE.Color(opts.shallow ?? p.skyHorizon).lerp(new THREE.Color(p.groundB), 0.35)),
+    uDeep: uniform(new THREE.Color(opts.deep ?? p.fog).lerp(new THREE.Color(p.skyBottom), 0.55)),
+    uSky: uniform(new THREE.Color(opts.sky ?? p.skyHorizon)),
+    uCaustic: uniform(new THREE.Color(opts.caustic ?? p.sun)),
+    uAmplitude: uniform(amplitude),
+    uWaveScale: uniform(waveScale),
+    uSpeed: uniform(speed),
+    uFresnel: uniform(opts.fresnel ?? 0.55),
+    uCausticStrength: uniform(opts.caustics ?? 0.35),
+    uDepthFalloff: uniform(opts.depthFalloff ?? 9),
+    uOpacity: uniform(opts.opacity ?? 0.86),
+    uSunDir: uniform(sun),
+    uSpecular: uniform(1.6),
   };
 
-  const shader = {
-    uniforms: { ...THREE.UniformsUtils.clone(THREE.UniformsLib.fog), ...uniforms },
-    vertexShader: WATER_VERT,
-    fragmentShader: WATER_FRAG,
-  };
   const geometry = new THREE.PlaneGeometry(sizeX, sizeZ, seg, seg);
-  if (!opts.bedHeight) geometry.rotateX(-Math.PI / 2);
   geometry.name = 'oakWater';
-  let mesh: THREE.Mesh;
   if (opts.bedHeight) {
     const positions = geometry.getAttribute('position'), depths = new Float32Array(positions.count);
     const stretch = (p: number, size: number) => Math.sign(p) * (4 * Math.abs(p * 2 / size) + (size / 2 - 4) * Math.abs(p * 2 / size) ** 3);
@@ -213,59 +131,71 @@ export function makeWater(opts: WaterOptions) {
       if (Math.max(depths[a]!, depths[b]!, depths[c]!) > -0.3) indices.push(a, b, c);
     }
     geometry.setIndex(indices);
-    shader.vertexShader = shader.vertexShader.replace('void main() {', `
-uniform mat4 textureMatrix;
-attribute float waterDepth;
-varying float vWaterDepth;
-varying vec4 vReflection;
-void main() {
-  vReflection = textureMatrix * vec4(position, 1.0);
-  vWaterDepth = waterDepth;
-`);
-    shader.fragmentShader = shader.fragmentShader.replace('void main() {', `
-uniform sampler2D tDiffuse;
-uniform float uAmplitude;
-varying float vWaterDepth;
-varying vec4 vReflection;
-${WAVE_GLSL}
-void main() {`).replace('vec3 n = normalize( vNormalW );', `
-  float depth = vWaterDepth + vHeight;
-  if (depth <= 0.0) discard;
-  float footprint = length(fwidth(vWorld.xz));
-  vec2 slope = oakWaveSlope(vWorld.xz, uTime, uWaveScale, uSpeed) * uAmplitude;
-  slope += oakWaveSlope(vWorld.xz, uTime, uWaveScale * 5.0, uSpeed * 1.3) * uAmplitude * 0.035 / (1.0 + footprint * 8.0);
-  vec3 n = normalize(vec3(-slope.x, 1.0, -slope.y));
-`).replace('-vDepth / max( uDepthFalloff, 0.001 )', '-depth / max(uDepthFalloff, 0.001)')
-      .replace('col = mix( col, uSky, f * uFresnel );', `
-  f = 0.025 + 0.975 * pow(1.0 - max(dot(n, viewDir), 0.0), 5.0);
-  vec2 uv = vReflection.xy / vReflection.w + n.xz * ${REFLECTION_DISTORTION} * smoothstep(0.0, 0.8, depth);
-  vec3 reflected = texture2D(tDiffuse, clamp(uv, 0.002, 0.998)).rgb;
-  float absorption = 1.0 - exp(-depth / max(uDepthFalloff, 0.001));
-  float coverage = f + absorption * (1.0 - f);
-  col = (reflected * f + col * absorption * (1.0 - f)) / max(coverage, 0.001);
-`).replace('float alpha = clamp( uOpacity + f * 0.35, 0.0, 1.0 );', 'float alpha = coverage * smoothstep(0.0, 0.035, depth);');
-    const reflection = new Reflector(geometry, { textureWidth: 1, textureHeight: 1, clipBias: 0.002, shader: {
-      ...shader, uniforms: { ...shader.uniforms, tDiffuse: { value: null }, color: { value: null }, textureMatrix: { value: new THREE.Matrix4() } },
-    } });
-    reflection.rotation.x = -Math.PI / 2;
-    const capture = reflection.onBeforeRender, size = new THREE.Vector2(), normal = new THREE.Vector3(), target = reflection.getRenderTarget();
-    reflection.onBeforeRender = function (renderer, scene, camera, geometry, material, group) {
-      renderer.getDrawingBufferSize(size);
-      if (target.width !== size.x || target.height !== size.y) target.setSize(size.x, size.y);
-      normal.set(0, 1, 0).transformDirection(camera.matrixWorldInverse);
-      const projection = camera.projectionMatrix.elements;
-      const horizon = (normal.z + Math.abs(normal.x / projection[0]!)) * projection[5]! / normal.y;
-      target.scissor.set(0, 0, size.x, Math.ceil(size.y * THREE.MathUtils.clamp((horizon + 1) / 2 + REFLECTION_DISTORTION, 0, 1)));
-      target.scissorTest = true;
-      capture.call(this, renderer, scene, camera, geometry, material, group);
-    };
-    mesh = reflection;
-  } else mesh = new THREE.Mesh(geometry, new THREE.ShaderMaterial(shader));
-  const material = mesh.material as THREE.ShaderMaterial;
-  Object.assign(material.uniforms, uniforms);
+  }
+  geometry.rotateX(-Math.PI / 2);
+  const material = new THREE.NodeMaterial();
   material.name = opts.name ?? 'oakWater';
-  material.transparent = material.fog = true;
+  material.transparent = true;
   material.depthWrite = false;
+  const mesh = new THREE.Mesh(geometry, material);
+  const mirror = opts.bedHeight ? reflector({ resolutionScale: 0.5, samples: 4 }) : null;
+  if (mirror) {
+    mirror.target.rotation.x = -Math.PI / 2;
+    mesh.add(mirror.target);
+  }
+
+  const u = uniforms;
+  const surface: Surface = {
+    world: null,
+    fluid: null,
+    shade() {
+      const { world, fluid } = surface;
+      const wp = modelWorldMatrix.mul(vec4(positionGeometry, 1)).xz;
+      const height = varying(fluid ? fluid.sample(wp).r : waveHeight(wp, u.uTime, u.uWaveScale, u.uSpeed).mul(u.uAmplitude));
+      const lean = waveSlope(wp, u.uTime, u.uWaveScale, u.uSpeed).mul(u.uAmplitude);
+      const normal = varying(normalize(vec3(lean.x.negate(), 1, lean.y.negate())));
+      const clip = cameraProjectionMatrix.mul(modelViewMatrix.mul(vec4(positionGeometry, 1)));
+      const projected = varying(vec3(clip.w.sub(clip.x).mul(0.5), clip.y.add(clip.w).mul(0.5), clip.w));
+
+      const at = positionWorld.xz, view = normalize(cameraPosition.sub(positionWorld)), footprint = length(fwidth(at));
+      const depth = attribute<'float'>('waterDepth', 'float').add(height), flowing = fluid?.sample(at);
+      const wave = WAVES.reduce<N<'vec3'>>((sum, w, i) => {
+        const k = u.uWaveScale.mul(w[2]), phase = dot(at, heading(w)).mul(k).add(u.uTime.mul(w[3]).mul(u.uSpeed));
+        const size = u.uAmplitude.mul(WAVE_AMPS[i]!).div(footprint.mul(footprint).mul(k).mul(k).add(1));
+        return sum.add(vec3(cos(phase).mul(size).mul(k).mul(heading(w)), sin(phase).mul(size)));
+      }, vec3(0));
+      const slope = (flowing?.gb ?? waveSlope(at, u.uTime, u.uWaveScale, u.uSpeed).mul(u.uAmplitude))
+        .add(waveSlope(fluid ? at.sub(fluid.flow.mul(u.uTime)) : at, u.uTime, u.uWaveScale.mul(5), u.uSpeed.mul(1.3)).mul(u.uAmplitude).mul(0.035).div(footprint.mul(8).add(1)));
+      const n = normalize(world ? vec3(wave.x.negate(), 1, wave.y.negate()) : mirror ? vec3(slope.x.negate(), 1, slope.y.negate()) : normal);
+
+      const byDepth = exp((world ? max(0, world(at)) : mirror ? depth : positionView.z.negate()).negate().div(max(u.uDepthFalloff, 0.001))).oneMinus();
+      const byTrough = clamp(float(0.5).sub((world ? wave.z : height).mul(6)), 0, 1);
+      const glint = caustic(at.mul(u.uWaveScale), u.uTime.mul(u.uSpeed));
+      const water = mix(u.uShallow, u.uDeep, clamp(byDepth.mul(0.75).add(byTrough.mul(0.35)), 0, 1))
+        .add(u.uCaustic.mul((world ? glint.mul(smoothstep(0.12, 0.7, footprint.mul(u.uWaveScale)).oneMinus()) : glint).mul(u.uCausticStrength).mul(byDepth.mul(0.7).oneMinus())));
+
+      const f = mirror ? float(0.975).mul(pow(max(dot(n, view), 0).oneMinus(), 5)).add(0.025) : pow(clamp(dot(n, view).oneMinus(), 0, 1), 3);
+      const coverage = f.add(byDepth.mul(f.oneMinus()));
+      if (mirror) {
+        const uv = clamp(projected.xy.div(projected.z).add(n.xz.mul(REFLECTION_DISTORTION).mul(smoothstep(0, 0.8, depth))), 0.002, 0.998);
+        mirror.uvNode = vec2(uv.x, uv.y.oneMinus());
+      }
+      const lit = mirror ? mirror.rgb.mul(f).add(water.mul(byDepth).mul(f.oneMinus())).div(max(coverage, 0.001)) : mix(water, u.uSky, f.mul(u.uFresnel));
+      const spec = pow(clamp(dot(n, normalize(normalize(u.uSunDir).add(view))), 0, 1), world ? 36 : 96).mul(u.uSpecular);
+      const shine = lit.add(u.uSky.mul(world ? spec.mul(0.4).div(footprint.mul(footprint).mul(4).add(1)) : spec));
+      const col = mirror && flowing ? shine.add(vec3(0.4, 0.48, 0.46).mul(flowing.a).mul(0.15)) : shine;
+      const alpha = mirror ? coverage.mul(smoothstep(0, 0.035, depth)) : clamp(u.uOpacity.add(f.mul(0.35)), 0, 1);
+
+      material.positionNode = world ? null : positionGeometry.add(vec3(0, height, 0));
+      material.fragmentNode = Fn(() => {
+        if (mirror) depth.lessThanEqual(0).discard();
+        return vec4(col, alpha);
+      })();
+      material.needsUpdate = true;
+    },
+  };
+  surface.shade();
+  surfaces.set(material, surface);
   mesh.name = opts.name ?? 'oakWater';
   mesh.position.y = opts.level ?? 0;
   mesh.receiveShadow = false;
@@ -296,9 +226,27 @@ void main() {`).replace('vec3 n = normalize( vNormalW );', `
     },
     dispose() {
       geometry.dispose();
-      if (mesh instanceof Reflector) mesh.dispose();
-      else material.dispose();
+      material.dispose();
+      mirror?.dispose();
       mesh.removeFromParent();
     },
   };
+}
+
+export function flowWater(water: WaterHandle, fluid: WaterFluid): void {
+  const surface = surfaces.get(water.material)!;
+  surface.fluid = fluid;
+  surface.shade();
+}
+
+export function extendWater(water: WaterHandle, coverage: ViewCoverage, width: number, depth: number, bedDepth: (p: N<'vec2'>) => N<'float'>): void {
+  const surface = surfaces.get(water.material)!;
+  if (!surface.world) {
+    surface.world = bedDepth;
+    surface.shade();
+  }
+  water.mesh.position.x = coverage.x;
+  water.mesh.position.z = coverage.z;
+  water.mesh.scale.set(coverage.radius * 2 / width, 1, coverage.radius * 2 / depth);
+  water.mesh.frustumCulled = false;
 }

@@ -1,187 +1,113 @@
-import type { EnvEntry } from '@sim/catalog';
-import { decodeChunk, indexChunks, type Chunk } from '@sim/chunks';
-import { deriveStream, frameOf } from '@sim/events';
-import { decoders } from '@sim/registry';
-import { emptyStream, NO_EVENTS, type EnvFrame, type EnvGeometry, type EventStream, type SimEvent } from '@sim/types';
-import type { EnvId } from '../data/envs';
-import { FRAME_FLOATS } from '../data/oak';
-import type { TapeJob, TapeResult } from './tape.worker';
+import { blockOf, frameOf, type Block } from '@sim/events';
+import { emptyStream, NO_EVENTS, SIM_EVENT_TYPES, type EnvDecoder, type EnvFrame, type EnvGeometry, type EventStream, type SimEvent } from '@sim/types';
+import type { EnvDescriptor } from '../data/envs';
+import type { TapeHeader } from '../data/replay';
+import { sceneOf } from '../scenes/table';
+import type { Tick } from './recording';
+import type { TapeMessage, TapeRequest } from './tape.worker';
+
+export const WINDOW_BLOCKS = 32;
+const NOTIFY_MS = 250;
 
 export interface Tape {
-  envId: EnvId;
+  environment: EnvDescriptor;
   seed: number;
-  controlHz: number;
-  discretePose: boolean;
-  wrapMask: number;
-  geometry: EnvGeometry;
+  decoder: EnvDecoder;
+  geometry: EnvGeometry | null;
   readonly frameCount: number;
   readonly events: EventStream;
+  readonly ticks: Tick[];
+  readonly error: Error | null;
+  hasFrame(i: number): boolean;
   frameAt(i: number): EnvFrame;
   eventsAt(i: number): readonly SimEvent[];
-  onChange: (error?: Error) => void;
-  pull(): void;
+  follow(i: number): void;
+  seek(i: number): void;
+  onChange: () => void;
+  drop(): void;
 }
 
-type Slot = Tape & { job(): TapeJob; land(result: TapeResult): void; drop(): void };
-
-const cache = new Map<string, Slot>();
-const queue: Slot[] = [];
-let worker: Worker | null = null;
-let running: Slot | null = null;
-
-function pump(): void {
-  if (running !== null || queue.length === 0) return;
-  running = queue.shift()!;
-  if (worker === null) {
-    worker = new Worker('/tape.worker.js', { type: 'module' });
-    worker.onmessage = (event: MessageEvent<TapeResult>) => {
-      const slot = running!;
-      running = null;
-      slot.land(event.data);
-      pump();
-    };
-    worker.onerror = (event) => {
-      const slot = running!;
-      running = null;
-      worker?.terminate();
-      worker = null;
-      slot.onChange(new Error(`tape worker: ${event.message}`));
-      pump();
-    };
-  }
-  worker.postMessage(running.job());
-}
-
-function open(runId: string, lane: number, envId: EnvId, seed: number, entry: EnvEntry, horizon: number): Slot {
-  const decoder = decoders[envId];
-  const st = decoder.initStatic(seed);
-  const init = decoder.initFrame(seed, st);
-  const fields = entry.fields;
-  const abort = new AbortController();
-  const chunks: Chunk[] = [];
-  const windows = new Map<number, Float32Array>();
-  const stream = emptyStream();
-  let bytes = new Uint8Array(0);
-  let indexed = 0;
-  let frames: Float32Array | null = null;
-  let steps = 0;
-  let decoded = 0;
-  let derived = 0;
-  let sent = 0;
-  let queued = false;
-  let pulling = false;
-
+export function openTape(runId: string, lane: number, environment: EnvDescriptor, seed: number, horizon: number, hash: bigint): Tape {
+  const decoder = sceneOf(environment).decoder;
+  const worker = new Worker('/workers/tape.worker.js', { type: 'module' });
+  const blocks = new Map<number, Block>();
+  const events = emptyStream();
+  let header: TapeHeader | null = null, initial: EnvFrame | null = null, through = -1, cursor = 0;
+  let error: Error | null = null, ticks: Tick[] = [];
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const post = (message: TapeRequest) => worker.postMessage(message);
+  const notify = (immediate = false) => {
+    if (immediate) { if (timer !== null) { clearTimeout(timer); timer = null; } tape.onChange(); return; }
+    if (timer === null) timer = setTimeout(() => { timer = null; tape.onChange(); }, NOTIFY_MS);
+  };
+  const blockIndex = (step: number): number => Math.floor(step / header!.blockFrames);
+  const evict = (): void => {
+    if (header === null) return;
+    const centre = blockIndex(cursor), gone: number[] = [];
+    for (const index of blocks.keys()) if (Math.abs(index - centre) > WINDOW_BLOCKS) { blocks.delete(index); gone.push(index); }
+    if (gone.length > 0) post({ type: 'forget', indices: gone });
+  };
+  const hasFrame = (i: number): boolean => {
+    const step = Math.floor(i);
+    return header !== null && step >= 0 && step < header.frames && (step === 0 && initial !== null || blocks.has(blockIndex(step))) && (!decoder.sequential || step <= through);
+  };
   const frameAt = (i: number): EnvFrame => {
-    const c = Math.max(0, Math.min(steps, Math.floor(i)));
-    if (c === 0) return init;
-    if (frames !== null) return frameOf(frames, c - 1, c - 1);
-    let lo = 0;
-    let hi = chunks.length - 1;
-    while (lo < hi) {
-      const mid = (lo + hi + 1) >>> 1;
-      if (chunks[mid]!.start <= c - 1) lo = mid;
-      else hi = mid - 1;
-    }
-    const chunk = chunks[lo]!;
-    let window = windows.get(lo);
-    if (window === undefined) {
-      window = new Float32Array(chunk.live * FRAME_FLOATS);
-      decodeChunk(bytes, chunk, fields, window, 0);
-      windows.set(lo, window);
-    }
-    return frameOf(window, c - 1 - chunk.start, c - 1);
+    const step = Math.floor(i);
+    if (!hasFrame(step)) throw new Error(`Replay frame ${step} is not available`);
+    if (step === 0) return initial!;
+    return frameOf(blocks.get(blockIndex(step))!, step % header!.blockFrames, step, header!);
   };
-
-  const settle = (): void => {
-    for (; decoded < chunks.length; decoded++) decodeChunk(bytes, chunks[decoded]!, fields, frames!, chunks[decoded]!.start);
-    deriveStream(frames!, derived, steps, decoder, init, st, stream);
-    derived = steps;
-  };
-
-  const pull = async (): Promise<void> => {
-    if (pulling) return;
-    pulling = true;
-    try {
-      const response = await fetch(`/api/runs/${encodeURIComponent(runId)}/poses/${lane}`, { headers: { Range: `bytes=${bytes.length}-` }, signal: abort.signal });
-      if (!response.ok) throw new Error(`${response.status} poses/${lane}: ${await response.text()}`);
-      const more = new Uint8Array(await response.arrayBuffer());
-      if (more.length === 0) return;
-      const next = new Uint8Array(bytes.length + more.length);
-      next.set(bytes);
-      next.set(more, bytes.length);
-      bytes = next;
-      indexed = indexChunks(bytes, indexed, chunks);
-      const last = chunks[chunks.length - 1];
-      steps = last === undefined ? 0 : last.start + last.live;
-      if (steps > horizon) throw new Error(`lane ${lane} holds ${steps} steps, past the horizon ${horizon}`);
-      if (frames !== null) settle();
-      else if (!queued && chunks.length > 0) {
-        queued = true;
-        queue.push(slot);
-        pump();
-      }
-      slot.onChange();
-    } catch (error) {
-      if (!abort.signal.aborted) slot.onChange(error instanceof Error ? error : new Error(String(error)));
-    } finally {
-      pulling = false;
-    }
-  };
-
-  const slot: Slot = {
-    envId,
-    seed,
-    controlHz: entry.controlHz,
-    discretePose: entry.discretePose,
-    wrapMask: fields.reduce((mask, field) => (field.wrap ? mask | (1 << field.slot) : mask), 0),
-    geometry: decoder.geometry(st, seed),
-    get frameCount() { return steps + 1; },
-    get events() { return stream; },
-    frameAt,
+  const tape: Tape = {
+    environment, seed, decoder, geometry: null,
+    get frameCount() { return Math.max(initial ? 1 : 0, through + 1); },
+    get events() { return events; }, get ticks() { return ticks; }, get error() { return error; },
+    hasFrame, frameAt,
     eventsAt(i) {
-      const c = Math.floor(i);
-      return c <= 0 || c > steps ? NO_EVENTS : decoder.deriveEvents(frameAt(c - 1), frameAt(c), st);
-    },
-    onChange: () => {},
-    pull: () => void pull(),
-    job() {
-      sent = chunks.length;
-      return { bytes, chunks: chunks.slice(), fields, envId, seed, horizon };
-    },
-    land(result) {
-      frames = result.frames;
-      decoded = sent;
-      derived = result.rows;
-      Object.assign(stream, result.stream);
-      windows.clear();
-      settle();
-      slot.onChange();
-    },
-    drop() {
-      abort.abort();
-      if (queue.includes(slot)) queue.splice(queue.indexOf(slot), 1);
-      if (running === slot) {
-        worker?.terminate();
-        worker = null;
-        running = null;
-        pump();
+      if (!header || !hasFrame(i)) return NO_EVENTS;
+      const step = Math.floor(i), block = events.blocks[blockIndex(step)];
+      if (!block) return NO_EVENTS;
+      let lo = 0, hi = block.steps.length;
+      while (lo < hi) { const mid = (lo + hi) >>> 1; if (block.steps[mid]! < step) lo = mid + 1; else hi = mid; }
+      const out: SimEvent[] = [];
+      for (let at = lo; at < block.steps.length && block.steps[at] === step; at++) {
+        const type = SIM_EVENT_TYPES[block.kinds[at]!]!;
+        if (type === 'collection') out.push({ type, item: (['banana', 'onion', 'jellyBean', 'truffle'] as const)[block.values[at]!]!, reward: frameAt(step).reward as -1 | 0 | 1, x: block.cellX[at]!, y: block.cellY[at]! });
+        else if (type === 'cue' || type === 'place') out.push({ type, value: block.values[at]! });
+        else if (type === 'key') out.push({ type, index: block.values[at]! });
+        else if (type === 'door') out.push({ type, index: block.values[at]! & 0xffff, open: block.values[at]! >>> 16 !== 0 });
+        else out.push({ type });
       }
+      return out;
     },
+    follow(i) { cursor = Math.floor(i); },
+    seek(step) { cursor = Math.floor(step); evict(); post({ type: 'seek', step: cursor }); },
+    onChange: () => {},
+    drop() { worker.terminate(); if (timer !== null) clearTimeout(timer); blocks.clear(); events.blocks.length = 0; },
   };
-  void pull();
-  return slot;
-}
-
-export function tapeFor(runId: string, lane: number, envId: EnvId, seed: number, entry: EnvEntry, horizon: number): Tape {
-  const key = `${runId}/${lane}`;
-  if (!cache.has(key)) cache.set(key, open(runId, lane, envId, seed, entry, horizon));
-  return cache.get(key)!;
-}
-
-export function keepTapes(keep: Tape[]): void {
-  for (const [key, slot] of cache) {
-    if (keep.includes(slot)) continue;
-    cache.delete(key);
-    slot.drop();
-  }
+  worker.onmessage = (event: MessageEvent<TapeMessage>) => {
+    const message = event.data;
+    try {
+      if (message.type === 'header') {
+        header = message.header; events.blockFrames = header.blockFrames;
+        initial = frameOf(blockOf(message.initial), 0, 0, header); through = Math.max(through, 0);
+        tape.geometry = decoder.geometry(header.descriptor, initial);
+        notify(true);
+        return;
+      }
+      if (message.type === 'block') {
+        blocks.set(message.index, blockOf(message.data));
+        if (message.events) { events.blocks[message.index] = message.events; events.count += message.events.steps.length; }
+        through = Math.max(through, message.through);
+        evict();
+      } else if (message.type === 'events') {
+        events.blocks[message.index] = message.events; events.count += message.events.steps.length;
+        through = Math.max(through, message.through);
+      } else if (message.type === 'progress') { ticks = message.ticks; through = Math.max(through, message.through); }
+      else { error = new Error(message.message); notify(true); return; }
+    } catch (caught) { error = caught instanceof Error ? caught : new Error(String(caught)); worker.terminate(); notify(true); return; }
+    notify();
+  };
+  worker.onerror = event => { error = new Error(event.message || 'Replay worker failed to load'); notify(true); };
+  post({ type: 'open', url: `/api/runs/${encodeURIComponent(runId)}/replay/${lane}`, envId: environment.envId, seed, horizon, hash: hash.toString() });
+  return tape;
 }

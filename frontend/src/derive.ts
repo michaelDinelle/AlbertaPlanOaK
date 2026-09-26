@@ -1,12 +1,8 @@
-import { isEnvId, type EnvId } from './data/envs';
 import { HEALTH_ALIVE, type Meta, type Recording } from './data/layout';
 
-export function runEnvs(meta: Meta): EnvId[] {
-  const out: EnvId[] = [];
-  for (const entry of meta.envSchedule) {
-    if (!isEnvId(entry.envId)) throw new Error(`run schedule names unknown env ${entry.envId}`);
-    if (!out.includes(entry.envId)) out.push(entry.envId);
-  }
+export function runEnvs(meta: Meta): string[] {
+  const out: string[] = [];
+  for (const entry of meta.envSchedule) if (!out.includes(entry.envId)) out.push(entry.envId);
   return out;
 }
 
@@ -36,19 +32,6 @@ export function cached<T>(rec: Recording, key: string, make: () => T): T {
   if (byKey === undefined) derived.set(rec, (byKey = new Map()));
   if (!byKey.has(key)) byKey.set(key, make());
   return byKey.get(key) as T;
-}
-
-export function leaderSeed(rec: Recording, lanes: { lanes: number[]; seeds: number[] }): number | null {
-  let top = lanes.seeds[0] ?? null;
-  let topRate = -Infinity;
-  lanes.lanes.forEach((lane, i) => {
-    const rate = deliveredRate(rec, lane);
-    if (rate !== null && rate > topRate) {
-      topRate = rate;
-      top = lanes.seeds[i] ?? null;
-    }
-  });
-  return top;
 }
 
 export function percentileSorted(sorted: readonly number[], q: number): number {
@@ -137,16 +120,4 @@ export function survival(rec: Recording, lanes: readonly number[]): { x: number[
     out.positive.push(lanes.filter((lane) => at(rec, r, lane) > 0).length / n);
   }
   return out;
-}
-
-export function peakStep(rec: Recording, lane: number, win: number): number | null {
-  const rates = windowedRates(rec, [lane], win);
-  let peak = -Infinity;
-  let step: number | null = null;
-  rates.perLane[0]!.forEach((rate, row) => {
-    if (rate === null || rate <= peak) return;
-    peak = rate;
-    step = rates.x[row]!;
-  });
-  return step === null ? null : step - Math.floor(Math.min(step, win) / 2);
 }

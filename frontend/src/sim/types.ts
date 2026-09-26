@@ -1,11 +1,13 @@
-import type { EnvId } from '../data/envs';
+import type { ReplayDescriptor } from '../data/replay';
 
 export type SimEvent =
   | { type: 'goal' }
+  | { type: 'harm' }
   | { type: 'done' }
   | { type: 'key'; index: number }
   | { type: 'door'; index: number; open: boolean }
-  | { type: 'cue'; value: 0 | 1 }
+  | { type: 'cue'; value: number }
+  | { type: 'place'; value: number }
   | { type: 'teleport' }
   | { type: 'resurface' }
   | {
@@ -20,6 +22,7 @@ export const NO_EVENTS: SimEvent[] = Object.freeze([]) as unknown as SimEvent[];
 
 export const SIM_EVENT_TYPES = [
   'goal',
+  'harm',
   'done',
   'key',
   'door',
@@ -27,42 +30,40 @@ export const SIM_EVENT_TYPES = [
   'teleport',
   'resurface',
   'collection',
+  'place',
 ] as const satisfies readonly SimEvent['type'][];
 
 type CoversAllSimEvents = Exclude<SimEvent['type'], (typeof SIM_EVENT_TYPES)[number]>;
 export const SIM_EVENT_TYPES_COMPLETE: CoversAllSimEvents extends never ? true : never = true;
 
-export interface EventStream {
+export interface EventBlock {
+  from: number;
+  to: number;
   steps: Int32Array;
   kinds: Uint16Array;
   cellX: Int32Array;
   cellY: Int32Array;
-  types: SimEvent['type'][];
+  values: Int32Array;
+}
+
+export interface EventStream {
+  blocks: (EventBlock | undefined)[];
+  blockFrames: number;
   count: number;
 }
 
-export const emptyStream = (): EventStream => ({
-  steps: new Int32Array(1024),
-  kinds: new Uint16Array(1024),
-  cellX: new Int32Array(1024),
-  cellY: new Int32Array(1024),
-  types: [],
-  count: 0,
-});
-
-export const EMPTY_EVENT_STREAM: EventStream = {
-  steps: new Int32Array(0),
-  kinds: new Uint16Array(0),
-  cellX: new Int32Array(0),
-  cellY: new Int32Array(0),
-  types: [],
-  count: 0,
-};
+export const emptyStream = (blockFrames = 256): EventStream => ({ blocks: [], blockFrames, count: 0 });
+export const EMPTY_EVENT_STREAM = emptyStream();
 
 export interface EnvFrame {
   step: number;
   done: number;
-  pose: Float32Array;
+  words: Uint32Array;
+  view: Uint32Array;
+  observations: Float32Array;
+  actions: Float32Array;
+  reward: number;
+  reset: boolean;
 }
 
 export interface GridCell { x: number; y: number }
@@ -79,16 +80,6 @@ export interface GridGeometry {
   carvedPath?: GridCell[];
 }
 
-export const CHEETAH_FK_POINTS = [
-  'o1', 'bt', 'ft', 'head', 'bs', 'bf', 'toe_b', 'fs', 'ff', 'toe_f',
-] as const;
-
-export interface CheetahGeometry {
-  fk(qpos: ArrayLike<number>, out?: Float32Array): Float32Array;
-  radius: number;
-  headRadius: number;
-}
-
 export interface ClassicGeometry {
   heightAt?(x: number): number;
   anchors: Record<string, readonly [number, number, number]>;
@@ -96,15 +87,15 @@ export interface ClassicGeometry {
 
 export interface EnvGeometry {
   grid?: GridGeometry;
-  cheetah?: CheetahGeometry;
   classic?: ClassicGeometry;
 }
 
-export interface EnvDecoder<St = unknown> {
-  envId: EnvId;
-  seedGeometry: boolean;
-  initStatic(seed: number): St;
-  geometry(st: St, seed: number): EnvGeometry;
-  initFrame(seed: number, st: St): EnvFrame;
-  deriveEvents(prev: EnvFrame, next: EnvFrame, st: St): SimEvent[];
+export interface EnvDecoder {
+  slots: number;
+  wrap?: number;
+  discrete?: boolean;
+  sequential?: boolean;
+  decode(frame: EnvFrame, out: Float32Array): void;
+  geometry(descriptor: ReplayDescriptor, initial: EnvFrame): EnvGeometry;
+  deriveEvents(prev: EnvFrame, next: EnvFrame): SimEvent[];
 }

@@ -1,4 +1,4 @@
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
 import { rngAt, type Rng } from './rng';
 import { SpatialInstances } from './instances';
 
@@ -30,8 +30,7 @@ export interface TileBankHandle {
 
 export interface TileBankOptions {
   geometry: THREE.BufferGeometry;
-  material: THREE.Material;
-  depth?: THREE.Material;
+  material: THREE.NodeMaterial;
   perTile: number;
   colorA: THREE.ColorRepresentation;
   colorB: THREE.ColorRepresentation;

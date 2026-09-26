@@ -1,5 +1,9 @@
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
+import { Fn, clamp, color, cos, dot, float, floor, fract, fwidth, length, max, mix, normalize, positionGeometry, pow, sin, smoothstep, sqrt, step, uniform, varying, vec2, vec3 } from 'three/tsl';
+import { glFragCoord } from './materials';
 import type { Palette } from './tokens';
+
+type N<T extends string> = THREE.Node<T>;
 
 export interface SkyStarOptions {
   density?: number;
@@ -32,107 +36,13 @@ export interface GradientSkyOptions {
 }
 
 export type SkyHandle = ReturnType<typeof makeGradientSky>;
+export type SkyTerm = (dir: N<'vec3'>, time: N<'float'>) => N<'vec3'>;
 
-const VERT =  `
-varying vec3 vOakDir;
-void main() {
-	vOakDir = normalize( position );
-	gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
-}
-`;
-
-const FRAG = `
-#include <common>
-uniform vec3 uTop;
-uniform vec3 uHorizon;
-uniform vec3 uBottom;
-uniform float uTopSpread;
-uniform float uBottomSpread;
-uniform float uDither;
-uniform float uTime;
-varying vec3 vOakDir;
-
-float oakHash13( vec3 p ) {
-	p = fract( p * 0.1031 );
-	p += dot( p, p.zyx + 31.32 );
-	return fract( ( p.x + p.y ) * p.z );
-}
-
-#ifdef HAS_SUN
-
-uniform vec3 uSunDir;
-uniform vec3 uSunColor;
-uniform float uSunSize;
-uniform float uSunHdr;
-uniform float uSunGlow;
-uniform float uSunGlowPower;
-
-#endif
-#ifdef HAS_STARS
-
-uniform vec3 uStarColor;
-uniform float uStarDensity;
-uniform float uStarSize;
-uniform float uStarThreshold;
-uniform float uStarTwinkle;
-uniform float uStarIntensity;
-
-#endif
-
-void main() {
-	vec3 dir = normalize( vOakDir );
-	float h = clamp( dir.y, -1.0, 1.0 );
-	vec3 col = uHorizon;
-	col = mix( col, uTop, smoothstep( 0.0, max( uTopSpread, 0.001 ), h ) );
-	col = mix( col, uBottom, smoothstep( 0.0, max( uBottomSpread, 0.001 ), -h ) );
-
-#ifdef HAS_SUN
-
-	{
-		vec3 sd = normalize( uSunDir );
-		float cosA = dot( dir, sd );
-		float sz = max( uSunSize, 0.002 );
-		float disc = smoothstep( cos( sz * 1.4 ), cos( sz * 0.85 ), cosA );
-		float glow = pow( max( cosA, 0.0 ), max( uSunGlowPower, 1.0 ) );
-#ifdef HAS_MOON
-    vec3 right = normalize(cross(sd, vec3(0.0, 1.0, 0.0))), up = cross(right, sd);
-    vec2 p = vec2(dot(dir, right), dot(dir, up)) / sin(sz);
-    float r2 = dot(p, p), edge = max(fwidth(r2), 0.001);
-    disc = 1.0 - smoothstep(1.0 - edge, 1.0 + edge, r2);
-    vec3 normal = vec3(p, sqrt(max(0.0, 1.0 - r2)));
-    float maria = sin(p.x * 8.0 + sin(p.y * 5.0)) * sin(p.y * 7.0 - p.x * 3.0);
-    float craters = sin(p.x * 43.0 + sin(p.y * 27.0)) * sin(p.y * 39.0 + p.x * 17.0);
-    float shade = (0.3 + 0.7 * max(dot(normal, normalize(vec3(-0.5, 0.4, 0.8))), 0.0)) * (0.78 + 0.16 * maria + 0.04 * craters);
-    col = mix(col, uSunColor * shade * uSunHdr, disc);
-    col += uSunColor * glow * uSunGlow;
-#else
-		col += uSunColor * ( disc * uSunHdr + glow * uSunGlow );
-#endif
-	}
-
-#endif
-#ifdef HAS_STARS
-
-	{
-		float above = smoothstep( -0.08, 0.12, dir.y );
-		vec3 g = dir * uStarDensity;
-		vec3 c = floor( g );
-		float hcell = oakHash13( c );
-		vec3 pt = vec3( oakHash13( c + 1.7 ), oakHash13( c + 3.3 ), oakHash13( c + 5.9 ) );
-		float d = length( ( g - c ) - pt );
-		float star = ( 1.0 - smoothstep( 0.0, max( uStarSize, 0.001 ), d ) ) * step( uStarThreshold, hcell );
-		float tw = 1.0 - uStarTwinkle * 0.5 * ( 1.0 + sin( uTime * 2.7 + hcell * 63.0 ) );
-		col += uStarColor * ( star * uStarIntensity * tw * above );
-	}
-
-#endif
-
-	col += ( oakHash13( vec3( gl_FragCoord.xy, 1.0 ) ) - 0.5 ) * uDither;
-	gl_FragColor = vec4( col, 1.0 );
-	#include <tonemapping_fragment>
-	#include <colorspace_fragment>
-}
-`;
+const hash13 = (q: N<'vec3'>): N<'float'> => {
+  const p = fract(q.mul(0.1031)).toVar();
+  p.addAssign(dot(p, p.zyx.add(31.32)));
+  return fract(p.x.add(p.y).mul(p.z));
+};
 
 function toVec3(v: THREE.Vector3 | readonly [number, number, number] | null | undefined, out: THREE.Vector3) {
   if (!v) out.set(0, 1, 0);
@@ -144,51 +54,69 @@ function toVec3(v: THREE.Vector3 | readonly [number, number, number] | null | un
 
 export function makeGradientSky(opts: GradientSkyOptions) {
   const hasSun = opts.sunDir !== null && opts.sunDir !== undefined;
-  const stars = opts.stars;
-  const starOpts: SkyStarOptions | null = stars === true ? {} : stars ? stars : null;
-  const hasStars = starOpts !== null;
+  const starOpts: SkyStarOptions | null = opts.stars === true ? {} : opts.stars ? opts.stars : null;
 
   const sunDirection = new THREE.Vector3();
   toVec3(opts.sunDir ?? null, sunDirection);
 
   const uniforms = {
-    uTop: { value: new THREE.Color(opts.top) },
-    uHorizon: { value: new THREE.Color(opts.horizon) },
-    uBottom: { value: new THREE.Color(opts.bottom) },
-    uTopSpread: { value: opts.topSpread ?? 0.55 },
-    uBottomSpread: { value: opts.bottomSpread ?? 0.35 },
-    uSunDir: { value: sunDirection },
-    uSunColor: { value: new THREE.Color(opts.sunColor ?? 0xffffff) },
-    uSunSize: { value: opts.sunSize ?? 0.045 },
-    uSunHdr: { value: opts.sunHdr ?? 6 },
-    uSunGlow: { value: opts.sunGlow ?? 0.35 },
-    uSunGlowPower: { value: opts.sunGlowPower ?? 48 },
-    uStarColor: { value: new THREE.Color(starOpts?.color ?? 0xffffff) },
-    uStarDensity: { value: starOpts?.density ?? 160 },
-    uStarSize: { value: starOpts?.size ?? 0.06 },
-    uStarThreshold: { value: starOpts?.threshold ?? 0.965 },
-    uStarTwinkle: { value: starOpts?.twinkle ?? 0.35 },
-    uStarIntensity: { value: starOpts?.intensity ?? 2.2 },
-    uDither: { value: opts.dither ?? 0.006 },
-    uTime: { value: 0 },
+    uTop: uniform(new THREE.Color(opts.top)),
+    uHorizon: uniform(new THREE.Color(opts.horizon)),
+    uBottom: uniform(new THREE.Color(opts.bottom)),
+    uSunDir: uniform(sunDirection),
+    uTime: uniform(0),
   };
+  const terms: SkyTerm[] = [];
+  const direction = varying(normalize(positionGeometry));
 
-  const material = new THREE.ShaderMaterial({
-    uniforms: uniforms as unknown as Record<string, THREE.IUniform>,
-    vertexShader: VERT,
-    fragmentShader: FRAG,
-    defines: { ...(hasSun ? { HAS_SUN: 1 } : {}), ...(opts.moon ? { HAS_MOON: 1 } : {}), ...(hasStars ? { HAS_STARS: 1 } : {}) },
-    side: THREE.BackSide,
-    depthWrite: false,
-    depthTest: false,
-    fog: false,
-  });
+  const material = new THREE.MeshBasicNodeMaterial({ side: THREE.BackSide, depthWrite: false, depthTest: false, fog: false });
+  material.colorNode = Fn(() => {
+    const dir = normalize(direction), time = uniforms.uTime;
+    const h = clamp(dir.y, -1, 1);
+    const col = vec3(0).toVar();
+    col.assign(uniforms.uHorizon);
+    col.assign(mix(col, uniforms.uTop, smoothstep(0, Math.max(opts.topSpread ?? 0.55, 0.001), h)));
+    col.assign(mix(col, uniforms.uBottom, smoothstep(0, Math.max(opts.bottomSpread ?? 0.35, 0.001), h.negate())));
+    if (hasSun) {
+      const sd = normalize(uniforms.uSunDir), sunColor = color(new THREE.Color(opts.sunColor ?? 0xffffff));
+      const cosA = dot(dir, sd), sz = Math.max(opts.sunSize ?? 0.045, 0.002), hdr = opts.sunHdr ?? 6, glowGain = opts.sunGlow ?? 0.35;
+      const glow = pow(max(cosA, 0), Math.max(opts.sunGlowPower ?? 48, 1));
+      if (opts.moon) {
+        const right = normalize(sd.cross(vec3(0, 1, 0))), up = right.cross(sd);
+        const p = vec2(dot(dir, right), dot(dir, up)).div(Math.sin(sz));
+        const r2 = dot(p, p), edge = max(fwidth(r2), 0.001);
+        const disc = smoothstep(edge.oneMinus(), edge.add(1), r2).oneMinus();
+        const normal = vec3(p, sqrt(max(r2.oneMinus(), 0)));
+        const maria = sin(p.x.mul(8).add(sin(p.y.mul(5)))).mul(sin(p.y.mul(7).sub(p.x.mul(3))));
+        const craters = sin(p.x.mul(43).add(sin(p.y.mul(27)))).mul(sin(p.y.mul(39).add(p.x.mul(17))));
+        const shade = max(dot(normal, normalize(vec3(-0.5, 0.4, 0.8))), 0).mul(0.7).add(0.3).mul(maria.mul(0.16).add(0.78).add(craters.mul(0.04)));
+        col.assign(mix(col, sunColor.mul(shade).mul(hdr), disc));
+        col.addAssign(sunColor.mul(glow).mul(glowGain));
+      } else {
+        const disc = smoothstep(Math.cos(sz * 1.4), Math.cos(sz * 0.85), cosA);
+        col.addAssign(sunColor.mul(disc.mul(hdr).add(glow.mul(glowGain))));
+      }
+    }
+    if (starOpts) {
+      const above = smoothstep(-0.08, 0.12, dir.y);
+      const g = dir.mul(starOpts.density ?? 160), c = floor(g), cell = hash13(c);
+      const pt = vec3(hash13(c.add(1.7)), hash13(c.add(3.3)), hash13(c.add(5.9)));
+      const d = length(g.sub(c).sub(pt));
+      const star = smoothstep(0, Math.max(starOpts.size ?? 0.06, 0.001), d).oneMinus().mul(step(starOpts.threshold ?? 0.965, cell));
+      const tw = sin(time.mul(2.7).add(cell.mul(63))).add(1).mul((starOpts.twinkle ?? 0.35) * 0.5).oneMinus();
+      col.addAssign(color(new THREE.Color(starOpts.color ?? 0xffffff)).mul(star.mul(starOpts.intensity ?? 2.2).mul(tw).mul(above)));
+    }
+    col.addAssign(hash13(vec3(glFragCoord, 1)).sub(0.5).mul(opts.dither ?? 0.006));
+    for (const term of terms) col.addAssign(term(dir, time));
+    return col;
+  })();
   material.name = opts.name ?? 'oakSky';
 
   const geometry = new THREE.IcosahedronGeometry(1, 2);
   const mesh = new THREE.Mesh(geometry, material);
   mesh.name = opts.name ?? 'oakSky';
-  mesh.scale.setScalar(opts.radius ?? 400);
+  const radius = opts.radius ?? 400;
+  mesh.scale.setScalar(radius);
   mesh.renderOrder = -1000;
   mesh.frustumCulled = false;
   mesh.matrixAutoUpdate = true;
@@ -202,7 +130,9 @@ export function makeGradientSky(opts: GradientSkyOptions) {
     material,
     uniforms,
     sunDirection,
+    add(term: SkyTerm) { terms.push(term); material.needsUpdate = true; },
     setSunDirection(x: number, y: number, z: number) { toVec3([x, y, z], sunDirection); },
+    fit(far: number) { mesh.scale.setScalar(far * 0.85 / radius); },
     setColors(top: THREE.ColorRepresentation, horizon: THREE.ColorRepresentation, bottom: THREE.ColorRepresentation) {
       uniforms.uTop.value.set(top);
       uniforms.uHorizon.value.set(horizon);

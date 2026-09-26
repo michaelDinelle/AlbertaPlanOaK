@@ -1,4 +1,4 @@
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
 import {
   CelebrationPool,
   attachCelebrations,
@@ -7,9 +7,15 @@ import {
 } from './celebrate';
 import { GroundTruthOverlay, type GroundTruthOptions } from './debug';
 import { makeOrbitRig, type OrbitRig, type OrbitRigOptions } from './rigs';
-import type { FrameUpdate, SceneContext, SceneModule, SceneSize } from './types';
+import type { FrameUpdate, LegendSpec, SceneContext, SceneModule, ScenePost, SceneSize } from './types';
 import type { WorldCore } from './world';
-import { SCENES } from '../scenes/table';
+import { environmentName } from '../data/envs';
+
+export function accentOf(ctx: SceneContext): number {
+  const accent = ctx.tokens.accents[environmentName(ctx.environment)];
+  if (accent === undefined) throw new Error(`${environmentName(ctx.environment)} has no accent`);
+  return accent;
+}
 
 export interface Stage<W extends WorldCore> {
   ctx: SceneContext;
@@ -30,6 +36,9 @@ export abstract class StageScene<W extends WorldCore> implements SceneModule {
   protected overlay: GroundTruthOverlay | null = null;
   protected debugOn = false;
 
+  abstract readonly post: ScenePost;
+  abstract readonly controlHz: number;
+  legend: LegendSpec | null = null;
   protected abstract readonly stageName: string;
   protected abstract buildWorld(ctx: SceneContext): W | Promise<W>;
   protected abstract buildActors(ctx: SceneContext, world: W): void;
@@ -44,7 +53,7 @@ export abstract class StageScene<W extends WorldCore> implements SceneModule {
   }
 
   protected accentOf(ctx: SceneContext): number {
-    return ctx.tokens.accents[SCENES[ctx.envId].slug] ?? ctx.tokens.celebrationGold;
+    return accentOf(ctx);
   }
 
   async init(ctx: SceneContext): Promise<void> {
@@ -67,11 +76,9 @@ export abstract class StageScene<W extends WorldCore> implements SceneModule {
     const pool = new CelebrationPool({
       seed: ctx.seed,
       name: `${this.stageName}Celebrations`,
-      burstSize: SCENES[ctx.envId].burst,
       ...this.poolOptions(ctx),
     });
     attachCelebrations(this.scene, pool);
-    pool.setPixelRatio(ctx.size.dpr);
     this.pool = pool;
     const overlay = new GroundTruthOverlay(ctx.geometry, {
       camera: this.camera,
@@ -81,7 +88,6 @@ export abstract class StageScene<W extends WorldCore> implements SceneModule {
     this.scene.add(overlay.group);
     overlay.visible = this.debugOn;
     this.overlay = overlay;
-    world.setPixelRatio(ctx.size.dpr);
     this.start(ctx, world);
   }
 
@@ -92,14 +98,12 @@ export abstract class StageScene<W extends WorldCore> implements SceneModule {
     const rig = this.rig;
     if (!ctx || !world || !pool || !rig) return;
     this.tick(frame, { ctx, world, pool, rig, time: ctx.time() });
-    if (this.debugOn && this.overlay) this.overlay.setState(frame.state);
+    if (this.debugOn && this.overlay) this.overlay.update(frame);
   }
 
   resize(size: SceneSize): void {
     const aspect = size.height > 0 ? size.width / size.height : 16 / 9;
     this.rig?.resize(aspect);
-    this.world?.setPixelRatio(size.dpr);
-    this.pool?.setPixelRatio(size.dpr);
   }
 
   resetCamera(): void {

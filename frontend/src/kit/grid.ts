@@ -1,4 +1,5 @@
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
+import { instancedMesh } from './instances';
 import type { GridCell, GridGeometry } from '@sim/types';
 import { hash2f } from './rng';
 import { emissiveMaterial, oakMaterial, oakUniforms, setEmissiveIntensity } from './materials';
@@ -175,14 +176,14 @@ export function buildCellField(
   floorGeometry.translate(0, -floorThickness / 2, 0);
   const wallGeometry = wallGeometryFor(shape, CELL - wallInset * 2, wallHeight);
 
-  const floorMesh = new THREE.InstancedMesh(floorGeometry, floorMaterial, Math.max(1, floorCapacity));
+  const floorMesh = instancedMesh(floorGeometry, floorMaterial, Math.max(1, floorCapacity));
   floorMesh.name = 'oakCellFloorMesh';
   floorMesh.castShadow = false;
   floorMesh.receiveShadow = true;
   floorMesh.count = 0;
   floorMesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(Math.max(1, floorCapacity) * 3), 3);
 
-  const wallMesh = new THREE.InstancedMesh(wallGeometry, wallMaterial, Math.max(1, wallCapacity));
+  const wallMesh = instancedMesh(wallGeometry, wallMaterial, Math.max(1, wallCapacity));
   wallMesh.name = 'oakCellWallMesh';
   wallMesh.castShadow = true;
   wallMesh.receiveShadow = true;

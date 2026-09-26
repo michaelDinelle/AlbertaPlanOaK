@@ -1,5 +1,6 @@
 import { createRoot, type Root } from 'react-dom/client';
 import { App } from './app';
+import { renderPosters } from './posters';
 import { TOKENS } from './kit/tokens';
 
 for (const [slug, hex] of Object.entries(TOKENS.accents)) {
@@ -7,5 +8,6 @@ for (const [slug, hex] of Object.entries(TOKENS.accents)) {
 }
 
 const mounted = globalThis as { oakRoot?: Root };
-mounted.oakRoot ??= createRoot(document.getElementById('app')!);
-mounted.oakRoot.render(<App />);
+const posters = new URLSearchParams(location.search).get('posters');
+if (posters !== null) void renderPosters(posters.split(',').filter(Boolean));
+else (mounted.oakRoot ??= createRoot(document.getElementById('app')!)).render(<App />);

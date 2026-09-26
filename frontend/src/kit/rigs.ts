@@ -1,4 +1,4 @@
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
 import { clampRange } from './mix';
 import { TOKENS } from './tokens';
 
@@ -86,6 +86,7 @@ export interface OrbitRigOptions extends BaseCameraOptions {
   damping?: number;
   rotateSpeed?: number;
   zoomSpeed?: number;
+  floor?: (x: number, z: number) => number;
 }
 
 export interface OrbitRig extends RigHandle {
@@ -142,6 +143,7 @@ export function makeOrbitRig(opts: OrbitRigOptions = {}): OrbitRig {
   const apply = (): void => {
     target.copy(anchor).add(panOffset);
     orbitPosition(state, target, scratch);
+    if (opts.floor) scratch.y = Math.max(scratch.y, opts.floor(scratch.x, scratch.z));
     camera.position.copy(scratch);
     camera.lookAt(target);
   };
