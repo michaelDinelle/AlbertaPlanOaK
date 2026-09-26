@@ -5,14 +5,13 @@ import { join, resolve } from 'node:path';
 import index from './index.html';
 import wgsl from './wgsl';
 import type { EnvDescriptor } from './src/data/envs';
-import { ENGINE_FILES, JUDGE_FILE, packRecording, type Baselines, type Meta, type RunIndexEntry } from './src/data/layout';
+import { ENGINE_FILES, JUDGE_FILE, RECORDED_ENGINE, packRecording, type Baselines, type Meta, type RunIndexEntry } from './src/data/layout';
 import { readHeader, readVerdict, VERDICT_BYTES } from './src/data/replay';
 
 const REPO = resolve(import.meta.dir, '..');
 const BENCH = join(REPO, '.oak-benchmarks');
 const PUBLIC = resolve(import.meta.dir, 'public');
 const BEST = join(REPO, 'best');
-const ENGINE = join(REPO, '.build/oak');
 const contract = await readFile(join(import.meta.dir, 'src/data/replay.ts'));
 
 class HttpError extends Error {
@@ -24,7 +23,7 @@ const missing = (error: unknown): boolean => (error as NodeJS.ErrnoException).co
 const present = async (path: string): Promise<boolean> => stat(path).then(() => true, error => { if (missing(error)) return false; throw error; });
 const meta = async (root: string): Promise<Meta> => {
   const m = JSON.parse(await readFile(join(root, ENGINE_FILES.meta), 'utf8')) as Meta;
-  for (const field of ['seeds', 'steps', 'batch', 'window', 'policy', 'preset', 'startedAt', 'envSchedule'] as const) {
+  for (const field of ['seeds', 'steps', 'batch', 'window', 'policy', 'startedAt', 'envSchedule'] as const) {
     if (!(field in m)) throw new HttpError(500, `${root}/meta.json lacks ${field}`);
   }
   if (m.seeds.length !== m.batch || m.envSchedule.flatMap(e => Array.from({ length: e.seedEnd - e.seedStart + 1 }, (_, i) => e.seedStart + i)).some((seed, i) => seed !== m.seeds[i])) throw new HttpError(500, 'Recording lane schedule is inconsistent');
@@ -38,23 +37,32 @@ async function runRoot(id: string): Promise<string> {
   return root;
 }
 
-let engineStamp = '';
-let engineLoad: Promise<{ identity: string; catalog: EnvDescriptor[] }>;
-async function engine() {
-  const info = await stat(ENGINE), stamp = `${info.mtimeMs}/${info.size}`;
-  if (stamp !== engineStamp) {
-    engineStamp = stamp;
-    engineLoad = (async () => {
-      const process = Bun.spawn([ENGINE, 'envs'], { cwd: REPO, stdout: 'pipe', stderr: 'pipe' });
-      const [text, errors, exit, binary] = await Promise.all([new Response(process.stdout).text(), new Response(process.stderr).text(), process.exited, readFile(ENGINE)]);
-      if (exit) throw new Error(`Environment catalog failed: ${errors}`);
-      const catalog = JSON.parse(text) as EnvDescriptor[];
-      if (!catalog.length || new Set(catalog.map(e => e.envId)).size !== catalog.length) throw new Error('Invalid environment catalog');
-      return { identity: hash(Buffer.concat([binary, contract])), catalog };
-    })();
-  }
-  return engineLoad;
+interface RecordedEngine {
+  path: string;
+  identity: string;
+  catalog: EnvDescriptor[];
 }
+
+const engines = new Map<string, { stamp: string; engine: Promise<RecordedEngine> }>();
+async function recordedEngine(root: string): Promise<RecordedEngine> {
+  const path = join(root, RECORDED_ENGINE);
+  const info = await stat(path).catch(error => { if (missing(error)) throw new HttpError(500, `${root} carries no recorded engine`); throw error; });
+  const stamp = `${info.mtimeMs}/${info.size}`, hit = engines.get(root);
+  if (hit?.stamp === stamp) return hit.engine;
+  const engine = (async () => {
+    const process = Bun.spawn([path, 'envs'], { cwd: REPO, stdout: 'pipe', stderr: 'pipe' });
+    const [text, errors, exit, binary] = await Promise.all([new Response(process.stdout).text(), new Response(process.stderr).text(), process.exited, readFile(path)]);
+    if (exit) throw new Error(`Environment catalog failed: ${errors}`);
+    const catalog = JSON.parse(text) as EnvDescriptor[];
+    if (!catalog.length || new Set(catalog.map(e => e.envId)).size !== catalog.length) throw new Error('Invalid environment catalog');
+    return { path, identity: hash(Buffer.concat([binary, contract])), catalog };
+  })();
+  engines.set(root, { stamp, engine });
+  engine.catch(() => { if (engines.get(root)?.engine === engine) engines.delete(root); });
+  return engine;
+}
+
+const bestId = async (): Promise<string> => (await readFile(BEST, 'utf8')).trim();
 
 const metas = new Map<string, { stamp: number; meta: Promise<Meta> }>();
 async function cachedMeta(root: string): Promise<Meta | null> {
@@ -69,12 +77,12 @@ async function cachedMeta(root: string): Promise<Meta | null> {
 }
 
 async function runs(): Promise<RunIndexEntry[]> {
-  const best = (await readFile(BEST, 'utf8')).trim(), horizon = (await meta(join(BENCH, best))).steps;
+  const best = await bestId(), horizon = (await meta(join(BENCH, best))).steps;
   const entries = await Promise.all((await readdir(BENCH, { withFileTypes: true })).filter(entry => entry.isDirectory() && !entry.name.startsWith('.')).map(async directory => {
     const id = directory.name;
     const m = await cachedMeta(join(BENCH, id));
     if (!m || m.policy !== 'oak' || m.steps !== horizon || m.timingOnly) return null;
-    return { id, envIds: m.envSchedule.map(e => e.envId), steps: m.steps, startedAt: m.startedAt, inFlight: m.finishedAt === undefined, policy: m.policy, preset: m.preset, role: id === best ? 'best' : null } satisfies RunIndexEntry;
+    return { id, envIds: m.envSchedule.map(e => e.envId), steps: m.steps, startedAt: m.startedAt, inFlight: m.finishedAt === undefined, policy: m.policy, role: id === best ? 'best' : null } satisfies RunIndexEntry;
   }));
   return entries.filter((entry): entry is NonNullable<typeof entry> => entry !== null).sort((a, b) => b.startedAt.localeCompare(a.startedAt) || b.id.localeCompare(a.id));
 }
@@ -124,11 +132,11 @@ async function verify(path: string, expected: bigint) {
   } finally { await file.close(); }
 }
 
-async function generate(key: string, path: string, root: string, lane: number, expected: bigint): Promise<Generation> {
+async function generate(key: string, path: string, root: string, engine: string, lane: number, expected: bigint): Promise<Generation> {
   await mkdir(join(root, 'replay'), { recursive: true });
   const temporary = `${path}.${randomUUID()}.partial`;
   const file = await open(temporary, 'wx');
-  const process = Bun.spawn([ENGINE, 'replay', root, String(lane)], { cwd: REPO, stdout: 'pipe', stderr: 'pipe' });
+  const process = Bun.spawn([engine, 'replay', root, String(lane)], { cwd: REPO, stdout: 'pipe', stderr: 'pipe' });
   let wake = () => {};
   const changed = () => new Promise<void>(resolve => { wake = resolve; });
   const job: Generation = { path: temporary, size: 0, done: false, error: null, changed: changed(), wake() { wake(); job.changed = changed(); } };
@@ -168,7 +176,7 @@ async function replay(req: Request, id: string, laneText: string): Promise<Respo
   if (!Number.isSafeInteger(lane) || lane >= m.batch) throw new HttpError(400, 'Lane out of range');
   if (!m.finishedAt) throw new HttpError(409, 'Recording is still in progress');
   const seed = m.seeds[lane]!, entry = m.envSchedule.find(e => seed >= e.seedStart && seed <= e.seedEnd)!;
-  const built = await engine(), descriptor = built.catalog.find(e => e.envId === entry.envId);
+  const built = await recordedEngine(root), descriptor = built.catalog.find(e => e.envId === entry.envId);
   if (!descriptor) throw new HttpError(422, 'Environment is not in the catalog');
   const hashes = await readFile(join(root, ENGINE_FILES.hash));
   if (hashes.length !== m.batch * 8) throw new HttpError(500, 'Recording hashes are incomplete');
@@ -189,7 +197,7 @@ async function replay(req: Request, id: string, laneText: string): Promise<Respo
     return new Response(Bun.file(path).slice(first, last + 1), { status: range ? 206 : 200, headers: { ...headers, 'Content-Length': String(last - first + 1), 'X-Oak-Cached': '1', ...(range ? { 'Content-Range': `bytes ${first}-${last}/${size}` } : {}) } });
   }
   if (!generations.has(key)) {
-    const pending = generate(key, path, root, lane, expected);
+    const pending = generate(key, path, root, built.path, lane, expected);
     generations.set(key, pending);
     pending.catch(() => generations.delete(key));
   }
@@ -263,7 +271,7 @@ const server = Bun.serve({
   idleTimeout: 0,
   routes: {
     '/': index,
-    '/api/catalog': async () => Response.json((await engine()).catalog),
+    '/api/catalog': async () => Response.json((await recordedEngine(join(BENCH, await bestId()))).catalog),
     '/api/runs': async () => Response.json(await runs()),
     '/api/runs/:id': async req => new Response(await snapshot(await runRoot(req.params.id))),
     '/api/runs/:id/replay/:lane': req => replay(req, req.params.id, req.params.lane),

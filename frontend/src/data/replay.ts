@@ -11,7 +11,6 @@ export interface ReplayDescriptor {
   seed: number;
   horizon: number;
   policy: Policy;
-  preset: string;
   lane: number;
   controls: number;
 }

@@ -34,7 +34,7 @@ export const baselineId = (run: Recording | null, policy: Policy, envId: string 
   policy === 'oak' ? run?.id ?? null : envId === null ? null : run?.baselines[policy]?.[envId] ?? null;
 
 const runLabel = (run: RunIndexEntry): string =>
-  [formatDate(run.startedAt), run.role === 'best' ? 'best' : null, run.inFlight ? 'live' : null, run.id.slice(0, 7), `${run.envIds.length} configurations · ${formatStep(run.steps)} steps · ${run.preset}`]
+  [formatDate(run.startedAt), run.role === 'best' ? 'best' : null, run.inFlight ? 'live' : null, run.id.slice(0, 7), `${run.envIds.length} configurations · ${formatStep(run.steps)} steps`]
     .filter((part) => part !== null)
     .join(' · ');
 

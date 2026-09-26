@@ -8,7 +8,6 @@ export interface Meta {
   batch: number;
   window: number;
   policy: Policy;
-  preset: string;
   startedAt: string;
   finishedAt?: string;
   timingOnly?: boolean;
@@ -27,6 +26,7 @@ export const ENGINE_FILES = {
 } as const;
 
 export const JUDGE_FILE = 'baselines.json';
+export const RECORDED_ENGINE = 'oak';
 export const HEALTH_ALIVE = 0xffffffff;
 
 export interface RunIndexEntry {
@@ -36,7 +36,6 @@ export interface RunIndexEntry {
   startedAt: string;
   inFlight: boolean;
   policy: Policy;
-  preset: string;
   role: 'best' | null;
 }
 
