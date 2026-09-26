@@ -21,6 +21,7 @@ typedef struct {
     const EnvSpec **specs;
     uint32_t *extra;
     float *shared, *rewardSum;
+    double *laneSeconds;
     _Atomic uint32_t next;
 } Run;
 
@@ -84,7 +85,8 @@ static void allocateRun(Run *run) {
     run->extra = calloc((size_t)extraTotal + 1u, sizeof(uint32_t));
     run->shared = calloc((size_t)env_sharedWords() + 1u, sizeof(float));
     run->rewardSum = calloc((size_t)run->windows * run->laneCount, sizeof(float));
-    if (!run->extra || !run->shared || !run->rewardSum) die("out of memory");
+    run->laneSeconds = calloc(run->laneCount, sizeof(double));
+    if (!run->extra || !run->shared || !run->rewardSum || !run->laneSeconds) die("out of memory");
     env_buildShared(run->shared, run->specs, run->laneCount);
 }
 
@@ -117,10 +119,28 @@ static void *worker(void *arg) {
     for (;;) {
         uint32_t lane = atomic_fetch_add(&run->next, 1u);
         if (lane >= run->laneCount) break;
+        struct timespec from, to;
+        clock_gettime(CLOCK_MONOTONIC, &from);
         runLane(run, lane, state);
+        clock_gettime(CLOCK_MONOTONIC, &to);
+        run->laneSeconds[lane] = secondsBetween(&from, &to);
     }
     free(state);
     return 0;
+}
+
+static void reportLanes(const Run *run, long cores) {
+    double total = 0.0;
+    uint32_t slowest = 0u;
+    for (uint32_t i = 0u; i < run->laneCount; i++) {
+        total += run->laneSeconds[i];
+        if (run->laneSeconds[i] > run->laneSeconds[slowest]) slowest = i;
+    }
+    double balanced = total / (double)cores;
+    printf("lane seconds: %.1f in all, %.1f s balanced over %ld cores, slowest %.1f s (%s seed %u)\n", total, balanced, cores,
+           run->laneSeconds[slowest], run->specs[slowest]->name, run->lanes[slowest].seed);
+    for (uint32_t i = 0u; i < run->laneCount; i++)
+        if (run->laneSeconds[i] > balanced) printf("  longer than balanced: %s seed %u, %.1f s\n", run->specs[i]->name, run->lanes[i].seed, run->laneSeconds[i]);
 }
 
 static void timestamp(char *out, size_t size) {
@@ -231,6 +251,7 @@ static int record(int argc, char **argv, uint32_t firstSeed, uint32_t seeds, int
     double stepsPerSecond = (double)run.steps * (double)run.laneCount / seconds;
     writeMeta(root, &run, started, finished, stepsPerSecond);
     printf("%u lanes x %u steps in %.1f s: %.0f steps/s\n", run.laneCount, run.steps, seconds, stepsPerSecond);
+    reportLanes(&run, cores);
     return 0;
 }
 

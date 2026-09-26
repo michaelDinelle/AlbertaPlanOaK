@@ -185,11 +185,12 @@ def probe(engine, tag, index):
     root = BENCH / f"probe-{tag}-{index}"
     shutil.rmtree(root, ignore_errors=True)
     with quiet():
-        out = subprocess.run(["caffeinate", "-i", str(engine), "record", "oak", str(PROBE_STEPS), str(root)],
-                             capture_output=True, text=True, check=True, cwd=REPO).stdout
+        subprocess.run(["caffeinate", "-i", str(engine), "record", "oak", str(PROBE_STEPS), str(root)],
+                       capture_output=True, check=True, cwd=REPO)
     streams = array("Q", (root / "hash.u64").read_bytes())
+    speed = json.loads((root / "meta.json").read_text())["stepsPerSecond"]
     shutil.rmtree(root, ignore_errors=True)
-    return float(out.rsplit(":", 1)[1].split()[0]), streams
+    return speed, streams
 
 
 def leaves(export):

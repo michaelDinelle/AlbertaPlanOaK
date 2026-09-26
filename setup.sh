@@ -6,7 +6,7 @@ ROOT="$(cd "$(dirname "$0")" && pwd)"
 
 mkdir -p "$ROOT/.build"
 python3 "$ROOT/catalog.py"
-printf '%s\n' _oak_act _constructFeatures _predictAndControl _replaceWorstFeature _emitPolicy _sampleAction _sampleDiscreteAction _actorCoefficients _updateUtilities _worker _env_step > "$ROOT/.build/hot.order"
+printf '%s\n' _oak_act _perceive _encode _evaluate _learnTable _sampleAction _planAction _learn _rotate _worker _lane_window _env_step > "$ROOT/.build/hot.order"
 CACHE_LINE="$(sysctl -n hw.cachelinesize)"
 FLAGS=(-O3 -mcpu=apple-m4 -flto=full "-falign-functions=$CACHE_LINE" -fno-fast-math -ffp-contract=off -Werror=double-promotion -Wall -Wextra
   -I"$ROOT/Sources")

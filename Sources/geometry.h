@@ -34,6 +34,11 @@ _Static_assert(OAK_UNITS % 8u == 0u, "");
 #define OAK_ARMS (OAK_HEADS + OAK_TABLE_ARMS)
 _Static_assert(OAK_ARMS <= 8u, "");
 #define OAK_QTABLE_BITS 14u
+#define OAK_MEMORY_LEVELS OAK_TRACE_LEVELS
+#define OAK_MEMORY_RING (2u << OAK_MEMORY_LEVELS)
+#define OAK_MEMORY_KEYS (2u * OAK_MEMORY_LEVELS)
+_Static_assert(OAK_MEMORY_RING > (1u << OAK_MEMORY_LEVELS) + 1u, "");
+_Static_assert(OAK_POLICY_MAX + 1u < OAK_CELL_STRIDE, "");
 #define OAK_QTABLE (1u << OAK_QTABLE_BITS)
 #define OAK_QROW (2u * OAK_CELL_STRIDE)
 #define OAK_PLAN_BUDGET OAK_FEATURE_TIMESCALE
