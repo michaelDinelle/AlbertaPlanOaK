@@ -46,8 +46,8 @@ SELECTED_SEEDS = 1 + CONFIRM_SEEDS
 ENVCHECK_STEPS = 200_000
 REWARD_ANCHOR = BENCH / "reward-anchor"
 CHECKS = BENCH / "checks"
-POLICIES = ("random", "constant", "ppo", "stream", "oracle")
-POLICY_SOURCES = {"random": ("Sources/random.c",), "constant": ("Sources/constant.c",), "ppo": ("Sources/ppo.c",), "stream": ("Sources/stream.c",), "oracle": ()}
+POLICIES = ("random", "constant", "ppo", "oracle")
+POLICY_SOURCES = {"random": ("Sources/random.c",), "constant": ("Sources/constant.c",), "ppo": ("Sources/ppo.c",), "oracle": ()}
 ENV_LAYER = ("Sources/env.h", "Sources/rng.h", "Sources/portable.h")
 SNAPSHOT = ("Sources", "catalog.py", "setup.sh")
 ENV_ROW = re.compile(r'\s*X\(\s*\w+\s*,\s*(\w+)\s*,.*?"([^"]+)"')
@@ -516,11 +516,11 @@ def compare(table, best, candidates, references, seeds, title):
         c, r = mean([cand[k][0] for k in keys]), mean([ref[k][0] for k in keys])
         same = all(cand[k][1] == ref[k][1] for k in keys)
         rows.append({"env": env, "category": category[env], "cand": base.norm(env, c), "ref": base.norm(env, r),
-                     "ppo": base.norm(env, base.mean("ppo", env)), "stream": base.norm(env, base.mean("stream", env)),
+                     "ppo": base.norm(env, base.mean("ppo", env)),
                      "sign": 0 if same or c == r else (1 if c > r else -1), "same": same, "dead": any(cand[k][2] != 0xffffffff for k in keys)})
     rows.sort(key=lambda r: (r["category"], r["env"]))
-    table_print(["env", "category", "oak", "ref", "ppo", "stream", "d"],
-                [[r["env"], r["category"], r["cand"], r["ref"], r["ppo"], r["stream"], "=" if r["same"] else r["cand"] - r["ref"]] for r in rows])
+    table_print(["env", "category", "oak", "ref", "ppo", "d"],
+                [[r["env"], r["category"], r["cand"], r["ref"], r["ppo"], "=" if r["same"] else r["cand"] - r["ref"]] for r in rows])
     groups = [("suite", rows)] + [(name, [r for r in rows if r["category"] == name]) for name in sorted(set(category.values()))]
     better, worse, summary = [], [], []
     for name, members in groups:
@@ -706,9 +706,9 @@ def standing(table, recording):
     base = Baselines(recording)
     category = {row["envId"]: row["category"] for row in table}
     rows = [{"env": env, "category": category[env], "cand": base.norm(env, mean(recording.scores(env))), "ref": math.nan,
-             "ppo": base.norm(env, base.mean("ppo", env)), "stream": base.norm(env, base.mean("stream", env))} for env in recording.envs]
+             "ppo": base.norm(env, base.mean("ppo", env))} for env in recording.envs]
     groups = [(name, [r for r in rows if r["category"] == name]) for name in sorted(set(category.values()))] + [("suite", rows)]
-    table_print(["group", "n", "oak", "ppo", "stream"], [[name, len(members)] + [average([r[key] for r in members]) for key in ("cand", "ppo", "stream")] for name, members in groups])
+    table_print(["group", "n", "oak", "ppo"], [[name, len(members)] + [average([r[key] for r in members]) for key in ("cand", "ppo")] for name, members in groups])
     return rows
 
 

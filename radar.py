@@ -7,9 +7,9 @@ from pathlib import Path
 
 import fleet
 
-AGENTS = ("OaK", "Oracle", "Stream", "PPO", "Constant", "Random")
-BASELINES = (("random", "Random"), ("constant", "Constant"), ("oracle", "Oracle"), ("ppo", "PPO"), ("stream", "Stream"))
-COLORS = {"OaK": "#5548b4", "Oracle": "#52a96a", "Stream": "#b0508e", "PPO": "#68a8cc", "Constant": "#9a8f6a", "Random": "#e88152"}
+AGENTS = ("OaK", "Oracle", "PPO", "Constant", "Random")
+BASELINES = (("random", "Random"), ("constant", "Constant"), ("oracle", "Oracle"), ("ppo", "PPO"))
+COLORS = {"OaK": "#5548b4", "Oracle": "#52a96a", "PPO": "#68a8cc", "Constant": "#9a8f6a", "Random": "#e88152"}
 CATEGORIES = ("control", "navigation", "memory", "decision", "prediction", "world", "games", "puzzles")
 README = fleet.REPO / "README.md"
 CHART = fleet.REPO / "oak-performance-radar.svg"
@@ -50,7 +50,7 @@ def axis_table(rows):
 def chart(best, steps, window, rows, sps):
     axes = axis_table(rows)[:-1]
     ahead = {name: sum(1 for r in rows if r["category"] == name and normalized(r, "OaK") > normalized(r, "PPO")) for name, _, _ in axes}
-    shown = [means[agent] for _, _, means in axes for agent in ("OaK", "PPO", "Stream")]
+    shown = [means[agent] for _, _, means in axes for agent in ("OaK", "PPO")]
     lo, hi = min([-0.25] + [v - 0.05 for v in shown]), max([1.0] + [v + 0.05 for v in shown])
     s = ['<svg xmlns="http://www.w3.org/2000/svg" width="1250" height="930" viewBox="0 0 1250 930" role="img" aria-labelledby="title desc">',
          f'<title id="title">OaK and PPO across the {len(axes)} environment categories</title>',
@@ -81,7 +81,7 @@ def chart(best, steps, window, rows, sps):
     for i in range(len(axes)):
         x, y = xy(i, hi)
         s.append(f'<path d="M {cx} {cy} L {x:.2f} {y:.2f}" stroke="#d0d6df" stroke-width="1"/>')
-    for agent in ("PPO", "Stream", "OaK"):
+    for agent in ("PPO", "OaK"):
         s.append(f'<polygon points="{points(agent)}" fill="none" stroke="{COLORS[agent]}" stroke-width="3.5" stroke-linejoin="round"/>')
         for i, (_, _, means) in enumerate(axes):
             x, y = xy(i, means[agent])
@@ -118,7 +118,7 @@ def chart(best, steps, window, rows, sps):
     columns = [330 + i * 750 / (len(axes) - 1) for i in range(len(axes))]
     for i, (name, _, _) in enumerate(axes):
         text(columns[i], 745, name, 15, anchor="middle")
-    for j, agent in enumerate(("OaK", "Stream", "PPO")):
+    for j, agent in enumerate(("OaK", "PPO")):
         y = 775 + j * 22
         text(54, y, agent, 17, fill=COLORS[agent], weight="600")
         for i, (_, _, means) in enumerate(axes):
@@ -137,13 +137,13 @@ def readme(best, oak, window, rows, sps):
     lines = text.split("\n")
     first = next(i for i, line in enumerate(lines) if line.startswith("Reward per step over the final"))
     last = next(i for i, line in enumerate(lines) if line.startswith("Baseline throughput"))
-    block = [f"Reward per step over the final {window:,} steps of the {oak.steps:,}-step best recording (`{best}`), all {len(rows)} environments with {oak.lanes // len(rows)} seeds each ({oak.lanes:,} lanes), with the Oracle, streaming actor-critic, PPO, constant do-nothing and Random baselines on the same seeds. Mean over seeds; Score = (OaK − Floor) / (Oracle − Floor) with Floor = max(Random, Constant), unclipped; a dash where the Oracle does not rise above the floor.", "",
-             "| Environment | Category | OaK | Oracle | Stream | PPO | Constant | Random | Score |", "|---|---|---:|---:|---:|---:|---:|---:|---:|"]
+    block = [f"Reward per step over the final {window:,} steps of the {oak.steps:,}-step best recording (`{best}`), all {len(rows)} environments with {oak.lanes // len(rows)} seeds each ({oak.lanes:,} lanes), with the Oracle, PPO, constant do-nothing and Random baselines on the same seeds. Mean over seeds; Score = (OaK − Floor) / (Oracle − Floor) with Floor = max(Random, Constant), unclipped; a dash where the Oracle does not rise above the floor.", "",
+             "| Environment | Category | OaK | Oracle | PPO | Constant | Random | Score |", "|---|---|---:|---:|---:|---:|---:|---:|"]
     for row in rows:
         m = row["means"]
         score = normalized(row, "OaK")
-        block.append(f"| {row['env']} | {row['category']} | {fleet.fmt(m['OaK'])} | {fleet.fmt(m['Oracle'])} | {fleet.fmt(m['Stream'])} | {fleet.fmt(m['PPO'])} | {fleet.fmt(m['Constant'])} | {fleet.fmt(m['Random'])} | {fleet.fmt(score) if math.isfinite(score) else '—'} |")
-    block += ["", f"Baseline throughput, lane-weighted over the recordings that hold each environment's baseline: streaming actor-critic {sps['Stream']:,.0f} steps/s, PPO {sps['PPO']:,.0f} steps/s, Random {sps['Random']:,.0f} steps/s, Constant {sps['Constant']:,.0f} steps/s, Oracle {sps['Oracle']:,.0f} steps/s."]
+        block.append(f"| {row['env']} | {row['category']} | {fleet.fmt(m['OaK'])} | {fleet.fmt(m['Oracle'])} | {fleet.fmt(m['PPO'])} | {fleet.fmt(m['Constant'])} | {fleet.fmt(m['Random'])} | {fleet.fmt(score) if math.isfinite(score) else '—'} |")
+    block += ["", f"Baseline throughput, lane-weighted over the recordings that hold each environment's baseline: PPO {sps['PPO']:,.0f} steps/s, Random {sps['Random']:,.0f} steps/s, Constant {sps['Constant']:,.0f} steps/s, Oracle {sps['Oracle']:,.0f} steps/s."]
     README.write_text("\n".join(lines[:first] + block + lines[last + 1:]))
 
 

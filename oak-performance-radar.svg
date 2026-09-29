@@ -27,15 +27,6 @@
 <rect x="363.16" y="448.84" width="8" height="8" fill="#68a8cc"/>
 <rect x="327.52" y="386.00" width="8" height="8" fill="#68a8cc"/>
 <rect x="380.16" y="340.16" width="8" height="8" fill="#68a8cc"/>
-<polygon points="430.00,251.90 518.64,301.36 531.75,390.00 561.42,521.42 430.00,492.11 358.93,461.07 370.18,390.00 358.36,318.36" fill="none" stroke="#b0508e" stroke-width="3.5" stroke-linejoin="round"/>
-<rect x="426.00" y="247.90" width="8" height="8" fill="#b0508e"/>
-<rect x="514.64" y="297.36" width="8" height="8" fill="#b0508e"/>
-<rect x="527.75" y="386.00" width="8" height="8" fill="#b0508e"/>
-<rect x="557.42" y="517.42" width="8" height="8" fill="#b0508e"/>
-<rect x="426.00" y="488.11" width="8" height="8" fill="#b0508e"/>
-<rect x="354.93" y="457.07" width="8" height="8" fill="#b0508e"/>
-<rect x="366.18" y="386.00" width="8" height="8" fill="#b0508e"/>
-<rect x="354.36" y="314.36" width="8" height="8" fill="#b0508e"/>
 <polygon points="430.00,247.84 524.73,295.27 610.08,390.00 583.75,543.75 430.00,548.94 358.70,461.30 335.39,390.00 348.48,308.48" fill="none" stroke="#5548b4" stroke-width="3.5" stroke-linejoin="round"/>
 <circle cx="430.00" cy="247.84" r="5" fill="#5548b4"/>
 <circle cx="524.73" cy="295.27" r="5" fill="#5548b4"/>
@@ -83,18 +74,14 @@
 <text x="1180.0" y="402.0" font-size="20" fill="#243044" text-anchor="end" font-weight="400">0.335</text>
 <rect x="900" y="414" width="93.71" height="13" fill="#68a8cc"/>
 <text x="1180.0" y="380.0" font-size="13" fill="#637084" text-anchor="end" font-weight="400">3,441,657 steps/s</text>
-<text x="900.0" y="458.0" font-size="20" fill="#b0508e" text-anchor="start" font-weight="600">4. Stream</text>
-<text x="1180.0" y="458.0" font-size="20" fill="#243044" text-anchor="end" font-weight="400">0.310</text>
-<rect x="900" y="470" width="86.77" height="13" fill="#b0508e"/>
-<text x="1180.0" y="436.0" font-size="13" fill="#637084" text-anchor="end" font-weight="400">1,053,297 steps/s</text>
-<text x="900.0" y="514.0" font-size="20" fill="#9a8f6a" text-anchor="start" font-weight="600">5. Constant</text>
-<text x="1180.0" y="514.0" font-size="20" fill="#243044" text-anchor="end" font-weight="400">-0.151</text>
-<path d="M 900 524 v 17" stroke="#9a8f6a" stroke-width="2"/>
-<text x="1180.0" y="492.0" font-size="13" fill="#637084" text-anchor="end" font-weight="400">75,271,784 steps/s</text>
-<text x="900.0" y="570.0" font-size="20" fill="#e88152" text-anchor="start" font-weight="600">6. Random</text>
-<text x="1180.0" y="570.0" font-size="20" fill="#243044" text-anchor="end" font-weight="400">-1.064</text>
-<path d="M 900 580 v 17" stroke="#e88152" stroke-width="2"/>
-<text x="1180.0" y="548.0" font-size="13" fill="#637084" text-anchor="end" font-weight="400">85,236,833 steps/s</text>
+<text x="900.0" y="458.0" font-size="20" fill="#9a8f6a" text-anchor="start" font-weight="600">4. Constant</text>
+<text x="1180.0" y="458.0" font-size="20" fill="#243044" text-anchor="end" font-weight="400">-0.151</text>
+<path d="M 900 468 v 17" stroke="#9a8f6a" stroke-width="2"/>
+<text x="1180.0" y="436.0" font-size="13" fill="#637084" text-anchor="end" font-weight="400">75,271,784 steps/s</text>
+<text x="900.0" y="514.0" font-size="20" fill="#e88152" text-anchor="start" font-weight="600">5. Random</text>
+<text x="1180.0" y="514.0" font-size="20" fill="#243044" text-anchor="end" font-weight="400">-1.064</text>
+<path d="M 900 524 v 17" stroke="#e88152" stroke-width="2"/>
+<text x="1180.0" y="492.0" font-size="13" fill="#637084" text-anchor="end" font-weight="400">85,236,833 steps/s</text>
 <text x="900.0" y="640.0" font-size="15" fill="#637084" text-anchor="start" font-weight="400">steps per second; baselines lane-weighted over their recordings</text>
 <text x="54.0" y="745.0" font-size="17" fill="#243044" text-anchor="start" font-weight="600">Axis scores</text>
 <text x="330.0" y="745.0" font-size="15" fill="#243044" text-anchor="middle" font-weight="400">control</text>
@@ -114,24 +101,15 @@
 <text x="865.7" y="775.0" font-size="16" fill="#243044" text-anchor="middle" font-weight="400">0.275</text>
 <text x="972.9" y="775.0" font-size="16" fill="#243044" text-anchor="middle" font-weight="400">0.243</text>
 <text x="1080.0" y="775.0" font-size="16" fill="#243044" text-anchor="middle" font-weight="400">0.350</text>
-<text x="54.0" y="797.0" font-size="17" fill="#b0508e" text-anchor="start" font-weight="600">Stream</text>
-<text x="330.0" y="797.0" font-size="16" fill="#243044" text-anchor="middle" font-weight="400">0.469</text>
-<text x="437.1" y="797.0" font-size="16" fill="#243044" text-anchor="middle" font-weight="400">0.403</text>
-<text x="544.3" y="797.0" font-size="16" fill="#243044" text-anchor="middle" font-weight="400">0.280</text>
-<text x="651.4" y="797.0" font-size="16" fill="#243044" text-anchor="middle" font-weight="400">0.718</text>
-<text x="758.6" y="797.0" font-size="16" fill="#243044" text-anchor="middle" font-weight="400">0.282</text>
-<text x="865.7" y="797.0" font-size="16" fill="#243044" text-anchor="middle" font-weight="400">0.274</text>
-<text x="972.9" y="797.0" font-size="16" fill="#243044" text-anchor="middle" font-weight="400">0.062</text>
-<text x="1080.0" y="797.0" font-size="16" fill="#243044" text-anchor="middle" font-weight="400">0.278</text>
-<text x="54.0" y="819.0" font-size="17" fill="#68a8cc" text-anchor="start" font-weight="600">PPO</text>
-<text x="330.0" y="819.0" font-size="16" fill="#243044" text-anchor="middle" font-weight="400">0.532</text>
-<text x="437.1" y="819.0" font-size="16" fill="#243044" text-anchor="middle" font-weight="400">0.023</text>
-<text x="544.3" y="819.0" font-size="16" fill="#243044" text-anchor="middle" font-weight="400">0.378</text>
-<text x="651.4" y="819.0" font-size="16" fill="#243044" text-anchor="middle" font-weight="400">0.673</text>
-<text x="758.6" y="819.0" font-size="16" fill="#243044" text-anchor="middle" font-weight="400">0.308</text>
-<text x="865.7" y="819.0" font-size="16" fill="#243044" text-anchor="middle" font-weight="400">0.213</text>
-<text x="972.9" y="819.0" font-size="16" fill="#243044" text-anchor="middle" font-weight="400">0.263</text>
-<text x="1080.0" y="819.0" font-size="16" fill="#243044" text-anchor="middle" font-weight="400">0.088</text>
+<text x="54.0" y="797.0" font-size="17" fill="#68a8cc" text-anchor="start" font-weight="600">PPO</text>
+<text x="330.0" y="797.0" font-size="16" fill="#243044" text-anchor="middle" font-weight="400">0.532</text>
+<text x="437.1" y="797.0" font-size="16" fill="#243044" text-anchor="middle" font-weight="400">0.023</text>
+<text x="544.3" y="797.0" font-size="16" fill="#243044" text-anchor="middle" font-weight="400">0.378</text>
+<text x="651.4" y="797.0" font-size="16" fill="#243044" text-anchor="middle" font-weight="400">0.673</text>
+<text x="758.6" y="797.0" font-size="16" fill="#243044" text-anchor="middle" font-weight="400">0.308</text>
+<text x="865.7" y="797.0" font-size="16" fill="#243044" text-anchor="middle" font-weight="400">0.213</text>
+<text x="972.9" y="797.0" font-size="16" fill="#243044" text-anchor="middle" font-weight="400">0.263</text>
+<text x="1080.0" y="797.0" font-size="16" fill="#243044" text-anchor="middle" font-weight="400">0.088</text>
 <text x="54.0" y="849.0" font-size="15" fill="#637084" text-anchor="start" font-weight="400">OaK ahead of PPO on</text>
 <text x="330.0" y="849.0" font-size="15" fill="#637084" text-anchor="middle" font-weight="400">20 of 34</text>
 <text x="437.1" y="849.0" font-size="15" fill="#637084" text-anchor="middle" font-weight="400">20 of 25</text>
