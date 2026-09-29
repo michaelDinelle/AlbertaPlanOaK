@@ -53,13 +53,12 @@ def chart(best, steps, window, rows, sps):
     ranking = sorted(AGENTS, key=overall.get, reverse=True)
     ahead = {name: sum(1 for r in rows if r["category"] == name and normalized(r, "OaK") > normalized(r, "PPO")) for name, _, _ in axes}
 
-    learners = ("PPO", "OaK")
-    shown = [means[agent] for _, _, means in axes for agent in learners]
-    lo, hi = min([-0.25] + [v - 0.05 for v in shown]), max([1.0] + [v + 0.05 for v in shown])
+    shown = [means[agent] for _, _, means in axes for agent in AGENTS]
+    lo, hi = min([-1.0] + [v - 0.05 for v in shown if v >= -1.0]), max([1.0] + [v + 0.05 for v in shown])
     height = 800 + 22 * len(AGENTS) + 130
     s = [f'<svg xmlns="http://www.w3.org/2000/svg" width="1250" height="{height}" viewBox="0 0 1250 {height}" role="img" aria-labelledby="title desc">',
-         f'<title id="title">OaK and PPO across the {len(axes)} environment categories</title>',
-         f'<desc id="desc">Mean normalized reward per step over the final {window:,} steps of the {steps:,}-step best recording, one axis per declared category with its environment count, the better of Random and the constant do-nothing policy at 0 and Oracle at 1. The radius is linear. The floor ring is the better of Random and the constant policy in every environment, so their category means lie at or below it; their exact values are in the ranking and the axis table. Outlines only: the polygon area is not the score. The overall ranking is the equal-weight mean over all {len(rows)} environments.</desc>',
+         f'<title id="title">Every policy across the {len(axes)} environment categories</title>',
+         f'<desc id="desc">Mean normalized reward per step over the final {window:,} steps of the {steps:,}-step best recording, one axis per declared category with its environment count, the better of Random and the constant do-nothing policy at 0 and Oracle at 1. The radius is linear from the centre at {lo:.2f} to the Oracle ring. A category mean below the centre is drawn at the centre and labelled with its value. Outlines only: the polygon area is not the score. The overall ranking is the equal-weight mean over all {len(rows)} environments.</desc>',
          f'<rect width="1250" height="{height}" fill="#ffffff"/>', '<g font-family="Arial, Helvetica, sans-serif" fill="#243044">']
 
     def text(x, y, t, size=18, fill="#243044", anchor="start", weight="400"):
@@ -82,7 +81,7 @@ def chart(best, steps, window, rows, sps):
     angles = [-math.pi / 2 + 2 * math.pi * i / len(axes) for i in range(len(axes))]
 
     def radius(value):
-        return R * (value - lo) / (hi - lo)
+        return R * (max(value, lo) - lo) / (hi - lo)
 
     def xy(i, value):
         return cx + radius(value) * math.cos(angles[i]), cy + radius(value) * math.sin(angles[i])
@@ -98,12 +97,14 @@ def chart(best, steps, window, rows, sps):
     for i in range(len(axes)):
         x, y = xy(i, hi)
         s.append(f'<path d="M {cx} {cy} L {x:.2f} {y:.2f}" stroke="#d0d6df" stroke-width="1"/>')
-    style = {"Oracle": ("2.5", ' stroke-dasharray="9 6"'), "PPO": ("3", ""), "OaK": ("3.5", "")}
-    for agent in ("Oracle",) + learners:
+    style = {"Oracle": ("2.5", ' stroke-dasharray="9 6"'), "Random": ("2", ' stroke-dasharray="2 4"'), "Constant": ("2", ' stroke-dasharray="7 4"'), "PPO": ("3", ""), "OaK": ("3.5", "")}
+    for agent in ("Oracle", "Random", "Constant", "PPO", "OaK"):
         width, dash = style[agent]
         s.append(f'<polygon points="{points(agent)}" fill="none" stroke="{COLORS[agent]}" stroke-width="{width}"{dash} stroke-linejoin="round"/>')
         for i, (_, _, means) in enumerate(axes):
             mark(agent, *xy(i, means[agent]))
+            if means[agent] < lo:
+                text(cx + 34 * math.cos(angles[i]), cy + 34 * math.sin(angles[i]) + 5, f"{means[agent]:.2f}".replace("-", "\u2212"), 13, fill=COLORS[agent], anchor="middle", weight="600")
     for value in (0.0, 0.25, 0.5, 0.75, 1.0):
         text(cx + radius(value) - 2, cy + 21, f"{value:g}".replace("-", "−"), 13, fill="#647084", anchor="middle")
     text(cx - 8, cy + 22, f"{lo:.2f}".replace("-", "\u2212"), 12, fill="#647084", anchor="end")
@@ -146,7 +147,8 @@ def chart(best, steps, window, rows, sps):
     for i, (name, count, _) in enumerate(axes):
         text(columns[i], base, f"{ahead[name]} of {count}", 15, anchor="middle", fill="#637084")
     text(54, base + 45, f"Equal weight per environment · outlines, not areas · floor = max(Random, Constant) = 0 · Oracle = 1 · final {window:,} of {steps:,} steps", 15, fill="#637084")
-    text(54, base + 67, "Linear radius. Random and Constant are summarized by the floor ring: the better of the two defines 0 in every environment, so their category means lie at or below it.", 15, fill="#637084")
+    off = [f"{agent} on {name} at {means[agent]:.2f}".replace("-", "\u2212") for name, _, means in axes for agent in AGENTS if means[agent] < lo]
+    text(54, base + 67, f"Linear radius from {lo:.2f} at the centre".replace("-", "\u2212") + (f"; below the centre and drawn at it with its value: {', '.join(off)}." if off else "."), 15, fill="#637084")
     s.append("</g></svg>")
     CHART.write_text("\n".join(s) + "\n")
 
