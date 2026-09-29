@@ -80,7 +80,7 @@ typedef struct {
     float control[OAK_OBSERVATION_LIMIT * OAK_POLICY_LANES];
     uint32_t cellActive[2u * OAK_CELLS];
     Channel actorMeta[OAK_HEADS];
-    float channelMean[OAK_CHANNELS], channelSecond[OAK_CHANNELS], channelAlpha[OAK_CHANNELS], channelBeta[OAK_CHANNELS], channelTrace[OAK_CHANNELS], channelEnergy[OAK_CHANNELS];
+    float channelMean[OAK_CHANNELS], channelSpread[OAK_CHANNELS], channelAlpha[OAK_CHANNELS], channelBeta[OAK_CHANNELS], channelTrace[OAK_CHANNELS], channelEnergy[OAK_CHANNELS];
     float actionSignal[OAK_ACTION_PARAMS];
     float actorCredit[OAK_POLICY_MAX], actorCreditStaging[OAK_POLICY_MAX], logit[OAK_POLICY_MAX];
     float reward, td, tdNormalized, tdSquare, advantage, advantageCenter, averageReward, actorStep, betaFloor;
@@ -147,9 +147,10 @@ static inline void metaStep(Channel *c, float signal, float inverseAge, float me
 }
 
 static inline float4 keep4(float4 old, float4 next) { return select4(oak_finite4(next), next, old); }
+static inline float4 finite4(float4 v) { return select4(oak_finite4(v), v, splat4(0.0f)); }
 static inline float4 oak_rsqrt4(float4 x) { return splat4(1.0f) / __builtin_elementwise_sqrt(x); }
 static inline float4 standardizeChannels(OakAgent *a, uint32_t o, float4 x, float inverseAge, float floorRate, float metaRate, float decay, float betaFloor, float ridgeFloor) {
-    float4 mean = oak_load4(a->channelMean + o), second = oak_load4(a->channelSecond + o), alpha = oak_load4(a->channelAlpha + o);
+    float4 mean = oak_load4(a->channelMean + o), spread = oak_load4(a->channelSpread + o), alpha = oak_load4(a->channelAlpha + o);
     float4 beta = oak_load4(a->channelBeta + o), trace = oak_load4(a->channelTrace + o), energy = oak_load4(a->channelEnergy + o);
     lane4 finite = oak_finite4(x);
     float4 signal = x - mean;
@@ -165,15 +166,18 @@ static inline float4 standardizeChannels(OakAgent *a, uint32_t o, float4 x, floa
     trace = select4(commit, nextTrace, trace);
     energy = select4(commit, gradEnergy, energy);
     float4 rate = __builtin_elementwise_max(splat4(floorRate), alpha);
-    mean = select4(finite, mean + rate * (x - mean), mean);
-    second = select4(finite, second + rate * (x * x - second), second);
+    float4 reach = __builtin_elementwise_max(spread, __builtin_elementwise_abs(signal));
+    float4 low = spread / reach, high = signal / reach;
+    spread = select4(finite, keep4(spread, reach * __builtin_elementwise_sqrt((splat4(1.0f) - rate) * (low * low + rate * high * high))), spread);
+    mean = select4(finite, keep4(mean, mean + rate * signal), mean);
     oak_store4(a->channelMean + o, mean);
-    oak_store4(a->channelSecond + o, second);
+    oak_store4(a->channelSpread + o, spread);
     oak_store4(a->channelAlpha + o, alpha);
     oak_store4(a->channelBeta + o, beta);
     oak_store4(a->channelTrace + o, trace);
     oak_store4(a->channelEnergy + o, energy);
-    return (x - mean) * oak_rsqrt4(__builtin_elementwise_max(second - mean * mean, splat4(0.0f)) + splat4(ridgeFloor));
+    float4 gap = x - mean, scale = __builtin_elementwise_max(spread, splat4(sqrtf(ridgeFloor))), ratio = spread / scale;
+    return finite4((gap / scale) * oak_rsqrt4(ratio * ratio + splat4(ridgeFloor) / (scale * scale)));
 }
 
 static inline uint32_t tableCell(uint32_t hash) {
@@ -206,8 +210,6 @@ static inline lane4 fineCode4(float4 value) {
 static inline lane4 coarseCode4(float4 value) {
     return __builtin_convertvector(__builtin_elementwise_min(__builtin_elementwise_max(__builtin_elementwise_floor(value + splat4(1.5f)), splat4(0.0f)), splat4(2.0f)), lane4);
 }
-
-static inline float4 finite4(float4 v) { return select4(oak_finite4(v), v, splat4(0.0f)); }
 
 static inline lane4 mixCells4(lane4 hash) {
     hash ^= hash >> 15u;
@@ -370,7 +372,7 @@ static __attribute__((noinline)) void perceive(OakAgent *a, const float *obs) {
             energy = __builtin_elementwise_fma(in, in, energy);
         }
         unit[j] = oak_sum4(sum);
-        a->unitEnergy[a->slot * OAK_UNITS + j] = oak_sum4(energy);
+        a->unitEnergy[a->slot * OAK_UNITS + j] = keepFinite(a->unitEnergy[a->slot * OAK_UNITS + j], oak_sum4(energy));
     }
     for (uint32_t j = 0u; j < OAK_UNITS; j += 4u) oak_store4(unit + j, oak_tanh4(oak_load4(unit + j)));
 }
@@ -967,7 +969,7 @@ uint32_t oak_nonfinite(const uint32_t *state) {
     OAK_NONFINITE(control);
     OAK_NONFINITE(actorMeta);
     OAK_NONFINITE(channelMean);
-    OAK_NONFINITE(channelSecond);
+    OAK_NONFINITE(channelSpread);
     OAK_NONFINITE(channelAlpha);
     OAK_NONFINITE(channelBeta);
     OAK_NONFINITE(channelTrace);

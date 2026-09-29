@@ -4,7 +4,7 @@
 <rect width="1250" height="1040" fill="#ffffff"/>
 <g font-family="Arial, Helvetica, sans-serif" fill="#243044">
 <text x="54.0" y="55.0" font-size="30" fill="#243044" text-anchor="start" font-weight="600">Policy comparison</text>
-<text x="54.0" y="86.0" font-size="17" fill="#637084" text-anchor="start" font-weight="400">Mean normalized reward per step · 245 environments · best recording 6e891e535</text>
+<text x="54.0" y="86.0" font-size="17" fill="#637084" text-anchor="start" font-weight="400">Mean normalized reward per step · 245 environments · best recording 73d32d36a</text>
 <path d="M 430 390 L 430.00 150.00" stroke="#d0d6df" stroke-width="1"/>
 <path d="M 430 390 L 599.71 220.29" stroke="#d0d6df" stroke-width="1"/>
 <path d="M 430 390 L 670.00 390.00" stroke="#d0d6df" stroke-width="1"/>
@@ -53,15 +53,15 @@
 <rect x="351.01" y="460.99" width="8" height="8" fill="#68a8cc"/>
 <rect x="311.93" y="386.00" width="8" height="8" fill="#68a8cc"/>
 <rect x="365.17" y="325.17" width="8" height="8" fill="#68a8cc"/>
-<path d="M 430.00 239.53 L 531.57 288.43 L 612.07 390.00 L 580.75 540.75 L 430.00 554.45 L 347.96 472.04 L 319.16 390.00 L 339.44 299.44 Z" fill="none" stroke="#5548b4" stroke-width="3.5" stroke-linejoin="round"/>
-<circle cx="430.00" cy="239.53" r="5" fill="#5548b4"/>
-<circle cx="531.57" cy="288.43" r="5" fill="#5548b4"/>
-<circle cx="612.07" cy="390.00" r="5" fill="#5548b4"/>
-<circle cx="580.75" cy="540.75" r="5" fill="#5548b4"/>
-<circle cx="430.00" cy="554.45" r="5" fill="#5548b4"/>
-<circle cx="347.96" cy="472.04" r="5" fill="#5548b4"/>
-<circle cx="319.16" cy="390.00" r="5" fill="#5548b4"/>
-<circle cx="339.44" cy="299.44" r="5" fill="#5548b4"/>
+<path d="M 430.00 238.74 L 532.29 287.71 L 611.84 390.00 L 580.68 540.68 L 430.00 554.98 L 347.43 472.57 L 327.76 390.00 L 339.41 299.41 Z" fill="none" stroke="#5548b4" stroke-width="3.5" stroke-linejoin="round"/>
+<circle cx="430.00" cy="238.74" r="5" fill="#5548b4"/>
+<circle cx="532.29" cy="287.71" r="5" fill="#5548b4"/>
+<circle cx="611.84" cy="390.00" r="5" fill="#5548b4"/>
+<circle cx="580.68" cy="540.68" r="5" fill="#5548b4"/>
+<circle cx="430.00" cy="554.98" r="5" fill="#5548b4"/>
+<circle cx="347.43" cy="472.57" r="5" fill="#5548b4"/>
+<circle cx="327.76" cy="390.00" r="5" fill="#5548b4"/>
+<circle cx="339.41" cy="299.41" r="5" fill="#5548b4"/>
 <text x="435.5" y="390.3" font-size="12" fill="#8a8f98" text-anchor="start" font-weight="400" stroke="#ffffff" stroke-width="4" stroke-linejoin="round" paint-order="stroke">−1</text>
 <text x="449.3" y="357.0" font-size="12" fill="#8a8f98" text-anchor="start" font-weight="400" stroke="#ffffff" stroke-width="4" stroke-linejoin="round" paint-order="stroke">−0.5</text>
 <text x="478.4" y="286.8" font-size="12" fill="#8a8f98" text-anchor="start" font-weight="400" stroke="#ffffff" stroke-width="4" stroke-linejoin="round" paint-order="stroke">0.25</text>
@@ -95,9 +95,9 @@
 <text x="920.0" y="309.0" font-size="13" fill="#637084" text-anchor="start" font-weight="400">15,917,566 steps/s</text>
 <circle cx="906.00" cy="350.00" r="5" fill="#5548b4"/>
 <text x="920.0" y="356.0" font-size="20" fill="#5548b4" text-anchor="start" font-weight="600">2. OaK</text>
-<text x="1180.0" y="356.0" font-size="20" fill="#243044" text-anchor="end" font-weight="400">0.480</text>
-<rect x="1044.33" y="383" width="65.16" height="13" fill="#5548b4"/>
-<text x="920.0" y="375.0" font-size="13" fill="#637084" text-anchor="start" font-weight="400">6,288,958 steps/s</text>
+<text x="1180.0" y="356.0" font-size="20" fill="#243044" text-anchor="end" font-weight="400">0.467</text>
+<rect x="1044.33" y="383" width="63.30" height="13" fill="#5548b4"/>
+<text x="920.0" y="375.0" font-size="13" fill="#637084" text-anchor="start" font-weight="400">6,304,880 steps/s</text>
 <rect x="902.00" y="412.00" width="8" height="8" fill="#68a8cc"/>
 <text x="920.0" y="422.0" font-size="20" fill="#68a8cc" text-anchor="start" font-weight="600">3. PPO</text>
 <text x="1180.0" y="422.0" font-size="20" fill="#243044" text-anchor="end" font-weight="400">0.335</text>
@@ -137,14 +137,14 @@
 <text x="1080.0" y="775.0" font-size="16" fill="#243044" text-anchor="middle" font-weight="400">1.000</text>
 <circle cx="60.00" cy="791.00" r="5" fill="#5548b4"/>
 <text x="74.0" y="797.0" font-size="17" fill="#5548b4" text-anchor="start" font-weight="600">OaK</text>
-<text x="330.0" y="797.0" font-size="16" fill="#243044" text-anchor="middle" font-weight="400">0.490</text>
-<text x="437.1" y="797.0" font-size="16" fill="#243044" text-anchor="middle" font-weight="400">0.448</text>
-<text x="544.3" y="797.0" font-size="16" fill="#243044" text-anchor="middle" font-weight="400">0.688</text>
+<text x="330.0" y="797.0" font-size="16" fill="#243044" text-anchor="middle" font-weight="400">0.495</text>
+<text x="437.1" y="797.0" font-size="16" fill="#243044" text-anchor="middle" font-weight="400">0.454</text>
+<text x="544.3" y="797.0" font-size="16" fill="#243044" text-anchor="middle" font-weight="400">0.687</text>
 <text x="651.4" y="797.0" font-size="16" fill="#243044" text-anchor="middle" font-weight="400">0.882</text>
-<text x="758.6" y="797.0" font-size="16" fill="#243044" text-anchor="middle" font-weight="400">0.578</text>
-<text x="865.7" y="797.0" font-size="16" fill="#243044" text-anchor="middle" font-weight="400">0.275</text>
-<text x="972.9" y="797.0" font-size="16" fill="#243044" text-anchor="middle" font-weight="400">0.243</text>
-<text x="1080.0" y="797.0" font-size="16" fill="#243044" text-anchor="middle" font-weight="400">0.350</text>
+<text x="758.6" y="797.0" font-size="16" fill="#243044" text-anchor="middle" font-weight="400">0.581</text>
+<text x="865.7" y="797.0" font-size="16" fill="#243044" text-anchor="middle" font-weight="400">0.280</text>
+<text x="972.9" y="797.0" font-size="16" fill="#243044" text-anchor="middle" font-weight="400">0.189</text>
+<text x="1080.0" y="797.0" font-size="16" fill="#243044" text-anchor="middle" font-weight="400">0.351</text>
 <rect x="56.00" y="809.00" width="8" height="8" fill="#68a8cc"/>
 <text x="74.0" y="819.0" font-size="17" fill="#68a8cc" text-anchor="start" font-weight="600">PPO</text>
 <text x="330.0" y="819.0" font-size="16" fill="#243044" text-anchor="middle" font-weight="400">0.532</text>
@@ -176,14 +176,14 @@
 <text x="972.9" y="863.0" font-size="16" fill="#243044" text-anchor="middle" font-weight="400">−0.844</text>
 <text x="1080.0" y="863.0" font-size="16" fill="#243044" text-anchor="middle" font-weight="400">−0.937</text>
 <text x="54.0" y="897.0" font-size="15" fill="#637084" text-anchor="start" font-weight="400">OaK ahead of PPO on</text>
-<text x="330.0" y="897.0" font-size="15" fill="#637084" text-anchor="middle" font-weight="400">20 of 34</text>
-<text x="437.1" y="897.0" font-size="15" fill="#637084" text-anchor="middle" font-weight="400">20 of 25</text>
-<text x="544.3" y="897.0" font-size="15" fill="#637084" text-anchor="middle" font-weight="400">28 of 33</text>
+<text x="330.0" y="897.0" font-size="15" fill="#637084" text-anchor="middle" font-weight="400">19 of 34</text>
+<text x="437.1" y="897.0" font-size="15" fill="#637084" text-anchor="middle" font-weight="400">19 of 25</text>
+<text x="544.3" y="897.0" font-size="15" fill="#637084" text-anchor="middle" font-weight="400">27 of 33</text>
 <text x="651.4" y="897.0" font-size="15" fill="#637084" text-anchor="middle" font-weight="400">22 of 30</text>
 <text x="758.6" y="897.0" font-size="15" fill="#637084" text-anchor="middle" font-weight="400">18 of 26</text>
 <text x="865.7" y="897.0" font-size="15" fill="#637084" text-anchor="middle" font-weight="400">8 of 13</text>
-<text x="972.9" y="897.0" font-size="15" fill="#637084" text-anchor="middle" font-weight="400">39 of 71</text>
-<text x="1080.0" y="897.0" font-size="15" fill="#637084" text-anchor="middle" font-weight="400">11 of 13</text>
+<text x="972.9" y="897.0" font-size="15" fill="#637084" text-anchor="middle" font-weight="400">36 of 71</text>
+<text x="1080.0" y="897.0" font-size="15" fill="#637084" text-anchor="middle" font-weight="400">12 of 13</text>
 <text x="54.0" y="942.0" font-size="15" fill="#637084" text-anchor="start" font-weight="400">Equal weight per environment · outlines, not areas · floor = max(Random, Constant) = 0 · Oracle = 1 · final 100,928 of 1,000,000 steps</text>
 <text x="54.0" y="964.0" font-size="15" fill="#637084" text-anchor="start" font-weight="400">Radius in two linear bands: the inner 30% runs from −1.00 at the centre to the floor, the outer 70% from the floor to the Oracle; below the chart: Random on prediction at −5.98.</text>
 </g></svg>
