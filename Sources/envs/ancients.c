@@ -39,7 +39,7 @@ enum { ANC_WORLD_DRAW, ANC_FORECAST_DRAW };
 enum { ANC_LANE, ANC_PUSH, ANC_DEFEND, ANC_FARM, ANC_FIGHT, ANC_RETREAT };
 enum { ANC_CARRY, ANC_NUKER, ANC_STUNNER, ANC_TANK, ANC_SUPPORT, ANC_BLINKER };
 enum { ANC_ANY, ANC_ONEHIT, ANC_EXACT };
-enum { ANC_HOLD, ANC_ENGAGE, ANC_ESCAPE, ANC_OPTIONS };
+enum { ANC_HOLD, ANC_ENGAGE, ANC_ESCAPE, ANC_SIEGE, ANC_OPTIONS };
 enum { ANC_NONE = 0, ANC_HERO = 1 << 20, ANC_CREEP = 2 << 20, ANC_TOWER = 3 << 20, ANC_CAMP = 4 << 20, ANC_KIND = 15 << 20 };
 enum { EV_LASTHIT = 1, EV_KILL, EV_DEATH, EV_TOWER, EV_RESPAWN, EV_LEVEL, EV_ACQUIRED, EV_RELEASED, EV_WAVE, EV_ALLY };
 enum { JOB_LANES = 20, JOB_LANE, JOB_TOWERS, JOB_TOWERS_B, JOB_COMMIT, JOB_VISION, JOB_UPKEEP, JOB_ACT, JOB_CAMPS, JOB_IDLE };
@@ -148,7 +148,7 @@ typedef struct { _Alignas(16) float winRate[LEAGUE_MEMBERS]; float theta[LEAGUE_
 
 typedef struct { int32_t x, y; uint32_t chase; float ctrl[OAK_ENV_ACT_MAX]; } ancPlan;
 
-typedef struct { ancWorld world; ancPlan plan; uint32_t words[8], option, game, tick, primed, planGame, planOption, planTick; } ancOracle;
+typedef struct { ancWorld world; ancPlan plan; uint32_t words[8], option, game, tick, primed, planGame, planOption, planTick, lane; } ancOracle;
 
 typedef struct {
     const ancientsKnobs *k;
@@ -1815,14 +1815,14 @@ static void anc_boost(const ancCtx *c, float *ctrl) {
     }
 }
 
-static uint32_t anc_threat(const ancCtx *c) {
+static uint32_t anc_threat(const ancCtx *c, uint32_t lane) {
     const ancWorld *w = c->w;
     uint32_t best = ANC_STRUCTURES;
     int32_t depth = INT32_MAX;
     for (uint32_t l = 0u; l < c->k->lanes; l++) {
         uint32_t s = anc_front(w, 0u, l), seen = 0u;
         const ancFifo *F = &w->fifo[ANC_LANES + l];
-        if (!(w->tower[s].hp < 0.9f * ANCIENTS_STRUCTURE_HP[s])) continue;
+        if (!(w->tower[s].hp < 0.9f * ANCIENTS_STRUCTURE_HP[s]) || (l != lane && s != ANC_ANCIENT)) continue;
         seen |= anc_onMap(F) && (ANCIENTS_LANE_LENGTH[l] - ANCIENTS_STRUCTURE_ARC[s]) - F->arc[0] <= 3 * ANC_GAP;
         for (uint32_t i = 0u; i < c->k->heroes; i++) {
             const ancHero *v = &w->hero[ANC_SIDE + i];
@@ -1833,36 +1833,44 @@ static uint32_t anc_threat(const ancCtx *c) {
     return best;
 }
 
-static uint32_t anc_contested(const ancCtx *c) {
+static uint32_t anc_goal(const ancCtx *c, uint32_t lane, uint32_t solo) {
     const ancWorld *w = c->w;
-    uint32_t lane = 0u;
-    float worst = INFINITY;
+    const ancHero *e = &w->hero[0];
+    uint32_t best = ANC_STRUCTURES;
+    int32_t bestD = INT32_MAX;
     for (uint32_t l = 0u; l < c->k->lanes; l++) {
-        float balance = anc_total(&w->fifo[l]) - anc_total(&w->fifo[ANC_LANES + l]);
-        if (balance < worst) { worst = balance; lane = l; }
+        uint32_t s = anc_siege(c, 0u, l, solo);
+        if (s == ANC_STRUCTURES || (l != lane && s % ANC_OWN != ANC_ANCIENT)) continue;
+        int32_t d = anc_d2(ANCIENTS_STRUCTURE_X[s], ANCIENTS_STRUCTURE_Y[s], e->x, e->y) >> (s % ANC_OWN == ANC_ANCIENT ? 4 : 0);
+        if (d < bestD) { bestD = d; best = s; }
     }
-    return lane;
+    return best;
 }
 
-static void anc_hold(const ancCtx *c, ancPlan *p) {
+static void anc_hold(const ancCtx *c, ancPlan *p, uint32_t lane, uint32_t solo) {
     float *ctrl = p->ctrl;
     const ancWorld *w = c->w;
     const ancHero *e = &w->hero[0];
     int32_t reach = anc_reach(e), wide = ANC_ARCHETYPES[e->arch].ranged ? ANC_R6 : 409600, tx, ty;
     float low, health = e->hp / e->maxHp;
-    if (health < 0.25f || (health < 0.9f && anc_d2(e->x, e->y, ANCIENTS_FOUNTAIN_X[0], ANCIENTS_FOUNTAIN_Y[0]) <= ANC_R12)) {
+    if ((health < 0.9f && anc_d2(e->x, e->y, ANCIENTS_FOUNTAIN_X[0], ANCIENTS_FOUNTAIN_Y[0]) <= ANC_R12)) {
         anc_chase(p, ANCIENTS_FOUNTAIN_X[0], ANCIENTS_FOUNTAIN_Y[0]);
         return;
     }
-    uint32_t guard = anc_threat(c);
+    uint32_t guard = anc_threat(c, lane);
     if (guard < ANC_STRUCTURES) {
-        uint32_t foe = anc_nearestHero(c, 0u, e->x, e->y, reach, 0u);
-        if (foe) { ctrl[2] = 1.0f; ctrl[3] = 0.0f; }
-        else if (anc_lowest(w, anc_lanes(c->k), 0u, e->x, e->y, reach, &low)) { ctrl[2] = 1.0f; ctrl[3] = -1.0f; }
-        if (anc_d2(ANCIENTS_STRUCTURE_X[guard], ANCIENTS_STRUCTURE_Y[guard], e->x, e->y) > ANC_R4) anc_chase(p, ANCIENTS_STRUCTURE_X[guard], ANCIENTS_STRUCTURE_Y[guard]);
+        int32_t gx = ANCIENTS_STRUCTURE_X[guard], gy = ANCIENTS_STRUCTURE_Y[guard];
+        uint32_t foe = anc_nearestHero(c, 0u, gx, gy, ANC_R8, 1u);
+        if (!foe) foe = anc_lowest(w, anc_lanes(c->k), 0u, gx, gy, ANC_R7, &low);
+        if (foe && anc_locate(w, foe, &tx, &ty)) {
+            if (anc_d2(tx, ty, e->x, e->y) <= reach) {
+                ctrl[2] = 1.0f;
+                ctrl[3] = (foe & ANC_KIND) == (uint32_t)ANC_HERO ? 0.0f : -1.0f;
+            } else anc_chase(p, tx, ty);
+        } else if (anc_d2(gx, gy, e->x, e->y) > ANC_R4) anc_chase(p, gx, gy);
         return;
     }
-    uint32_t lane = anc_contested(c), prey = anc_lastHit(c, 0u, e->x, e->y, wide, ANC_EXACT, e->damage), s = anc_siege(c, 0u, lane, 0u);
+    uint32_t prey = anc_lastHit(c, 0u, e->x, e->y, wide, ANC_EXACT, e->damage), s = anc_goal(c, lane, solo);
     if (s < ANC_STRUCTURES && w->tower[s].target != (uint32_t)ANC_HERO) {
         if (anc_d2(ANCIENTS_STRUCTURE_X[s], ANCIENTS_STRUCTURE_Y[s], e->x, e->y) <= reach) {
             ctrl[2] = 1.0f;
@@ -1908,13 +1916,13 @@ static void anc_clear(ancPlan *p) {
     memset(p->ctrl, 0, sizeof p->ctrl);
 }
 
-static void anc_plan(const ancCtx *c, uint32_t option, ancPlan *p) {
+static void anc_plan(const ancCtx *c, uint32_t option, uint32_t lane, ancPlan *p) {
     anc_clear(p);
     if (c->w->hero[0].dead) return;
     if (option == ANC_ESCAPE) anc_escape(c, p);
-    else if (option == ANC_HOLD || !anc_engage(c, p)) {
+    else if (option != ANC_ENGAGE || !anc_engage(c, p)) {
         anc_clear(p);
-        anc_hold(c, p);
+        anc_hold(c, p, lane, option == ANC_SIEGE);
     }
 }
 
@@ -1936,8 +1944,8 @@ static float anc_value(const ancCtx *c) {
     for (uint32_t i = 0u; i < ANC_ANCIENT; i++) value += 100.0f * (w->tower[i].hp - w->tower[ANC_OWN + i].hp);
     for (uint32_t i = 0u; i < c->k->heroes; i++) {
         const ancHero *a = &w->hero[i], *b = &w->hero[ANC_SIDE + i];
-        float la = a->maxHp - a->hp, lb = b->maxHp - b->hp;
-        value += a->hp - b->hp - 0.5f * (la * la / a->maxHp - lb * lb / b->maxHp) + (float)a->gold - (float)b->gold;
+        float la = a->maxHp - a->hp, lb = b->maxHp - b->hp, trust = c->k->fog ? 0.5f : 1.0f;
+        value += a->hp - trust * b->hp - 0.5f * (la * la / a->maxHp - trust * lb * lb / b->maxHp) + (float)a->gold - (float)b->gold;
     }
     for (uint32_t l = 0u; l < c->k->lanes; l++) value += anc_total(&w->fifo[l]) - anc_total(&w->fifo[ANC_LANES + l]);
     return value;
@@ -2051,13 +2059,16 @@ static void anc_imagine(ancCtx *c, const ancientsKnobs *k, uint32_t instance, ui
         anc_forecast(c, ANC_LANES + l, words[1]);
     }
     if (k->fog) anc_fog(c);
-    for (uint32_t h = ANC_SIDE; h < ANC_SIDE + k->heroes; h++) {
+    for (uint32_t i = 1u; i < 2u * k->heroes; i++) {
+        uint32_t team = i >= k->heroes, h = team * ANC_SIDE + i % k->heroes;
         ancHero *e = &o->world.hero[h];
-        e->gold = 450u * e->items;
-        e->xp = 0.0f;
+        if (team) {
+            e->gold = 450u * e->items;
+            e->xp = 0.0f;
+        }
         e->target = ANC_NONE;
         e->retarget = 1u;
-        e->mode = anc_desire(c, h, c->theta[1]);
+        e->mode = anc_desire(c, h, c->theta[team]);
     }
 }
 
@@ -2068,7 +2079,7 @@ static float anc_rollout(const ancientsKnobs *k, uint32_t instance, uint32_t see
     ancPlan plan;
     for (uint32_t n = 0u; n < ANC_HORIZON * k->substeps; n++) {
         float ctrl[OAK_ENV_ACT_MAX];
-        if (n == 0u || o->words[1] + 1u == k->substeps) anc_plan(&c, option, &plan);
+        if (n == 0u || o->words[1] + 1u == k->substeps) anc_plan(&c, option, o->lane, &plan);
         anc_follow(&c, &plan, ctrl);
         anc_advance(&c, o->words, ctrl);
         if (o->world.result) return o->world.result == 1u ? 1e9f : -1e9f;
@@ -2077,15 +2088,33 @@ static float anc_rollout(const ancientsKnobs *k, uint32_t instance, uint32_t see
     return anc_value(&c);
 }
 
+static uint32_t anc_pinned(const ancientsKnobs *k, const ancWorld *w) {
+    const ancHero *e = &w->hero[0];
+    uint32_t n = 0u;
+    for (uint32_t i = 0u; i < k->heroes; i++) {
+        const ancHero *v = &w->hero[ANC_SIDE + i];
+        int32_t x = k->fog ? w->memory[0].hx[i] : v->x, y = k->fog ? w->memory[0].hy[i] : v->y;
+        n += v->arch == ANC_STUNNER && !v->dead && anc_d2(x, y, e->x, e->y) <= ANC_R12;
+    }
+    return n;
+}
+
 void ancients_oracle(uint32_t instance, uint32_t seed, uint32_t step, const uint32_t *words, uint32_t *extra, const float *obs, float *ctrl, const float *shared) {
     (void)step; (void)obs; (void)shared;
     const ancientsKnobs *k = &ANCIENTS_KNOBS[instance];
     ancOracle *o = anc_oracleOf(extra);
     ancCtx c;
+    const ancHero *e = &anc_world(extra)->hero[0];
+    if (!(o->primed && o->game == words[2]) || anc_d2(e->x, e->y, ANCIENTS_FOUNTAIN_X[0], ANCIENTS_FOUNTAIN_Y[0]) <= ANC_R12) {
+        anc_bind(&c, k, instance, anc_world(extra), anc_league(extra), seed, words);
+        o->lane = anc_weakLane(&c, 1u, 0u, 0u);
+    }
     if (!(o->primed && o->game == words[2] && words[0] - o->tick < ANC_PERIOD)) {
         float best = -INFINITY;
         uint32_t choice = ANC_HOLD;
+        uint32_t flee = e->hp < 0.3f * e->maxHp || !anc_pinned(k, anc_world(extra));
         for (uint32_t option = 0u; option < ANC_OPTIONS; option++) {
+            if (option == ANC_ESCAPE && !flee) continue;
             float value = anc_rollout(k, instance, seed, extra, words, option);
             if (value > best) { best = value; choice = option; }
         }
@@ -2100,7 +2129,7 @@ void ancients_oracle(uint32_t instance, uint32_t seed, uint32_t step, const uint
         o->planOption = o->option;
         o->planTick = serve;
         anc_imagine(&c, k, instance, seed, extra, words);
-        anc_plan(&c, o->option, &o->plan);
+        anc_plan(&c, o->option, o->lane, &o->plan);
     }
     anc_bind(&c, k, instance, anc_world(extra), anc_league(extra), seed, words);
     anc_follow(&c, &o->plan, ctrl);

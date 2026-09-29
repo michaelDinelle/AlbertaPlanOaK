@@ -14,9 +14,9 @@ Recorded on a binned M4 Max.
 
 ## Best recording
 
-Capacity 64, declared once in `Sources/geometry.h`: standardized observations on a seven-level trace ladder, 64 learned units of fan-in 32, and per step 23 hashed tuple cells plus two cells per observation channel on a 16,384-slot table, feeding three actor heads and five table arms that a Thompson-sampling bandit chooses among every 512 steps, plus an exact memory of the last 256 observations that the Q-cell arm consults where its cells leave the choice undecided; 6,197,248 bytes of state per lane. 6,304,880 SPS on the 245-environment schedule.
+Capacity 64, declared once in `Sources/geometry.h`: standardized observations on a seven-level trace ladder, 64 learned units of fan-in 32, and per step 23 hashed tuple cells plus two cells per observation channel on a 16,384-slot table, feeding three actor heads and five table arms that a Thompson-sampling bandit chooses among every 512 steps, plus an exact memory of the last 256 observations that the Q-cell arm consults where its cells leave the choice undecided; 6,197,248 bytes of state per lane. 6,293,626 SPS on the 245-environment schedule.
 
-Reward per step over the final 100,928 steps of the 1,000,000-step best recording (`73d32d36a337d80796bead19b9db88f9d7de2e87`), all 245 environments with 32 seeds each (7,840 lanes), with the Oracle, PPO, constant do-nothing and Random baselines on the same seeds. Mean over seeds; Score = (OaK − Floor) / (Oracle − Floor) with Floor = max(Random, Constant), unclipped; a dash where the Oracle does not rise above the floor.
+Reward per step over the final 100,928 steps of the 1,000,000-step best recording (`863f3917581c623225c691222f771bfba4f13412`), all 245 environments with 32 seeds each (7,840 lanes), with the Oracle, PPO, constant do-nothing and Random baselines on the same seeds. Mean over seeds; Score = (OaK − Floor) / (Oracle − Floor) with Floor = max(Random, Constant), unclipped; a dash where the Oracle does not rise above the floor.
 
 | Environment | Category | OaK | Oracle | PPO | Constant | Random | Score |
 |---|---|---:|---:|---:|---:|---:|---:|
@@ -30,11 +30,11 @@ Reward per step over the final 100,928 steps of the 1,000,000-step best recordin
 | AliasedRing-8-cont-v0 | memory | 0.1536 | 0.1861 | 0.0160 | 0 | -0.0056 | 0.8251 |
 | AliasedRing-32-cont-v0 | memory | 0.0333 | 0.0573 | -2.198e-06 | 0 | -0.0386 | 0.5812 |
 | AliasedRing-128-cont-v0 | memory | 0.0051 | 0.0153 | -6.533e-06 | 0 | -0.0471 | 0.3348 |
-| Ancients-1v1-cont-v0 | games | -0.0001545 | 8.731e-05 | -0.0001508 | -0.0001536 | -0.0001526 | -0.0077 |
-| Ancients-1v1-fog-cont-v0 | games | -0.000135 | 5.79e-05 | -0.0001334 | -0.0001359 | -0.0001347 | -0.0016 |
-| Ancients-3v3-cont-v0 | games | -3.127e-05 | 1.486e-05 | -2.787e-05 | -2.818e-05 | -2.353e-05 | -0.2016 |
-| Ancients-5v5-cont-v0 | games | -1.146e-05 | 1.517e-05 | -1.022e-05 | -9.598e-06 | -9.289e-06 | -0.0886 |
-| Ancients-5v5-league-cont-v0 | games | -1.208e-05 | 4.954e-06 | -9.598e-06 | -1.208e-05 | -1.331e-05 | 0 |
+| Ancients-1v1-cont-v0 | games | -0.0001545 | 0.0001115 | -0.0001508 | -0.0001536 | -0.0001526 | -0.0070 |
+| Ancients-1v1-fog-cont-v0 | games | -0.000135 | 8.577e-05 | -0.0001334 | -0.0001359 | -0.0001347 | -0.0014 |
+| Ancients-3v3-cont-v0 | games | -3.127e-05 | 4.613e-05 | -2.787e-05 | -2.818e-05 | -2.353e-05 | -0.1111 |
+| Ancients-5v5-cont-v0 | games | -1.146e-05 | 2.725e-05 | -1.022e-05 | -9.598e-06 | -9.289e-06 | -0.0593 |
+| Ancients-5v5-league-cont-v0 | games | -1.208e-05 | 1.3e-05 | -9.598e-06 | -1.208e-05 | -1.331e-05 | 0 |
 | Backgammon-random-cont-v0 | games | -0.0005276 | 0.0114 | 0.0055 | -0.0001232 | -2.818e-05 | -0.0438 |
 | Backgammon-pubeval-cont-v0 | games | -0.0108 | 0.0024 | -0.0070 | -0.1050 | -0.0575 | 0.7809 |
 | Backgammon-league-cont-v0 | games | -0.0106 | 0.0026 | -0.0067 | -0.1054 | -0.0576 | 0.7806 |
@@ -88,11 +88,11 @@ Reward per step over the final 100,928 steps of the 1,000,000-step best recordin
 | DeepSea-16-cont-v0 | navigation | 0.0145 | 0.0663 | -1.964e-07 | 0 | -0.0003098 | 0.2188 |
 | DeepSea-32-cont-v0 | navigation | -8.707e-10 | 0.0321 | -1.099e-07 | 0 | -0.0001561 | -2.712e-08 |
 | DeepSea-16-slip-cont-v0 | navigation | -3.132e-05 | 0.0306 | -3.302e-05 | -3.129e-05 | -0.0003114 | -1.035e-06 |
-| Eleven-drill-cont-v0 | games | 0 | 0.0004171 | 2.632e-05 | 0 | 3.716e-06 | -0.0090 |
-| Eleven-1v1-cont-v0 | games | -0.0001681 | 0.0001787 | -0.0002867 | -0.0001065 | -0.0003006 | -0.2161 |
-| Eleven-3v3-cont-v0 | games | -0.0001359 | 0.0001839 | -0.0002378 | -9.134e-05 | -0.0001824 | -0.1620 |
-| Eleven-11v11-hard-cont-v0 | games | -3.375e-05 | 0.0001062 | -4.087e-05 | -2.849e-05 | -5.821e-05 | -0.0391 |
-| Eleven-11v11-league-cont-v0 | games | -0.000104 | 9.196e-05 | -2.88e-05 | -8.174e-05 | -4.737e-05 | -0.4067 |
+| Eleven-drill-cont-v0 | games | 0 | 0.0022 | 2.632e-05 | 0 | 3.716e-06 | -0.0017 |
+| Eleven-1v1-cont-v0 | games | -0.0001681 | 0.0006703 | -0.0002867 | -0.0001065 | -0.0003006 | -0.0793 |
+| Eleven-3v3-cont-v0 | games | -0.0001359 | 0.000605 | -0.0002378 | -9.134e-05 | -0.0001824 | -0.0640 |
+| Eleven-11v11-hard-cont-v0 | games | -3.375e-05 | 0.0005412 | -4.087e-05 | -2.849e-05 | -5.821e-05 | -0.0092 |
+| Eleven-11v11-league-cont-v0 | games | -0.000104 | 0.0005744 | -2.88e-05 | -8.174e-05 | -4.737e-05 | -0.0911 |
 | Dungeon-6-lit-cont-v0 | world | 0.0128 | 1.0769 | 0.0053 | 0.0002105 | 0.0068 | 0.0056 |
 | Dungeon-6-dark-cont-v0 | world | 0.0087 | 0.9169 | 0.0043 | 0.0001777 | 0.0072 | 0.0016 |
 | Dungeon-6-shuffle-cont-v0 | world | 0.0087 | 0.8009 | 0.0032 | 0.000166 | 0.0073 | 0.0018 |
@@ -112,11 +112,11 @@ Reward per step over the final 100,928 steps of the 1,000,000-step best recordin
 | Garnet-50-4-3-cont-v0 | decision | 1.2157 | 1.2191 | 0.9199 | 0.0979 | 0.0132 | 0.9970 |
 | Garnet-10-2-2-resample-cont-v0 | decision | 0.6092 | 0.7167 | 0.1733 | 0.0900 | 0.0291 | 0.8285 |
 | Garnet-50-4-3-resample-cont-v0 | decision | 0.7034 | 1.1752 | 0.2068 | 0.0469 | 0.0099 | 0.5819 |
-| Generals-2-12-cont-v0 | games | -4.056e-05 | 5.264e-06 | -1.889e-05 | -8.979e-06 | -0.0001948 | -2.2174 |
-| Generals-2-23-cont-v0 | games | -2.044e-05 | 2.91e-05 | -6.812e-06 | -1.548e-06 | -1.889e-05 | -0.6162 |
-| Generals-4-28-cont-v0 | games | -2.446e-05 | 8.05e-06 | -1.517e-05 | -1.084e-05 | -2.136e-05 | -0.7213 |
-| Generals-8-32-cont-v0 | games | -3.189e-05 | 9.289e-07 | -2.229e-05 | -7.741e-06 | -4.087e-05 | -2.7857 |
-| Generals-8-32-league-cont-v0 | games | -4.087e-05 | 2.477e-06 | -2.167e-05 | -1.672e-05 | -4.49e-05 | -1.2581 |
+| Generals-2-12-cont-v0 | games | -4.056e-05 | 0.0004778 | -1.889e-05 | -8.979e-06 | -0.0001948 | -0.0649 |
+| Generals-2-23-cont-v0 | games | -2.044e-05 | 0.0003288 | -6.812e-06 | -1.548e-06 | -1.889e-05 | -0.0572 |
+| Generals-4-28-cont-v0 | games | -2.446e-05 | 0.0001133 | -1.517e-05 | -1.084e-05 | -2.136e-05 | -0.1097 |
+| Generals-8-32-cont-v0 | games | -3.189e-05 | 5.233e-05 | -2.229e-05 | -7.741e-06 | -4.087e-05 | -0.4021 |
+| Generals-8-32-league-cont-v0 | games | -4.087e-05 | 5.14e-05 | -2.167e-05 | -1.672e-05 | -4.49e-05 | -0.3545 |
 | Hanabi-2p-literal-cont-v0 | games | 0.1952 | 0.1868 | 0.1792 | 0.0007626 | 0.0077 | 1.0467 |
 | Hanabi-2p-focus-cont-v0 | games | 0.0613 | 0.2127 | 0.0516 | 0.0008487 | 0.0005926 | 0.2852 |
 | Hanabi-4p-focus-cont-v0 | games | 0.8293 | 0.3336 | 0.6067 | 0.0452 | 0.0831 | 2.9791 |
@@ -200,11 +200,11 @@ Reward per step over the final 100,928 steps of the 1,000,000-step best recordin
 | KuhnPoker-random-cont-v0 | games | 0.4588 | 0.4217 | 0.4588 | -0.4000 | -0.0014 | 1.0877 |
 | LeducPoker-cfr-cont-v0 | games | -0.0296 | -0.0032 | -0.0295 | -0.3225 | -0.3451 | 0.9176 |
 | LeducPoker-fictitious-cont-v0 | games | -0.0863 | 0.5672 | -0.1677 | -0.6667 | -0.7174 | 0.4704 |
-| Pommerman-1v1-cont-v0 | games | -0.0047 | 4.211e-05 | -0.0069 | -0.0073 | -0.0405 | 0.3537 |
-| Pommerman-FFA-cont-v0 | games | -0.0050 | -0.0023 | -0.0050 | -0.0057 | -0.0435 | 0.2302 |
-| Pommerman-Team-cont-v0 | games | -0.0031 | 6.007e-05 | -0.0033 | -0.0035 | -0.0319 | 0.1051 |
-| Pommerman-FFA-collapse-cont-v0 | games | -0.0050 | -0.0022 | -0.0051 | -0.0058 | -0.0433 | 0.2159 |
-| Pommerman-FFA-league-cont-v0 | games | -0.0026 | -0.0035 | -0.0027 | -0.0027 | -0.0432 | — |
+| Pommerman-1v1-cont-v0 | games | -0.0047 | 0.0106 | -0.0069 | -0.0073 | -0.0405 | 0.1453 |
+| Pommerman-FFA-cont-v0 | games | -0.0050 | 0.0045 | -0.0050 | -0.0057 | -0.0435 | 0.0760 |
+| Pommerman-Team-cont-v0 | games | -0.0031 | 0.0038 | -0.0033 | -0.0035 | -0.0319 | 0.0510 |
+| Pommerman-FFA-collapse-cont-v0 | games | -0.0050 | 0.0046 | -0.0051 | -0.0058 | -0.0433 | 0.0746 |
+| Pommerman-FFA-league-cont-v0 | games | -0.0026 | 0.0006967 | -0.0027 | -0.0027 | -0.0432 | 0.0221 |
 | PuddleWorld-cont-v0 | control | 1.9426 | 3.7150 | 2.5397 | -0.9907 | -4.6625 | 0.6234 |
 | Quadrotor2D-hover-cont-v0 | control | -9.4484 | -0.1508 | -2.0091 | -2.2991 | -16.5785 | -3.3278 |
 | Quadrotor2D-gust-cont-v0 | control | -10.5174 | -0.1545 | -3.6021 | -9.2524 | -16.6909 | -0.1390 |
@@ -266,7 +266,7 @@ Reward per step over the final 100,928 steps of the 1,000,000-step best recordin
 | WalkBet-cont-v0 | prediction | 1.0000 | 1.0000 | 0.9942 | 0.5508 | 0.5000 | 0.9999 |
 | WalkBet-drift-cont-v0 | prediction | 0.9934 | 1.0000 | 0.8967 | 0.9678 | 0.4999 | 0.7948 |
 
-Baseline throughput, lane-weighted over the recordings that hold each environment's baseline: PPO 3,441,657 steps/s, Random 85,236,833 steps/s, Constant 75,271,784 steps/s, Oracle 15,917,566 steps/s.
+Baseline throughput, lane-weighted over the recordings that hold each environment's baseline: PPO 3,361,389 steps/s, Random 89,834,019 steps/s, Constant 78,065,119 steps/s, Oracle 13,697,803 steps/s.
 
 Every environment runs 32 seeds, from the start of its seed block, so each weighs the same in every suite statistic; 245 environments make 7,840 lanes. The latest promotion changed no bit of behaviour: it draws the Gumbel noise that samples a discrete action for four actions at a time, and computes the trace moments, cell codes, cell hashes and control statistics for four channels at a time. Rewards match the best it replaced bit for bit on all 7,840 lanes, and its paired speed probe measured 1.0183. The promotion before it also changed no bit of behaviour: it standardizes the observation channels four at a time and runs the 23 tuple hash chains four at a time; its paired speed probe measured 1.0557. The promotion before that gave the Q-cell arm an exact memory: pair keys that join the current observation with the observations 2 to 128 steps back, and window keys that count exactly over the last 2 to 128 steps. The arm consults them only where its cells leave the choice undecided, so on seed 0 90 of the 245 environments kept every bit of their behaviour. The promotion also computes the 64 units' activations and learning signals four at a time. Parity-64 and CountRecall-32 went from dead to solved, and the memory category rose from 57.5 to 71.2. Against the best it replaced, its suite IQM difference was +0.005 (95% CI [+0.004, +0.008]), the per-environment regression guard was silent on all 245 environments, and its paired speed probe measured 1.0876. The promotion before those replaced the agent with this portfolio: three actor heads over one shared representation, owner-tagged exact tables keyed on observations and on observation history, a planner, a frontier explorer and a differential Q-learning arm over the tile-coded cells, which include settled trace cells and cells relating the channel the agent controls to every other channel. Against the best it replaced, its suite IQM difference was +1.294 (95% CI [+1.260, +1.328]), the per-environment regression guard was silent on all 245 environments, and its paired speed probe measured 1.0679. The last adoption before it added Craftax-Classic and Reacher, each after a speed pass that changed no bit of its behaviour. On all 7,776 lanes it shares with the previous best, rewards match bit for bit, and so does every refiled baseline; its speed gate against the recording that began the environment program measured 1.1227. The adoption before it added Reversi, chess, Kuhn and Leduc poker, backgammon, LightCycles, SlimeVolley, Pommerman, Overcooked-AI, LBF, RWARE and Hanabi; HalfCheetah-friction, InvertedDoublePendulum and Hopper on the planar physics core, Quadrotor2D and Arm2; Eleven, Skirmish, MinAtar, Dungeon and RelicFog; and IDBD, SlowRegression, RateTracking, FrostHollow, SymbolicAlchemy, DarkKeyToDoor and Homeostasis. It also made Contextual, Regression and HalfCheetah faster without changing a bit of their behaviour, and a Tetris game now ends at level 155. On all 5,248 lanes it shares with the previous best, rewards match bit for bit, and so does every refiled baseline. Its speed gate against the recording that began the environment program (`4262868f4bce5ea25ac4905e60742f75d11be371`) measured 1.1297 over three interleaved paired probes. The adoption before that restored KeyCorridor-1, KeyCorridor-3, ProceduralMaze-5, POMaze, HighDimMaze, FourRooms, DelayedChain and HalfCheetah exactly as the suite once ran them, added ProceduralMaze-15, two Sokoban rungs and the Ancients, Generals, Hanoi, PocketCube, 2048, Tetris, Minesweeper and ConnectFour families, and aligned every function to the cache line so each environment's speed no longer depends on the code linked around it; it matched bit for bit on all 4,096 shared lanes and measured 1.1586. The adoption before those moved to the 32-seed schedule and added the MicroRTS family and the engine's league and replay-view hooks, matching bit for bit on all 3,120 shared lanes and measuring 1.1544 against the same recording. The promotion before those rewrote every environment for speed without changing a bit of its behaviour, cutting the lane-weighted environment step from 58.8 ns to 10.7 ns, and moved work only the oracle reads out of environment resets; it measured 1.1955 against the best it replaced, on probes of 20,000 steps per lane, where those resets weigh more than in a full recording. From the reference recording (`019b414811583459f6931b87ecf61724d6e31d68`) to that promotion, rewards matched bit for bit on all 4,915 lanes of the earlier schedule across four promotions and two adoptions, and throughput rose 53.4%, the product of five interleaved paired probes (1.2226, 1.0302, 1.0215, 0.9976, 1.1955). No unhealthy lanes.
 

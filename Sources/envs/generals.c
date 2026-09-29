@@ -17,6 +17,10 @@
 #define GENERALS_REPLAN 8u
 #define GENERALS_SCOUT 8u
 #define GENERALS_ORACLE_WATCH 24u
+#define GENERALS_ORACLE_NEAR 4u
+#define GENERALS_ORACLE_LATE 3000u
+#define GENERALS_ORACLE_MUSTER 20
+#define GENERALS_ORACLE_CROWD 4u
 #define GENERALS_REACH 2u
 #define GENERALS_SPAN (2u * GENERALS_REACH + 1u)
 
@@ -84,13 +88,13 @@ typedef struct {
 typedef struct {
     int32_t army[GEN_CELLS];
     uint8_t owner[GEN_CELLS];
-    uint32_t known[GEN_ROWS], held[GEN_ROWS];
+    uint32_t known[GEN_ROWS];
     uint32_t general[GEN_PLAYERS], sighted[GEN_PLAYERS], spotted;
 } generalsBelief;
 
 typedef struct {
     generalsBelief belief;
-    uint32_t game, tick, ready, start, count, jumps;
+    uint32_t game, tick, ready, start, count, jumps, stack, lead, aim;
     uint8_t press[GENERALS_SUBSTEPS];
     uint32_t jump[GENERALS_JUMPS];
     generalsFlood flood, trail;
@@ -1062,7 +1066,6 @@ static void generals_learn(const generalsKnobs *k, const generalsWorld *w, uint3
     }
     for (uint32_t y = 1u; y <= side; y++) {
         b->known[y] |= w->sight[y];
-        b->held[y] |= w->sight[y] & w->occupied[y];
         for (uint32_t row = w->sight[y]; row; row &= row - 1u) {
             uint32_t c = generals_cell(y, row), q = w->owner[c];
             b->owner[c] = (uint8_t)q;
@@ -1104,187 +1107,230 @@ static int32_t generals_guard(const generalsBelief *b, uint32_t side, uint32_t q
     return guard;
 }
 
-static uint32_t generals_route(uint32_t side, generalsOracle *o, const uint32_t *targets, const uint32_t *walk, uint32_t from) {
-    generals_floodStart(&o->flood, o->distance, targets, side);
-    while (o->distance[from] == GEN_FAR && generals_floodLayer(&o->flood, o->distance, walk, side)) {}
-    return generals_descend(o->distance, from, side);
+static uint32_t generals_guess(const generalsKnobs *k, const generalsWorld *w, uint32_t seat, generalsOracle *o, const uint32_t *open, const uint32_t *rough, uint32_t stack, uint32_t *hint) {
+    uint32_t side = k->side, home = w->home[seat], middle = (side / 2u) << 5 | side / 2u, candidate[GEN_ROWS] = {0}, foe[GEN_ROWS] = {0}, walk[GEN_ROWS] = {0}, any = 0u, seen = 0u;
+    const generalsBelief *b = &o->belief;
+    generals_set(foe, stack);
+    generals_floodStart(&o->trail, o->route, foe, side);
+    while (generals_floodLayer(&o->trail, o->route, rough, side)) {}
+    generals_clear(foe, stack);
+    for (uint32_t pass = 0u; pass < 2u && !any; pass++)
+        for (uint32_t y = 1u; y <= side; y++) {
+            for (uint32_t row = open[y] & o->trail.reached[y] & ~(pass ? w->sight[y] | w->own[seat][y] : b->known[y]); row; row &= row - 1u) {
+                uint32_t c = generals_cell(y, row), near = generals_span(c, home) < k->spacing;
+                for (uint32_t q = 0u; q < k->players && !near; q++)
+                    near = q != seat && b->general[q] < GEN_CELLS && generals_span(c, b->general[q]) < k->spacing;
+                if (!near) candidate[y] |= 1u << (c & 31u);
+            }
+            any |= candidate[y];
+        }
+    for (uint32_t y = 1u; y <= side; y++) {
+        for (uint32_t row = b->known[y] & ~w->own[seat][y]; row; row &= row - 1u) {
+            uint32_t c = generals_cell(y, row), q = b->owner[c];
+            if (q != GEN_NOBODY && w->alive >> q & 1u && b->general[q] == GEN_CELLS) foe[y] |= 1u << (c & 31u);
+        }
+        walk[y] = open[y] | candidate[y];
+        seen |= foe[y];
+    }
+    *hint = seen != 0u;
+    if (!any) return GEN_CELLS;
+    if (o->aim < GEN_CELLS && generals_bit(candidate, o->aim)) return o->aim;
+    if (!seen) generals_set(foe, stack);
+    generals_floodStart(&o->flood, o->distance, foe, side);
+    uint32_t best = GEN_CELLS, far = 0xFFFFFFFFu;
+    do {
+        for (uint32_t y = 1u; y <= side; y++)
+            for (uint32_t row = o->flood.front[y] & candidate[y]; row; row &= row - 1u) {
+                uint32_t c = generals_cell(y, row), mid = generals_span(c, middle);
+                uint32_t d = generals_span(c, stack) + (seen ? 0u : k->players > GENERALS_ORACLE_CROWD ? 2u * side - mid : mid);
+                if (d < far) { far = d; best = c; }
+            }
+    } while (best == GEN_CELLS && generals_floodLayer(&o->flood, o->distance, walk, side));
+    o->aim = best;
+    return best;
 }
 
-static uint32_t generals_advice(const generalsKnobs *k, const generalsWorld *w, const uint32_t *words, generalsOracle *o, uint32_t *moves) {
-    uint32_t side = k->side, seat = words[GW_SEAT], home = w->home[seat], tick = words[GW_TICK], cursor = words[GW_CURSOR], n = 0u;
+static uint32_t generals_path(uint32_t side, generalsOracle *o, uint32_t goal, const uint32_t *open, const uint32_t *road, const uint32_t *rough, uint32_t from, uint32_t avoid) {
+    uint32_t targets[GEN_ROWS] = {0}, walk[GEN_ROWS];
+    const uint32_t *passes[3] = { open, road, rough };
+    generals_set(targets, goal);
+    for (uint32_t pass = 0u; pass < 3u; pass++) {
+        memcpy(walk, passes[pass], sizeof walk);
+        generals_set(walk, goal);
+        if (avoid < GEN_CELLS) generals_clear(walk, avoid);
+        generals_floodStart(&o->trail, o->route, targets, side);
+        while (o->route[from] == GEN_FAR && generals_floodLayer(&o->trail, o->route, walk, side)) {}
+        if (o->route[from] != GEN_FAR) break;
+    }
+    return generals_descend(o->route, from, side);
+}
+
+static uint32_t generals_lead(generalsOracle *o, uint32_t code) {
+    o->lead = code;
+    return code;
+}
+
+static uint32_t generals_strike(const generalsKnobs *k, const generalsWorld *w, uint32_t seat, uint32_t tick, generalsOracle *o, const uint32_t *road, uint32_t stack) {
+    uint32_t side = k->side, home = w->home[seat], tops[4] = { home, stack, GEN_CELLS, GEN_CELLS }, pool[GEN_ROWS], blow = 0u;
+    const uint32_t *mine = w->own[seat];
+    const generalsBelief *b = &o->belief;
+    memcpy(pool, mine, sizeof pool);
+    generals_clear(pool, home);
+    if (stack < GEN_CELLS) generals_clear(pool, stack);
+    for (uint32_t i = 2u; i < 4u; i++) {
+        tops[i] = generals_richest(w, pool, side, GEN_CELLS);
+        if (tops[i] == GEN_CELLS) break;
+        generals_clear(pool, tops[i]);
+    }
+    int32_t best = 0;
+    for (uint32_t q = 0u; q < k->players; q++) {
+        uint32_t g = b->general[q], targets[GEN_ROWS] = {0}, walk[GEN_ROWS];
+        if (q == seat || !(w->alive >> q & 1u) || g == GEN_CELLS || !generals_bit(w->sight, g)) continue;
+        int32_t hold = generals_garrison(b, q, tick);
+        generals_set(targets, g);
+        memcpy(walk, road, sizeof walk);
+        generals_set(walk, g);
+        generals_floodStart(&o->trail, o->route, targets, side);
+        while (generals_floodLayer(&o->trail, o->route, walk, side)) {}
+        for (uint32_t i = 0u; i < 4u && tops[i] < GEN_CELLS; i++)
+            for (uint32_t split = 0u; split < 2u; split++) {
+                uint32_t steps = 0u, first = 4u;
+                int32_t carried = generals_carry(b, mine, side, o->route, tops[i], split, &steps, &first);
+                int32_t edge = carried - hold - generals_growthBy(tick, steps);
+                if (carried >= 0 && first < 4u && edge > best) { best = edge; blow = generals_pack(tops[i], first, split); }
+            }
+    }
+    return blow;
+}
+
+static uint32_t generals_advice(const generalsKnobs *k, const generalsWorld *w, const uint32_t *words, generalsOracle *o) {
+    uint32_t side = k->side, seat = words[GW_SEAT], home = w->home[seat], tick = words[GW_TICK];
     const uint32_t *mine = w->own[seat], *sight = w->sight;
     const generalsBelief *b = &o->belief;
-    uint32_t road[GEN_ROWS] = {0}, lanes[GEN_ROWS] = {0};
+    uint32_t road[GEN_ROWS] = {0}, open[GEN_ROWS] = {0}, rough[GEN_ROWS] = {0};
     for (uint32_t y = 1u; y <= side; y++) {
         road[y] = w->passable[y] & ~(w->city[y] & ~b->known[y]);
-        lanes[y] = w->passable[y] & ~(w->city[y] & ~b->held[y]);
+        rough[y] = road[y] | (~b->known[y] & generals_mask(side));
+        open[y] = w->passable[y] & ~(w->city[y] & ~mine[y]);
     }
     for (uint32_t q = 0u; q < k->players; q++) {
         if (q == seat || !(w->alive >> q & 1u) || b->general[q] == GEN_CELLS) continue;
         uint32_t g = b->general[q];
-        int32_t guard = generals_guard(b, side, q), hold = generals_garrison(b, q, tick);
+        int32_t hold = generals_garrison(b, q, tick);
         for (uint32_t d = 0u; d < 4u; d++) {
             uint32_t t = generals_neighbor(g, d, side);
-            if (t < GEN_CELLS && generals_bit(mine, t) && b->army[t] - 1 > hold + guard && n < 4u) moves[n++] = generals_pack(t, d ^ 1u, 0u);
+            if (t < GEN_CELLS && generals_bit(mine, t) && b->army[t] - 1 > hold) return generals_pack(t, d ^ 1u, 0u);
         }
     }
     uint32_t source[GEN_ROWS] = {0};
     generals_set(source, home);
     generals_floodStart(&o->flood, o->distance, source, side);
     for (uint32_t layer = 0u; layer < GENERALS_ORACLE_WATCH && generals_floodLayer(&o->flood, o->distance, road, side); layer++) {}
-    uint32_t threat = GEN_CELLS, reach = GEN_FAR;
+    uint32_t threat = GEN_CELLS;
     int32_t danger = 0;
     for (uint32_t y = 1u; y <= side; y++)
         for (uint32_t row = o->flood.reached[y] & sight[y] & ~mine[y]; row; row &= row - 1u) {
             uint32_t c = generals_cell(y, row), d = o->distance[c], q = b->owner[c];
-            if (q == GEN_NOBODY || (d > 4u && (k->opponent == GENERALS_SETTLER || !(b->spotted >> q & 1u)))) continue;
+            if (q == GEN_NOBODY || (d > GENERALS_ORACLE_NEAR && (k->opponent == GENERALS_SETTLER || !(b->spotted >> q & 1u)))) continue;
             int32_t potential = b->army[c] - (int32_t)d - generals_growthBy(tick, d);
-            if (potential > danger) { danger = potential; threat = c; reach = d; }
+            if (potential > danger) { danger = potential; threat = c; }
         }
-    uint32_t warned = threat != GEN_CELLS;
-    if (danger < w->army[home]) threat = GEN_CELLS;
-    uint32_t tops[3] = { GEN_CELLS, GEN_CELLS, GEN_CELLS }, pool[GEN_ROWS];
-    memcpy(pool, mine, sizeof pool);
-    for (uint32_t i = 0u; i < 3u; i++) {
-        tops[i] = generals_richest(w, pool, side, GEN_CELLS);
-        if (tops[i] == GEN_CELLS) break;
-        generals_clear(pool, tops[i]);
-    }
-    uint32_t strike = 0u, root = GEN_CELLS;
-    int32_t margin = 0, closest = -0x7FFFFFFF;
-    uint32_t marks[2] = { GEN_PLAYERS, GEN_PLAYERS };
-    int32_t cost[2] = { 0, 0 };
-    for (uint32_t q = 0u; q < k->players; q++) {
-        if (q == seat || !(w->alive >> q & 1u) || tops[0] == GEN_CELLS || b->general[q] == GEN_CELLS) continue;
-        int32_t price = generals_garrison(b, q, tick) + generals_guard(b, side, q) + (int32_t)generals_span(tops[0], b->general[q]);
-        if (marks[0] == GEN_PLAYERS || price < cost[0]) { marks[1] = marks[0]; cost[1] = cost[0]; marks[0] = q; cost[0] = price; }
-        else if (marks[1] == GEN_PLAYERS || price < cost[1]) { marks[1] = q; cost[1] = price; }
-    }
-    for (uint32_t t = 0u; t < 2u && marks[t] != GEN_PLAYERS; t++) {
-        uint32_t q = marks[t], g = b->general[q], goal[GEN_ROWS] = {0};
-        int32_t guard = generals_guard(b, side, q), hold = generals_garrison(b, q, tick);
-        generals_set(goal, g);
-        generals_floodStart(&o->trail, o->route, goal, side);
-        while ((o->route[tops[0]] == GEN_FAR || (tops[1] != GEN_CELLS && o->route[tops[1]] == GEN_FAR) || (tops[2] != GEN_CELLS && o->route[tops[2]] == GEN_FAR)) && generals_floodLayer(&o->trail, o->route, lanes, side)) {}
-        for (uint32_t i = 0u; i < 3u && tops[i] != GEN_CELLS; i++)
-            for (uint32_t split = 0u; split < 2u; split++) {
-                uint32_t steps = 0u, first = 4u;
-                int32_t carried = generals_carry(b, mine, side, o->route, tops[i], split, &steps, &first);
-                if (carried < 0 || first > 3u) continue;
-                int32_t edge = carried - hold - generals_growthBy(tick, steps) - guard - 1;
-                int32_t kept = tops[i] == home ? w->army[home] - (split ? w->army[home] / 2 : w->army[home] - 1) : w->army[home];
-                if (warned && steps >= reach && kept <= danger) continue;
-                if (edge > closest) { closest = edge; root = tops[i]; }
-                if (edge > margin) { margin = edge; strike = generals_pack(tops[i], first, split); }
-            }
-    }
-    if (strike) moves[n++] = strike;
-    uint32_t focus = !strike && root != GEN_CELLS && tick >= GENERALS_ROUND && -closest <= w->total[seat] - w->land[seat] - w->army[root];
-    if (threat != GEN_CELLS) {
-        for (uint32_t d = 0u; d < 4u && n < 20u; d++) {
+    uint32_t alarm = danger >= w->army[home], field = generals_richest(w, mine, side, home), stack = field;
+    if (o->stack < GEN_CELLS && o->stack != home && generals_bit(mine, o->stack) && w->army[o->stack] >= 2 && (field == GEN_CELLS || w->army[o->stack] * 2 >= w->army[field])) stack = o->stack;
+    o->stack = stack;
+    if (alarm) {
+        if (stack < GEN_CELLS) {
+            generals_path(side, o, threat, open, road, rough, stack, home);
+            uint32_t steps = 0u, first = 4u;
+            int32_t carried = generals_carry(b, mine, side, o->route, stack, 0u, &steps, &first);
+            if (carried - b->army[threat] - 1 > 0 && first < 4u) return generals_lead(o, generals_pack(stack, first, 0u));
+        }
+        for (uint32_t d = 0u; d < 4u; d++) {
             uint32_t t = generals_neighbor(threat, d, side);
-            if (t < GEN_CELLS && generals_bit(mine, t) && b->army[t] - 1 > b->army[threat]) moves[n++] = generals_pack(t, d ^ 1u, 0u);
+            if (t < GEN_CELLS && generals_bit(mine, t) && b->army[t] - 1 > b->army[threat]) return generals_pack(t, d ^ 1u, t == home && b->army[t] / 2 > b->army[threat]);
         }
         uint32_t helpers[GEN_ROWS];
         memcpy(helpers, mine, sizeof helpers);
         generals_clear(helpers, home);
-        for (uint32_t tries = 0u; tries < 4u && n < 20u; tries++) {
+        for (uint32_t tries = 0u; tries < 4u; tries++) {
             uint32_t best = generals_richest(w, helpers, side, GEN_CELLS);
             if (best == GEN_CELLS) break;
             generals_clear(helpers, best);
             uint32_t dir = generals_descend(o->distance, best, side);
-            if (dir < 4u && o->distance[best] <= reach + 1u) moves[n++] = generals_pack(best, dir, 0u);
+            if (dir < 4u) return generals_pack(best, dir, 0u);
         }
     }
-    uint32_t stack = tops[0] == home && threat != GEN_CELLS ? tops[1] : tops[0];
-    if (stack == GEN_CELLS) return n;
-    if (focus) {
-        generals_clear(source, home);
-        generals_set(source, root);
-        generals_floodStart(&o->flood, o->distance, source, side);
-        while (generals_floodLayer(&o->flood, o->distance, mine, side)) {}
-        int32_t heaviest = 1;
-        uint32_t feed = 0u;
-        for (uint32_t y = 1u; y <= side; y++)
-            for (uint32_t row = mine[y]; row; row &= row - 1u) {
-                uint32_t c = generals_cell(y, row);
-                if (c == root || w->army[c] <= heaviest || o->distance[c] == GEN_FAR || (c == home && warned)) continue;
-                uint32_t dir = generals_descend(o->distance, c, side);
-                if (dir < 4u) { heaviest = w->army[c]; feed = generals_pack(c, dir, 0u); }
-            }
-        if (feed && n < 20u) moves[n++] = feed;
+    uint32_t from = stack < GEN_CELLS ? stack : home, mark = GEN_PLAYERS;
+    int32_t cost = 0;
+    for (uint32_t q = 0u; q < k->players; q++) {
+        if (q == seat || !(w->alive >> q & 1u) || b->general[q] == GEN_CELLS) continue;
+        int32_t price = generals_garrison(b, q, tick) + generals_guard(b, side, q) + (int32_t)generals_span(from, b->general[q]);
+        if (mark == GEN_PLAYERS || price < cost) { mark = q; cost = price; }
     }
-    int32_t might = w->army[stack] - 1;
-    uint32_t prey = GEN_CELLS;
-    int32_t prize = might / 4 > 8 ? might / 4 : 8;
-    for (uint32_t y = 1u; y <= side; y++)
-        for (uint32_t row = sight[y] & ~mine[y]; row; row &= row - 1u) {
-            uint32_t c = generals_cell(y, row), far = generals_span(stack, c);
-            if (b->owner[c] == GEN_NOBODY || far > GENERALS_ORACLE_WATCH / 2u || b->army[c] <= prize || might - (int32_t)far <= b->army[c]) continue;
-            prize = b->army[c];
-            prey = c;
+    uint32_t hint = 1u, goal = mark < GEN_PLAYERS ? b->general[mark] : generals_guess(k, w, seat, o, open, rough, from, &hint);
+    uint32_t blow = generals_strike(k, w, seat, tick, o, road, stack);
+    if (blow) return generals_lead(o, blow);
+    uint32_t late = tick >= GENERALS_ORACLE_LATE, visible = mark < GEN_PLAYERS && generals_bit(sight, goal);
+    int32_t muster = late ? GENERALS_ORACLE_MUSTER : 1, might = stack < GEN_CELLS ? w->army[stack] - 1 : 0;
+    if (stack < GEN_CELLS && goal < GEN_CELLS && !visible && might >= muster) {
+        uint32_t dir = generals_path(side, o, goal, open, road, rough, stack, home);
+        if (dir > 3u) dir = generals_path(side, o, goal, open, road, rough, stack, GEN_CELLS);
+        if (dir < 4u) {
+            uint32_t next = generals_neighbor(stack, dir, side);
+            if (generals_bit(mine, next) || might > b->army[next]) return generals_lead(o, generals_pack(stack, dir, 0u));
         }
-    if (prey != GEN_CELLS && n < 20u) {
-        uint32_t targets[GEN_ROWS] = {0};
-        generals_set(targets, prey);
-        uint32_t dir = generals_route(side, o, targets, road, stack);
-        if (dir < 4u) moves[n++] = generals_pack(stack, dir, 0u);
     }
-    uint32_t picks[6] = {0}, value[6] = {0}, picked = 0u;
+    for (uint32_t q = 0u; q < k->players; q++) {
+        if (q == seat || !(w->alive >> q & 1u) || !generals_sees(w->own[q], home)) continue;
+        for (uint32_t d = 0u; d < 4u; d++) {
+            uint32_t t = generals_neighbor(home, d, side);
+            if (t < GEN_CELLS && b->owner[t] != GEN_NOBODY && b->owner[t] != seat && w->army[home] / 2 > b->army[t]) return generals_pack(home, d, 1u);
+        }
+        break;
+    }
+    uint32_t split = danger > 1;
+    int32_t spare = split ? w->army[home] / 2 : w->army[home] - 1;
+    if (!alarm && goal < GEN_CELLS && !visible && spare >= muster && (!split || w->army[home] - spare > danger) && (stack == GEN_CELLS || w->army[stack] * 4 < w->army[home])) {
+        uint32_t dir = generals_path(side, o, goal, open, road, rough, home, GEN_CELLS);
+        if (dir < 4u) {
+            uint32_t next = generals_neighbor(home, dir, side);
+            if (generals_bit(mine, next) || spare > b->army[next]) return generals_lead(o, generals_pack(home, dir, split));
+        }
+    }
+    uint32_t expand = 0u, value = 0u;
     for (uint32_t y = 1u; y <= side; y++)
         for (uint32_t row = mine[y]; row; row &= row - 1u) {
             uint32_t c = generals_cell(y, row);
-            uint32_t half = c == home && warned;
-            int32_t moved = half ? w->army[c] / 2 : w->army[c] - 1;
-            if (moved < 1 || (half && w->army[c] - moved <= danger)) continue;
+            if (c == stack || w->army[c] < 2 || (c == home && (alarm || split))) continue;
             for (uint32_t d = 0u; d < 4u; d++) {
                 uint32_t t = generals_neighbor(c, d, side);
-                if (t >= GEN_CELLS || w->kind[t] == GEN_PEAK || generals_bit(mine, t) || moved <= b->army[t]) continue;
-                uint32_t gain = w->kind[t] == GEN_CITY ? 3u : b->owner[t] == GEN_NOBODY ? 2u : 1u, far = generals_span(cursor, c);
-                if (c == stack && gain < 3u) continue;
-                uint32_t score = gain << 24 | (255u - (far < 255u ? far : 255u)) << 12 | (uint32_t)(moved < 4095 ? moved : 4095);
-                uint32_t slot = picked < 6u ? picked++ : 5u;
-                if (slot == 5u && picked == 6u && score <= value[5]) continue;
-                while (slot > 0u && value[slot - 1u] < score) {
-                    picks[slot] = picks[slot - 1u];
-                    value[slot] = value[slot - 1u];
-                    slot--;
-                }
-                picks[slot] = generals_pack(c, d, half);
-                value[slot] = score;
+                if (t >= GEN_CELLS || !generals_bit(open, t) || generals_bit(mine, t) || b->owner[t] != GEN_NOBODY || w->army[c] - 1 <= b->army[t]) continue;
+                uint32_t score = (w->army[c] == 2 ? 1u << 20 : 0u) | (generals_span(t, home) << 8) | (255u - (uint32_t)(w->army[c] < 255 ? w->army[c] : 255));
+                if (score > value) { value = score; expand = generals_pack(c, d, 0u); }
             }
         }
-    for (uint32_t i = 0u; i < picked && n < 24u; i++) moves[n++] = picks[i];
-    uint32_t gather = 0u, hub = focus ? root : stack;
+    if (expand && late && value >> 20) return expand;
+    uint32_t hub = alarm || stack == GEN_CELLS ? home : stack, gather = 0u;
     int32_t most = 1;
     generals_clear(source, home);
     generals_set(source, hub);
     generals_floodStart(&o->flood, o->distance, source, side);
     while (generals_floodLayer(&o->flood, o->distance, mine, side)) {}
+    generals_clear(source, hub);
+    generals_set(source, home);
+    generals_floodStart(&o->trail, o->route, source, side);
+    while (generals_floodLayer(&o->trail, o->route, mine, side)) {}
     for (uint32_t y = 1u; y <= side; y++)
         for (uint32_t row = mine[y]; row; row &= row - 1u) {
             uint32_t c = generals_cell(y, row);
-            if (c == hub || w->army[c] <= most || o->distance[c] == GEN_FAR || (c == home && warned)) continue;
-            uint32_t dir = generals_descend(o->distance, c, side);
+            if (c == hub || c == home || w->army[c] <= most) continue;
+            uint32_t dir = generals_descend(o->distance[c] == GEN_FAR ? o->route : o->distance, c, side);
             if (dir < 4u) { most = w->army[c]; gather = generals_pack(c, dir, 0u); }
         }
-    uint32_t targets[GEN_ROWS] = {0}, walk[GEN_ROWS] = {0};
-    for (uint32_t y = 1u; y <= side; y++) {
-        uint32_t rim = (mine[y - 1u] | mine[y + 1u] | mine[y] << 1 | mine[y] >> 1) & road[y] & ~mine[y];
-        for (uint32_t row = rim; row; row &= row - 1u) {
-            uint32_t c = generals_cell(y, row);
-            if (b->army[c] < might) targets[y] |= 1u << (c & 31u);
-        }
-        walk[y] = mine[y] | targets[y];
-    }
-    uint32_t dir = generals_route(side, o, targets, walk, stack);
-    if (gather && most * 4 > might && n < 24u) moves[n++] = gather;
-    if (dir < 4u && n < 24u) moves[n++] = generals_pack(stack, dir, 0u);
-    if (gather && n < 24u) moves[n++] = gather;
-    return n;
+    return gather ? gather : expand;
 }
 
-static uint32_t generals_steer(const generalsOracle *o, uint32_t cursor, uint32_t mode, uint32_t code, uint8_t *press, uint32_t budget) {
+static uint32_t generals_steer(const generalsOracle *o, uint32_t cursor, uint32_t mode, uint32_t code, uint8_t *press, uint32_t *walked) {
     uint32_t n = 0u, source = code & (GEN_CELLS - 1u), dir = code >> 10 & 3u, target = code & GEN_SPLIT_BIT ? GEN_HALF : GEN_ALL;
     if (cursor != source) {
         for (; mode != GEN_LOOK; mode = (mode + 1u) % 3u) press[n++] = 4u;
@@ -1296,7 +1342,6 @@ static uint32_t generals_steer(const generalsOracle *o, uint32_t cursor, uint32_
             uint32_t cost = at < o->jumps ? (i + o->jumps - at) % o->jumps : i + 1u, total = cost + generals_span(o->jump[i], source);
             if (total < best) { best = total; via = i; hops = cost; }
         }
-        if (n + best + 3u > budget) return budget + 1u;
         for (uint32_t c = 0u; c < hops; c++) press[n++] = 5u;
         if (via < GENERALS_JUMPS) cursor = o->jump[via];
         int dx = (int)(source & 31u) - (int)(cursor & 31u), dy = (int)(source >> 5) - (int)(cursor >> 5);
@@ -1305,24 +1350,24 @@ static uint32_t generals_steer(const generalsOracle *o, uint32_t cursor, uint32_
         for (; dy > 0; dy--) press[n++] = 1u;
         for (; dy < 0; dy++) press[n++] = 0u;
     }
+    *walked = n;
     for (; mode != target; mode = (mode + 1u) % 3u) press[n++] = 4u;
     press[n++] = (uint8_t)dir;
     return n;
 }
 
 static void generals_plan(const generalsKnobs *k, const generalsWorld *w, const uint32_t *words, generalsOracle *o) {
-    uint32_t moves[24], budget = GENERALS_SUBSTEPS - words[GW_PHASE];
-    uint8_t press[GEN_ROWS * 2];
+    uint32_t budget = GENERALS_SUBSTEPS - words[GW_PHASE], walked = 0u;
+    uint8_t press[GEN_ROWS * 4];
     o->jumps = generals_rank(k, w, words[GW_SEAT], o->jump);
-    uint32_t count = generals_advice(k, w, words, o, moves);
+    o->lead = 0u;
     o->count = 0u;
-    for (uint32_t i = 0u; i < count; i++) {
-        uint32_t n = generals_steer(o, words[GW_CURSOR], words[GW_MODE], moves[i], press, budget);
-        if (n > budget) continue;
-        memcpy(o->press, press, n);
-        o->count = n;
-        return;
-    }
+    uint32_t code = generals_advice(k, w, words, o);
+    if (!code) return;
+    uint32_t n = generals_steer(o, words[GW_CURSOR], words[GW_MODE], code, press, &walked);
+    o->count = n <= budget ? n : walked < budget ? walked : budget;
+    memcpy(o->press, press, o->count);
+    if (n <= budget && code == o->lead) o->stack = generals_neighbor(code & (GEN_CELLS - 1u), code >> 10 & 3u, k->side);
 }
 
 void generals_oracle(uint32_t instance, uint32_t seed, uint32_t step, const uint32_t *words, uint32_t *extra, const float *obs, float *ctrl, const float *shared) {
@@ -1330,7 +1375,11 @@ void generals_oracle(uint32_t instance, uint32_t seed, uint32_t step, const uint
     const generalsKnobs *k = &GENERALS_KNOBS[instance];
     generalsWorld *w = generals_world(extra);
     generalsOracle *o = &w->oracle;
-    if (!o->ready || o->game != words[GW_GAME]) generals_forget(&o->belief);
+    if (!o->ready || o->game != words[GW_GAME]) {
+        generals_forget(&o->belief);
+        o->stack = GEN_CELLS;
+        o->aim = GEN_CELLS;
+    }
     if (!o->ready || o->game != words[GW_GAME] || o->tick != words[GW_TICK]) {
         generals_learn(k, w, words[GW_SEAT], words[GW_TICK], &o->belief);
         generals_plan(k, w, words, o);

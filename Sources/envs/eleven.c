@@ -55,7 +55,7 @@ typedef struct {
 
 typedef struct { _Alignas(16) float winRate[LEAGUE_MEMBERS]; float theta[LEAGUE_MEMBERS * ELE_THETA]; } eleLeague;
 
-typedef struct { eleWorld world; uint32_t pending, game; } eleOracle;
+typedef struct { eleWorld world, seen; float ctrl[OAK_ENV_ACT_MAX]; uint32_t game, holder, owner, until; } eleOracle;
 
 typedef struct { const elevenKnobs *k; eleWorld *w; const float *theta[2]; uint32_t seed, n, groups, shape, cycle, bank; float sigma; } eleCtx;
 
@@ -1135,23 +1135,6 @@ void eleven_observe(uint32_t instance, uint32_t seed, const uint32_t *words, con
     ele_observe(&c, obs);
 }
 
-static uint32_t ele_rollout(const eleCtx *real, eleWorld *scratch, const float *first, uint32_t horizon) {
-    float idle[OAK_ENV_ACT_MAX] = { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
-    uint32_t edge = real->k->ticks * real->k->slices, half = edge / 2u;
-    memcpy(scratch, real->w, sizeof *scratch);
-    eleCtx c = *real;
-    c.w = scratch;
-    ele_noise(&c, scratch->clock / c.k->slices);
-    for (uint32_t n = 0u; n < horizon; n++) {
-        if (scratch->clock + 1u >= edge || (!real->k->drill && scratch->clock + 1u == half)) return ELE_QUIET;
-        uint32_t event = ele_advance(&c, n ? idle : first);
-        if (event != ELE_QUIET) return event;
-        if (!scratch->live) return ELE_DEAD;
-        if (scratch->owner != ELE_NONE) return ele_teamOf(scratch->owner) ? ELE_LOST : ELE_KEPT;
-    }
-    return ELE_QUIET;
-}
-
 static void ele_go(float *ctrl, float dx, float dy, float sprint) {
     float d = sqrtf(dx * dx + dy * dy);
     ctrl[0] = d > 1e-4f ? dx / d : 0.0f;
@@ -1198,58 +1181,147 @@ static void ele_defend(const eleCtx *c, uint32_t a, float *ctrl) {
     if (ele_draw(c, TAG_TACKLE, a).x < u01Bound(0.35f + 0.4f * ele_front(w, o, a))) ctrl[5] = 0.7f;
 }
 
-static float ele_danger(const eleWorld *w, const eleCtx *c, float x, float y, float horizon) {
-    float4 low = splat4(INFINITY);
-    for (uint32_t g = 0u; g < ele_groups(c); g++) {
-        uint32_t base = ELE_TEAM + 4u * g;
-        float4 dx = ele_load(w->x + base) + ele_load(w->vx + base) * horizon - x, dy = ele_load(w->y + base) + ele_load(w->vy + base) * horizon - y;
-        low = __builtin_elementwise_min(low, dx * dx + dy * dy);
+typedef struct { float reach, scale, time; uint32_t horizon, react; } eleJudge;
+
+static const eleJudge ELEVEN_JUDGE[5] = {
+    { 1.0f, 90.0f, 0.003f, 30u, 0u },
+    { 1.3f, 40.0f, 0.0002f, 18u, 0u },
+    { 1.3f, 40.0f, 0.0002f, 18u, 0u },
+    { 1.0f, 25.0f, 0.0002f, 60u, 1u },
+    { 1.0f, 25.0f, 0.0002f, 60u, 1u }
+};
+
+static const float ELE_LOSS = 0.05f, ELE_SPOT = 0.7f;
+enum { ELE_OPTIONS = 40, ELE_FINALISTS = 3, ELE_FIRST = 2, ELE_EXTRA = 6 };
+
+typedef struct { float act[ELE_OPTIONS][OAK_ENV_ACT_MAX], sum[ELE_OPTIONS]; uint32_t hold[ELE_OPTIONS], horizon[ELE_OPTIONS], count; } eleOptions;
+
+static void ele_see(const eleWorld *w, eleWorld *seen) {
+    memcpy(seen, w, sizeof *seen);
+    memset(seen->noise, 0, sizeof seen->noise);
+    for (uint32_t q = 0u; q < ELE_SLOTS; q++) {
+        uint32_t team = ele_teamOf(q);
+        seen->acc[q] = q % ELE_TEAM == 0u && w->clock < w->dive[team] ? ELE_DIVE_ACCEL : ELE_ACCEL;
+        if (q == w->active) continue;
+        float speed = sqrtf(w->vx[q] * w->vx[q] + w->vy[q] * w->vy[q]);
+        if (q == w->owner && !w->held) {
+            seen->fx[q] = (w->bx - w->x[q]) / ELE_FOOT;
+            seen->fy[q] = (w->by - w->y[q]) / ELE_FOOT;
+        } else if (speed > 0.1f) {
+            seen->fx[q] = w->vx[q] / speed;
+            seen->fy[q] = w->vy[q] / speed;
+        } else {
+            seen->fx[q] = ele_sign(team);
+            seen->fy[q] = 0.0f;
+        }
+        seen->wx[q] = w->vx[q];
+        seen->wy[q] = w->vy[q];
+        seen->busy[q] = w->clock < w->busy[q] ? w->clock + ELE_DOWN / 2u : 0u;
+        seen->touch[q] = seen->tackle[q] = 0u;
     }
-    return sqrtf(__builtin_reduce_min(low));
+    for (uint32_t t = 0u; t < 2u; t++) seen->dive[t] = w->clock < w->dive[t] ? w->clock + ELE_DIVE / 2u : 0u;
+    if (w->held) seen->heldAt = w->clock > ELE_HOLD / 2u ? w->clock - ELE_HOLD / 2u : 0u;
+    seen->member = 0u;
 }
 
-static void ele_dribble(const eleCtx *c, uint32_t a, float *ctrl, float *space) {
+static float ele_chance(const eleJudge *j, float x, float y, float goal) {
+    return j->reach * oak_exp(-ele_dist(x, y, goal, 0.0f) / j->scale);
+}
+
+static float ele_worth(const eleCtx *c, const eleJudge *j, uint32_t event) {
+    const eleWorld *s = c->w;
+    float length = ELEVEN_PITCH[PITCH_LENGTH];
+    if (event == ELE_GOAL_FOR) return 1.0f;
+    if (event == ELE_GOAL_AGAINST) return -1.0f;
+    if (c->k->drill) return s->owner == ELE_TEAM || event == ELE_OUT ? 0.0f : ele_chance(j, s->bx, s->by, length);
+    uint32_t ours;
+    if (s->mode != ELE_NORMAL) {
+        if (s->mode == ELE_PENALTY) return s->team ? -ELE_SPOT : ELE_SPOT;
+        ours = s->team == 0u;
+    } else if (s->owner != ELE_NONE) ours = s->owner < ELE_TEAM;
+    else {
+        float us, them;
+        ele_nearest(c, 0u, s->bx, s->by, 0, &us);
+        ele_nearest(c, 1u, s->bx, s->by, 0, &them);
+        ours = us <= them;
+    }
+    return ours ? ele_chance(j, s->bx, s->by, length) : -ELE_LOSS - ele_chance(j, s->bx, s->by, -length);
+}
+
+static float ele_probe(const eleCtx *view, const eleJudge *j, eleWorld *scratch, const float *act, uint32_t hold, uint32_t horizon, uint32_t sample) {
+    static const float idle[OAK_ENV_ACT_MAX] = { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
+    memcpy(scratch, view->w, sizeof *scratch);
+    eleCtx c = *view;
+    c.w = scratch;
+    c.bank = TAG_ORACLE + 8u * (sample + 1u);
+    c.theta[1] = ELEVEN_THETA;
+    ele_noise(&c, scratch->clock / c.k->slices);
+    uint32_t edge = c.k->ticks * c.k->slices, half = edge / 2u, start = scratch->owner, n = 0u;
+    for (; n < horizon; n++) {
+        if (scratch->clock + 1u >= edge || (!c.k->drill && scratch->clock + 1u == half)) break;
+        uint32_t event = ele_advance(&c, n < hold ? act : idle);
+        if (event != ELE_QUIET || scratch->mode != ELE_NORMAL || (scratch->owner != ELE_NONE && scratch->owner != start)) return ele_worth(&c, j, event) - j->time * (float)n;
+    }
+    return ele_worth(&c, j, ELE_QUIET) - j->time * (float)n;
+}
+
+static void ele_offer(eleOptions *m, float x, float y, float sprint, float kick, float shoot, float tackle, uint32_t hold, uint32_t horizon) {
+    uint32_t i = m->count++;
+    float act[OAK_ENV_ACT_MAX] = { x, y, sprint, kick, shoot, tackle };
+    memcpy(m->act[i], act, sizeof act);
+    m->hold[i] = hold;
+    m->horizon[i] = horizon;
+    m->sum[i] = 0.0f;
+}
+
+static void ele_runs(eleOptions *m, const eleJudge *j, float tackle) {
+    for (uint32_t i = 0u; i < 12u; i++) {
+        float sn, cs;
+        oak_sincos((float)i * (OAK_PI / 6.0f), &sn, &cs);
+        ele_offer(m, cs, sn, 1.0f, 0.0f, 0.0f, tackle, j->horizon, j->horizon);
+    }
+}
+
+static void ele_attack(const eleCtx *c, const eleJudge *j, uint32_t a, eleOptions *m) {
+    static const float aims[5] = { 1.0f, -1.0f, 0.55f, -0.55f, 0.0f };
     const eleWorld *w = c->w;
-    float gx = ELEVEN_PITCH[PITCH_LENGTH] - w->x[a], gy = -w->y[a], gd = sqrtf(gx * gx + gy * gy) + 1e-3f;
-    float speed = ELE_SPRINT * ELE_DRIBBLE * (0.7f + 0.3f * w->stamina[a]), best = -INFINITY, bx = gx / gd, by = gy / gd;
-    *space = 0.0f;
-    for (uint32_t k = 0u; k < 16u; k++) {
-        float s, co;
-        oak_sincos((float)k * (OAK_PI / 8.0f), &s, &co);
-        float px = w->x[a] + co * speed * 0.5f, py = w->y[a] + s * speed * 0.5f;
-        if (fabsf(py) > ELEVEN_PITCH[PITCH_WIDTH] - 1.0f || px > ELEVEN_PITCH[PITCH_LENGTH] || px < 1.0f - ELEVEN_PITCH[PITCH_LENGTH]) continue;
-        float room = ele_danger(w, c, px, py, 0.5f), toward = (co * gx + s * gy) / gd;
-        float score = toward + 0.5f * fminf(room, 6.0f) - (room < 2.8f ? 10.0f : 0.0f);
-        if (score > best) { best = score; bx = co; by = s; *space = room; }
-    }
-    ele_go(ctrl, bx, by, w->stamina[a] > 0.2f ? 1.0f : -1.0f);
+    if (w->mode != ELE_THROWIN && (w->held || ele_dist(w->bx, w->by, ELEVEN_PITCH[PITCH_LENGTH], 0.0f) < 36.0f))
+        for (uint32_t i = 0u; i < 5u; i++) ele_offer(m, 0.0f, aims[i], 0.0f, 0.0f, 1.0f, 0.0f, 1u, 150u);
+    if (w->mode == ELE_NORMAL) ele_runs(m, j, 0.0f);
+    if (w->mode != ELE_PENALTY)
+        for (uint32_t q = 0u; q < ele_n(c) && m->count + 2u <= ELE_OPTIONS; q++) {
+            if (q == a || ele_keeper(c, q)) continue;
+            float dx = w->x[q] - w->x[a], dy = w->y[q] - w->y[a], d = sqrtf(dx * dx + dy * dy), tx, ty;
+            if (d < 4.0f || d > 45.0f || ele_aim(c, a, dx / d, dy / d, &tx, &ty) != q) continue;
+            ele_offer(m, dx / d, dy / d, 0.0f, 0.5f, 0.0f, 0.0f, 1u, 120u);
+            ele_offer(m, dx / d, dy / d, 0.0f, 0.9f, 0.0f, 0.0f, 1u, 120u);
+        }
+    if (!m->count) ele_offer(m, 1.0f, 0.0f, 0.0f, 0.9f, 0.0f, 0.0f, 1u, 120u);
 }
 
-static int ele_passTo(const eleCtx *c, uint32_t a, float *ctrl, float floor) {
-    const eleWorld *w = c->w;
-    float best = floor, px = 0.0f, py = 0.0f;
-    int found = 0;
-    for (uint32_t q = 0u; q < ele_n(c); q++) {
-        if (q == a || ele_keeper(c, q)) continue;
-        float dx = w->x[q] - w->x[a], dy = w->y[q] - w->y[a], d = sqrtf(dx * dx + dy * dy);
-        if (d < 5.0f || d > 38.0f) continue;
-        float tx, ty;
-        if (ele_aim(c, a, dx / d, dy / d, &tx, &ty) != q) continue;
-        float lx = tx - w->bx, ly = ty - w->by, length = sqrtf(lx * lx + ly * ly), margin, landing;
-        ele_lanes(c, 1u, w->bx, w->by, lx, ly, length, 0.5f * (8.0f + ELE_ROLL_RATE * length), &margin, &landing);
-        float value = fminf(margin, 4.0f) + 0.15f * (tx - w->x[a]) + 0.3f * fminf(ele_danger(w, c, tx, ty, 0.0f), 8.0f);
-        if (margin > 1.0f && value > best) { best = value; px = dx / d; py = dy / d; found = 1; }
+static void ele_choose(const eleCtx *view, const eleJudge *j, eleWorld *scratch, eleOptions *m, float *ctrl) {
+    for (uint32_t i = 0u; i < m->count; i++)
+        for (uint32_t k = 0u; k < ELE_FIRST; k++) m->sum[i] += ele_probe(view, j, scratch, m->act[i], m->hold[i], m->horizon[i], k);
+    uint32_t pick[ELE_FINALISTS], picked = 0u;
+    for (; picked < ELE_FINALISTS && picked < m->count; picked++) {
+        uint32_t top = ELE_OPTIONS;
+        for (uint32_t i = 0u; i < m->count; i++) {
+            uint32_t taken = 0u;
+            for (uint32_t f = 0u; f < picked; f++) taken |= pick[f] == i;
+            if (!taken && (top == ELE_OPTIONS || m->sum[i] > m->sum[top])) top = i;
+        }
+        pick[picked] = top;
     }
-    if (!found) return 0;
-    ctrl[0] = px;
-    ctrl[1] = py;
-    ctrl[2] = 0.0f;
-    ctrl[3] = 0.5f;
-    return 1;
+    uint32_t best = pick[0];
+    for (uint32_t f = 0u; f < picked; f++) {
+        uint32_t i = pick[f];
+        for (uint32_t k = ELE_FIRST; k < ELE_FIRST + ELE_EXTRA; k++) m->sum[i] += ele_probe(view, j, scratch, m->act[i], m->hold[i], m->horizon[i], k);
+        if (m->sum[i] > m->sum[best]) best = i;
+    }
+    memcpy(ctrl, m->act[best], OAK_ENV_ACT_MAX * sizeof *ctrl);
 }
 
-static inline __attribute__((always_inline)) void ele_think(const elevenKnobs *k, uint32_t seed, uint32_t *extra, float *ctrl) {
-    static const float aims[4] = { 1.0f, -1.0f, 0.55f, -0.55f };
+static inline __attribute__((always_inline)) void ele_think(const elevenKnobs *k, const eleJudge *j, uint32_t seed, uint32_t *extra, float *ctrl) {
     eleWorld *w = ele_world(extra);
     eleOracle *o = ele_oracleOf(extra);
     eleCtx c;
@@ -1258,49 +1330,40 @@ static inline __attribute__((always_inline)) void ele_think(const elevenKnobs *k
     uint32_t a = w->active;
     for (uint32_t d = 0u; d < OAK_ENV_ACT_MAX; d++) ctrl[d] = 0.0f;
     if (w->clock < w->busy[a]) return;
-    if (o->pending && o->game == w->game && w->live && w->owner == ELE_NONE && w->mode == ELE_NORMAL) return;
-    o->pending = 0u;
-    if (w->mode != ELE_NORMAL) {
-        if (w->taker != a) { ele_go(ctrl, w->bx - w->x[a], w->by - w->y[a], 0.0f); return; }
-        if (w->clock < w->readyAt) return;
-        if (w->mode == ELE_PENALTY || w->mode == ELE_FREEKICK) {
-            for (uint32_t i = 0u; i < 4u; i++) {
-                float shot[OAK_ENV_ACT_MAX] = { 0.0f, aims[i], 0.0f, 0.0f, 1.0f, 0.0f };
-                if (ele_rollout(&c, &o->world, shot, 150u) == ELE_GOAL_FOR) { memcpy(ctrl, shot, sizeof shot); o->pending = 1u; o->game = w->game; return; }
-            }
-            if (w->mode == ELE_PENALTY) { ctrl[1] = 1.0f; ctrl[4] = 1.0f; return; }
-        }
-        if (!ele_passTo(&c, a, ctrl, -INFINITY)) { ctrl[0] = 1.0f; ctrl[3] = 0.9f; }
-        return;
+    if (w->mode != ELE_NORMAL && w->taker != a) { ele_go(ctrl, w->bx - w->x[a], w->by - w->y[a], 0.0f); return; }
+    if (w->mode != ELE_NORMAL && w->clock < w->readyAt) return;
+    if (o->game == w->game && o->holder == a && o->owner == w->owner && w->clock < o->until) { memcpy(ctrl, o->ctrl, sizeof o->ctrl); return; }
+    ele_see(w, &o->seen);
+    eleCtx view = c;
+    view.w = &o->seen;
+    uint32_t rival = w->owner != ELE_NONE && ele_teamOf(w->owner) == 1u;
+    eleOptions m;
+    m.count = 0u;
+    if (w->owner == a) ele_attack(&view, j, a, &m);
+    else {
+        float guess[OAK_ENV_ACT_MAX] = { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
+        if (rival) ele_defend(&view, a, guess);
+        else ele_chase(&view, a, guess);
+        if (!j->react) { memcpy(ctrl, guess, sizeof guess); return; }
+        ele_offer(&m, guess[0], guess[1], guess[2], 0.0f, 0.0f, guess[5], j->horizon, j->horizon);
+        ele_runs(&m, j, rival ? 0.7f : 0.0f);
     }
-    if (w->owner == a) {
-        float gx = ELEVEN_PITCH[PITCH_LENGTH] - w->x[a], gy = w->y[a];
-        if (!w->held && gx * gx + gy * gy < 32.0f * 32.0f && w->clock % k->slices == 0u)
-            for (uint32_t i = 0u; i < 4u; i++) {
-                float shot[OAK_ENV_ACT_MAX] = { 0.0f, aims[i], 0.0f, 0.0f, 1.0f, 0.0f };
-                if (ele_rollout(&c, &o->world, shot, 150u) == ELE_GOAL_FOR) { memcpy(ctrl, shot, sizeof shot); o->pending = 1u; o->game = w->game; return; }
-            }
-        if (w->held) {
-            if (!ele_passTo(&c, a, ctrl, -INFINITY)) { ctrl[0] = 1.0f; ctrl[4] = 1.0f; }
-            return;
-        }
-        float space;
-        ele_dribble(&c, a, ctrl, &space);
-        if (space < 2.8f || ele_danger(w, &c, w->x[a], w->y[a], 0.0f) < 2.0f) ele_passTo(&c, a, ctrl, -INFINITY);
-        return;
-    }
-    if (w->owner != ELE_NONE && ele_teamOf(w->owner) == 1u) { ele_defend(&c, a, ctrl); return; }
-    ele_chase(&c, a, ctrl);
+    ele_choose(&view, j, &o->world, &m, ctrl);
+    memcpy(o->ctrl, ctrl, sizeof o->ctrl);
+    o->game = w->game;
+    o->holder = a;
+    o->owner = w->owner;
+    o->until = w->clock + k->slices;
 }
 
 void eleven_oracle(uint32_t instance, uint32_t seed, uint32_t step, const uint32_t *words, uint32_t *extra, const float *obs, float *ctrl, const float *shared) {
     (void)step; (void)words; (void)obs; (void)shared;
     switch (instance) {
-        case 0u: ele_think(&ELEVEN_KNOBS[0], seed, extra, ctrl); return;
-        case 1u: ele_think(&ELEVEN_KNOBS[1], seed, extra, ctrl); return;
-        case 2u: ele_think(&ELEVEN_KNOBS[2], seed, extra, ctrl); return;
-        case 3u: ele_think(&ELEVEN_KNOBS[3], seed, extra, ctrl); return;
-        default: ele_think(&ELEVEN_KNOBS[4], seed, extra, ctrl); return;
+        case 0u: ele_think(&ELEVEN_KNOBS[0], &ELEVEN_JUDGE[0], seed, extra, ctrl); return;
+        case 1u: ele_think(&ELEVEN_KNOBS[1], &ELEVEN_JUDGE[1], seed, extra, ctrl); return;
+        case 2u: ele_think(&ELEVEN_KNOBS[2], &ELEVEN_JUDGE[2], seed, extra, ctrl); return;
+        case 3u: ele_think(&ELEVEN_KNOBS[3], &ELEVEN_JUDGE[3], seed, extra, ctrl); return;
+        default: ele_think(&ELEVEN_KNOBS[4], &ELEVEN_JUDGE[4], seed, extra, ctrl); return;
     }
 }
 

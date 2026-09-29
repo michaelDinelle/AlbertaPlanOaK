@@ -33,7 +33,7 @@ enum { POM_SEATS = 4, POM_BOMBS = 32, POM_THETA = 8, POM_NONE = 255, POM_PAIRS =
 enum { PW_TICK, PW_GAME, PW_SEAT, PW_ALIVE, PW_RESULT, PW_CELL, PW_AMMO = PW_CELL + POM_SEATS, PW_BLAST = PW_AMMO + POM_SEATS, PW_KICK = PW_BLAST + POM_SEATS, PW_ACT = PW_KICK + POM_SEATS, PW_WORDS = PW_ACT + POM_SEATS };
 enum { POM_WON = 1u, POM_LOST, POM_TIED };
 enum { POM_SPAN = 2u * POMMERMAN_SIGHT + 1u, POM_GRID = POM_SPAN * POM_SPAN, POM_OTHERS = POM_GRID + 4 };
-enum { POM_DRAW_BOTS, POM_DRAW_BOARD, POM_DRAW_ITEMS, POM_DRAW_SEAT };
+enum { POM_DRAW_BOTS, POM_DRAW_BOARD, POM_DRAW_ITEMS, POM_DRAW_SEAT, POM_DRAW_ORACLE };
 
 typedef unsigned __int128 pomBits;
 
@@ -49,7 +49,7 @@ typedef struct {
     pomStyle style[LEAGUE_MEMBERS];
 } pomLeague;
 
-typedef struct { pomBits flame[POMMERMAN_HORIZON + 1u], open[POMMERMAN_HORIZON + 1u], safe[POMMERMAN_HORIZON + 1u], roam; } pomForecast;
+typedef struct { pomBits flame[POMMERMAN_HORIZON + 1u], open[POMMERMAN_HORIZON + 1u], safe[POMMERMAN_HORIZON + 1u]; } pomForecast;
 
 typedef struct {
     pomBits rigid, wood, bomb, flame[POMMERMAN_FLAME_LIFE], item[POM_KINDS], hidden[POM_KINDS];
@@ -66,6 +66,8 @@ typedef struct {
     uint8_t pair[POM_PAIRS];
     pomLeague league;
     pomForecast plain, probe;
+    pomBits shown[POM_KINDS];
+    uint8_t stock[POM_SEATS], blast[POM_SEATS], kick[POM_SEATS], last[POM_SEATS], trail[128], was, did;
 } pomWorld;
 
 static pomWorld *pom_world(uint32_t *extra) { return (pomWorld *)(((uintptr_t)extra + 15u) & ~(uintptr_t)15u); }
@@ -929,11 +931,19 @@ typedef struct { uint32_t cell, blast; } pomArm;
 
 static void pom_forecast(const pommermanKnobs *k, const pomGeo *g, const pomBoard *w, uint32_t tick, pomForecast *f, const pomArm *arm, uint32_t arms, pomBits bodies) {
     uint32_t n = w->bombCount, cell[POM_BOMBS + 2u], when[POM_BOMBS + 2u];
-    pomBits cross[POM_BOMBS + 2u];
+    pomBits cross[POM_BOMBS + 2u], lit = w->flame[1] | w->flame[2], moved = 0;
+    pomBits stuck = w->rigid | w->wood | w->bomb | w->item[POM_EXTRA] | w->item[POM_RANGE] | w->item[POM_KICK] | bodies;
     for (uint32_t i = 0u; i < n; i++) {
         cell[i] = w->bombs[i].cell;
-        when[i] = w->bombs[i].life;
+        when[i] = (lit & pom_bit(cell[i])) ? 1u : w->bombs[i].life;
         cross[i] = w->reach[i];
+        for (uint32_t t = 1u; w->bombs[i].dir && t <= when[i]; t++) {
+            uint32_t next = pom_step(g->side, cell[i], w->bombs[i].dir);
+            if (next == POM_NONE || (stuck & pom_bit(next))) break;
+            moved |= pom_bit(cell[i]);
+            cell[i] = next;
+            cross[i] = pom_cross(g, next, w->bombs[i].blast - 1u, w->rigid, w->wood);
+        }
     }
     for (uint32_t a = 0u; a < arms; a++, n++) {
         cell[n] = arm[a].cell;
@@ -960,6 +970,7 @@ static void pom_forecast(const pommermanKnobs *k, const pomGeo *g, const pomBoar
         for (uint32_t t = when[i]; t < when[i] + POMMERMAN_FLAME_LIFE; t++) f->flame[t] |= cross[i];
         for (uint32_t t = 0u; t < when[i]; t++) f->open[t] &= ~pom_bit(cell[i]);
     }
+    for (uint32_t t = 1u; moved && t <= POMMERMAN_HORIZON; t++) f->flame[t] |= moved;
     for (uint32_t t = 1u; k->collapseRings && t <= POMMERMAN_HORIZON; t++) {
         uint32_t at = tick + t;
         if (!pom_collapsing(k, at)) continue;
@@ -970,14 +981,20 @@ static void pom_forecast(const pommermanKnobs *k, const pomGeo *g, const pomBoar
     f->safe[POMMERMAN_HORIZON] = f->open[POMMERMAN_HORIZON] & ~f->flame[POMMERMAN_HORIZON];
     for (uint32_t t = POMMERMAN_HORIZON - 1u; t > 2u; t--) f->safe[t] = f->open[t] & ~f->flame[t] & pom_spread(g, f->safe[t + 1u]);
     pomBits loose = f->open[2] & ~f->flame[2] & pom_spread(g, f->safe[3]);
-    f->roam = f->open[1] & ~f->flame[1] & pom_spread(g, loose);
     f->safe[2] = loose;
     f->safe[1] = f->open[1] & ~pom_spread(g, bodies) & ~f->flame[1] & pom_spread(g, f->safe[2]);
 }
 
-static uint32_t pom_lives(const pomGeo *g, const pomForecast *f, uint32_t cell) {
-    pomBits at = pom_bit(cell);
-    return (!(f->flame[1] & at) && (pom_spread(g, f->safe[2]) & at)) || (pom_spread(g, at) & ~at & f->safe[1]) != 0;
+enum { POM_ROOM = 10u, POM_PRESS = 100000, POM_EASE = 20000, POM_FAR = 200u, POM_WOOD = 8u, POM_HUNT = 100000, POM_DIG = 200000, POM_SHARE = 2000000, POM_DREAD = 500000000, POM_WATCH = 3u, POM_CROWD = 2u, POM_SPACE = 20u };
+
+static uint32_t pom_room(const pomGeo *g, const pomForecast *f, uint32_t cell, uint32_t cap) {
+    pomBits at = pom_bit(cell), reach = (pom_spread(g, at) & ~at & f->safe[1]) | (at & ~f->flame[1] & pom_spread(g, f->safe[2]));
+    uint32_t room = pom_count(reach);
+    for (uint32_t t = 2u; t <= 3u && reach; t++) {
+        reach = pom_spread(g, reach) & f->safe[t];
+        room += pom_count(reach);
+    }
+    return reach ? (room < cap ? room : cap) : 0u;
 }
 
 enum { POM_AIM_LOOT, POM_AIM_HUNT, POM_AIM_DIG, POM_AIMS };
@@ -993,23 +1010,45 @@ static void pom_arrive(const pomGeo *g, const pomForecast *f, uint32_t cell, con
     }
 }
 
+static void pom_remember(const pommermanKnobs *k, const pomGeo *g, pomWorld *w, const uint32_t *words) {
+    const pomBoard *truth = &w->board;
+    uint32_t me = words[PW_SEAT];
+    pomBits view = k->fog ? pom_window(g, words[PW_CELL + me], k->fog) : g->board;
+    if (!words[PW_TICK])
+        for (uint32_t s = 0u; s < POM_SEATS; s++) {
+            w->stock[s] = POMMERMAN_START_AMMO;
+            w->blast[s] = POMMERMAN_START_BLAST;
+            w->kick[s] = 0u;
+            w->last[s] = (uint8_t)(s < k->seats ? pom_corner(k->side, pom_seatCorner(k, s)) : 0u);
+        }
+    for (uint32_t s = 0u; s < k->seats && words[PW_TICK]; s++) {
+        pomBits at = pom_bit(words[PW_CELL + s]) & view;
+        if (s == me || !(words[PW_ALIVE] >> s & 1u) || !at) continue;
+        w->last[s] = (uint8_t)words[PW_CELL + s];
+        if (w->shown[POM_EXTRA] & ~truth->item[POM_EXTRA] & at) w->stock[s] = (uint8_t)(w->stock[s] < POMMERMAN_MAX_AMMO ? w->stock[s] + 1u : POMMERMAN_MAX_AMMO);
+        if (w->shown[POM_RANGE] & ~truth->item[POM_RANGE] & at) w->blast[s] = (uint8_t)(w->blast[s] < k->maxBlast ? w->blast[s] + 1u : k->maxBlast);
+        if (w->shown[POM_KICK] & ~truth->item[POM_KICK] & at) w->kick[s] = 1u;
+    }
+    for (uint32_t t = 0u; t < POM_KINDS; t++) w->shown[t] = truth->item[t] & view;
+}
+
 static void pom_believe(const pommermanKnobs *k, const pomGeo *g, pomWorld *w, const uint32_t *words, uint32_t *known) {
     const pomBoard *truth = &w->board;
     pomBoard *b = &w->belief;
-    uint32_t me = words[PW_SEAT], kept = 0u;
+    uint32_t me = words[PW_SEAT], kept = 0u, other = (me + 1u) % k->seats;
+    pom_remember(k, g, w, words);
     memcpy(known, words, PW_WORDS * sizeof *known);
-    *b = *truth;
-    for (uint32_t t = 0u; t < POM_KINDS; t++) b->hidden[t] = 0;
-    if (!k->fog) return;
-    pomBits view = pom_window(g, words[PW_CELL + me], k->fog);
+    pomBits view = k->fog ? pom_window(g, words[PW_CELL + me], k->fog) : g->board;
     for (uint32_t s = 0u; s < k->seats; s++) {
         if (s == me) continue;
         if (!(view & pom_bit(words[PW_CELL + s]))) known[PW_ALIVE] &= ~(1u << s);
-        if (!pom_rival(k, me, s)) continue;
-        known[PW_AMMO + s] = 1u;
-        known[PW_BLAST + s] = k->maxBlast;
-        known[PW_KICK + s] = 1u;
+        uint32_t hidden = k->fog && pom_rival(k, me, s);
+        known[PW_AMMO + s] = hidden ? POMMERMAN_MAX_AMMO : w->stock[s];
+        known[PW_BLAST + s] = hidden ? k->maxBlast : w->blast[s];
+        known[PW_KICK + s] = hidden ? 1u : w->kick[s];
     }
+    *b = *truth;
+    for (uint32_t t = 0u; t < POM_KINDS; t++) b->hidden[t] = 0;
     b->rigid &= view;
     b->wood &= view;
     for (uint32_t t = 0u; t < POMMERMAN_FLAME_LIFE; t++) b->flame[t] &= view;
@@ -1020,47 +1059,77 @@ static void pom_believe(const pommermanKnobs *k, const pomGeo *g, pomWorld *w, c
         uint32_t cell = truth->bombs[i].cell;
         if (!(view & pom_bit(cell))) continue;
         b->bombs[kept] = truth->bombs[i];
-        b->reach[kept] = pom_cross(g, cell, truth->bombs[i].blast - 1u, b->rigid, b->wood);
+        uint32_t mine = truth->bombs[i].owner == me;
+        b->bombs[kept].owner = (uint8_t)(mine ? me : other);
+        b->bombs[kept].blast = (uint8_t)(mine || !k->fog ? truth->bombs[i].blast : k->maxBlast);
+        b->reach[kept] = pom_cross(g, cell, b->bombs[kept].blast - 1u, b->rigid, b->wood);
         b->bombAt[cell] = (uint8_t)(kept + 1u);
         kept++;
     }
     b->bombCount = kept;
 }
 
-static inline __attribute__((always_inline)) int32_t pom_score(const pommermanKnobs *k, const pomGeo *g, pomWorld *w, const uint32_t *words, uint32_t *act, uint32_t action) {
+static void pom_trail(const pommermanKnobs *k, const pomGeo *g, pomWorld *w, const uint32_t *words) {
+    const pomBoard *b = &w->belief;
+    uint32_t me = words[PW_SEAT];
+    pomBits view = k->fog ? pom_window(g, words[PW_CELL + me], k->fog) : g->board, pending[POM_FAR + POM_WOOD + 1u], done = 0;
+    memset(pending, 0, sizeof pending);
+    memset(w->trail, POM_FAR, sizeof w->trail);
+    for (uint32_t s = 0u; s < k->seats; s++) {
+        if (s == me || !pom_rival(k, me, s)) continue;
+        pomBits at = pom_bit(words[PW_CELL + s]) & view & (0u - (pomBits)(words[PW_ALIVE] >> s & 1u));
+        pending[0] |= at ? at : pom_bit(w->last[s]) & ~view;
+    }
+    for (uint32_t d = 0u; d < POM_FAR; d++) {
+        pomBits front = pending[d] & ~done;
+        if (!front) continue;
+        done |= front;
+        for (pomBits m = front; m; m &= m - 1u) w->trail[pom_low(m)] = (uint8_t)d;
+        pomBits next = pom_spread(g, front) & g->board & ~done & ~b->rigid;
+        pending[d + 1u] |= next & ~b->wood;
+        pending[d + POM_WOOD] |= next & b->wood;
+    }
+}
+
+static inline __attribute__((always_inline)) int32_t pom_score(const pommermanKnobs *k, const pomGeo *g, pomWorld *w, const uint32_t *words, const uint32_t *act, uint32_t *tier, uint32_t rich) {
     uint32_t me = words[PW_SEAT], side = k->side, sim[PW_WORDS];
     memcpy(sim, words, sizeof sim);
     w->sim = w->belief;
-    act[me] = action;
     pom_tick(k, g, &w->sim, sim, act);
     uint32_t alive = sim[PW_ALIVE];
-    if (!(alive >> me & 1u)) return INT32_MIN + 1;
+    *tier = 0u;
+    if (!(alive >> me & 1u)) return 0;
     const pomBoard *b = &w->sim;
     uint32_t cell = sim[PW_CELL + me], r = cell / side, c = cell % side, blast = sim[PW_BLAST + me];
     pomBits here = pom_bit(cell), bodies = pom_bodies(k, sim) & ~here;
     pom_forecast(k, g, b, sim[PW_TICK], &w->plain, 0, 0u, bodies);
-    int32_t score = 0;
-    if (pom_lives(g, &w->plain, cell)) {
-        score = 3;
-        for (uint32_t s = 0u; s < k->seats && score == 3; s++) {
-            if (!(alive >> s & 1u) || !pom_rival(k, me, s) || !sim[PW_AMMO + s]) continue;
-            uint32_t at = sim[PW_CELL + s], sr = at / side, sc = at % side;
-            if ((sr > r ? sr - r : r - sr) + (sc > c ? sc - c : c - sc) > 3u || (b->bomb & pom_bit(at))) continue;
-            pomArm arm = { at, sim[PW_BLAST + s] };
+    uint32_t room = pom_room(g, &w->plain, cell, POM_ROOM);
+    *tier = 64u + room;
+    for (uint32_t s = 0u; s < k->seats && room; s++) {
+        if (!(alive >> s & 1u) || s == me || !sim[PW_AMMO + s]) continue;
+        uint32_t at = sim[PW_CELL + s], sr = at / side, sc = at % side;
+        if ((sr > r ? sr - r : r - sr) + (sc > c ? sc - c : c - sc) > POM_WATCH) continue;
+        for (pomBits m = pom_spread(g, pom_bit(at)) & ~(b->rigid | b->wood | b->bomb | here) & g->board; m && room; m &= m - 1u) {
+            pomArm arm = { pom_low(m), sim[PW_BLAST + s] };
             pom_forecast(k, g, b, sim[PW_TICK], &w->probe, &arm, 1u, bodies);
-            if (!pom_lives(g, &w->probe, cell)) score = 2;
+            uint32_t probe = pom_room(g, &w->probe, cell, POM_ROOM);
+            room = probe < room ? probe : room;
         }
-    } else score = 1;
-    score *= 100000000;
+    }
+    *tier = room ? 128u + room : 64u;
+    if (!rich) return 0;
+    int32_t score = 0;
     pomBits rivals = 0, cross = pom_cross(g, cell, blast - 1u, b->rigid, b->wood);
     for (uint32_t s = 0u; s < k->seats; s++) {
         if (s == me || !(alive >> s & 1u)) continue;
         uint32_t at = sim[PW_CELL + s];
-        uint32_t trapped = !(pom_spread(g, pom_bit(at)) & w->plain.roam);
+        pom_forecast(k, g, b, sim[PW_TICK], &w->probe, 0, 0u, pom_bodies(k, sim) & ~pom_bit(at));
+        uint32_t space = k->league ? POM_ROOM : POM_SPACE, room = pom_room(g, &w->probe, at, space);
+        int32_t press = room ? (int32_t)(space - room) * POM_PRESS : 10000000;
         if (pom_rival(k, me, s)) {
             rivals |= pom_bit(at);
-            score += trapped ? 10000000 : 0;
-        } else score -= trapped ? 10000000 : 0;
+            score += press;
+        } else score -= press;
     }
     score += ((w->belief.item[POM_EXTRA] | w->belief.item[POM_RANGE] | w->belief.item[POM_KICK]) & here) ? 1000000 : 0;
     pomBits aim[POM_AIMS] = { b->item[0] | b->item[1] | b->item[2], 0, 0 };
@@ -1072,47 +1141,94 @@ static inline __attribute__((always_inline)) int32_t pom_score(const pommermanKn
     uint32_t arrival[POM_AIMS];
     pom_arrive(g, &w->plain, cell, aim, 16u, arrival);
     if (arrival[POM_AIM_LOOT] <= 8u) score += (int32_t)(9u - arrival[POM_AIM_LOOT]) * 100000;
-    if (action == POM_BOMB) score += (cross & rivals) ? 8000 : (cross & b->wood) ? 3000 : -5000;
+    if (act[me] == POM_BOMB) score += (cross & rivals) ? 8000 : (cross & b->wood) ? 3000 : -5000;
+    score += (int32_t)(POM_FAR - w->trail[cell]) * POM_HUNT;
+    if (act[me] == POM_BOMB)
+        for (pomBits m = cross & w->belief.wood; m; m &= m - 1u)
+            if (w->trail[pom_low(m)] < w->trail[cell]) { score += POM_DIG; break; }
     if (arrival[POM_AIM_HUNT] != 255u) score += (int32_t)(50u - arrival[POM_AIM_HUNT]) * 100;
     if (arrival[POM_AIM_DIG] != 255u) score += (int32_t)(50u - arrival[POM_AIM_DIG]) * 10;
     return score;
 }
 
-static inline __attribute__((always_inline)) uint32_t pom_decide(const pommermanKnobs *k, const pomGeo *g, pomWorld *w, const uint32_t *words) {
-    uint32_t me = words[PW_SEAT], side = k->side;
-    uint32_t known[PW_WORDS], act[POM_SEATS] = { POM_STOP, POM_STOP, POM_STOP, POM_STOP }, cell = words[PW_CELL + me], choice = POM_STOP;
-    pom_believe(k, g, w, words, known);
-    const pomBoard *b = &w->belief;
-    int32_t best = INT32_MIN;
+static uint32_t pom_moves(const pomGeo *g, const pomBoard *b, const uint32_t *words, uint32_t s, uint32_t *list) {
+    uint32_t cell = words[PW_CELL + s], n = 0u;
     for (uint32_t a = POM_STOP; a < POM_ACTIONS; a++) {
-        if (a == POM_BOMB && (!words[PW_AMMO + me] || (b->bomb & pom_bit(cell)))) continue;
+        if (a == POM_BOMB && (!words[PW_AMMO + s] || (b->bomb & pom_bit(cell)))) continue;
         if (a >= POM_UP && a <= POM_RIGHT) {
-            uint32_t t = pom_step(side, cell, a);
-            if (t == POM_NONE || ((b->rigid | b->wood) & pom_bit(t)) || ((b->bomb & pom_bit(t)) && !words[PW_KICK + me])) continue;
+            uint32_t t = pom_step(g->side, cell, a);
+            if (t == POM_NONE || ((b->rigid | b->wood) & pom_bit(t)) || ((b->bomb & pom_bit(t)) && !words[PW_KICK + s])) continue;
         }
-        int32_t score = pom_score(k, g, w, known, act, a);
-        if (score > best) {
-            best = score;
-            choice = a;
+        list[n++] = a;
+    }
+    return n;
+}
+
+static inline int64_t pom_calm(uint32_t worst) { return worst < 128u ? (int64_t)worst * 1000000000ll : 128000000000ll + (int64_t)(worst - 128u) * POM_EASE; }
+
+static inline __attribute__((always_inline)) uint32_t pom_decide(const pommermanKnobs *k, const pomGeo *g, pomWorld *w, const uint32_t *words, uint32_t seed) {
+    uint32_t me = words[PW_SEAT], side = k->side, cell = words[PW_CELL + me];
+    uint32_t known[PW_WORDS], act[POM_SEATS] = { POM_STOP, POM_STOP, POM_STOP, POM_STOP }, choice = POM_STOP;
+    pom_believe(k, g, w, words, known);
+    pom_trail(k, g, w, words);
+    const pomBoard *b = &w->belief;
+    uint32_t mine[POM_ACTIONS], mineCount = pom_moves(g, b, known, me, mine);
+    uint32_t near[POM_SEATS], nearCount = 0u, options[POM_SEATS][POM_ACTIONS], optionCount[POM_SEATS];
+    for (uint32_t d = 1u; d <= 2u; d++)
+        for (uint32_t s = 0u; s < k->seats && nearCount < POM_CROWD; s++) {
+            if (s == me || !(known[PW_ALIVE] >> s & 1u)) continue;
+            uint32_t at = known[PW_CELL + s], dr = at / side > cell / side ? at / side - cell / side : cell / side - at / side, dc = at % side > cell % side ? at % side - cell % side : cell % side - at % side;
+            if (dr + dc != d) continue;
+            optionCount[nearCount] = pom_moves(g, b, known, s, options[nearCount]);
+            near[nearCount++] = s;
+        }
+    uint32_t combos = 1u, bounced = words[PW_TICK] && w->was == cell && w->did >= POM_UP && w->did <= POM_RIGHT;
+    for (uint32_t i = 0u; i < nearCount; i++) combos *= optionCount[i];
+    if (bounced) bounced = philox4x32(seed, ENV_RNG_STREAM, words[PW_GAME], words[PW_TICK], me, POM_DRAW_ORACLE).x & 1u;
+    int64_t best = INT64_MIN;
+    uint32_t bestTier = 0u;
+    for (uint32_t m = 0u; m < mineCount; m++) {
+        uint32_t tier, worst, share;
+        for (uint32_t i = 0u; i < POM_SEATS; i++) act[i] = POM_STOP;
+        act[me] = mine[m];
+        int32_t detail = pom_score(k, g, w, known, act, &tier, 1u);
+        worst = tier;
+        share = tier >= 128u;
+        for (uint32_t c = 1u; c < combos && pom_calm(worst) >= pom_calm(bestTier); c++) {
+            for (uint32_t i = 0u, rest = c; i < nearCount; i++) {
+                act[near[i]] = options[i][rest % optionCount[i]];
+                rest /= optionCount[i];
+            }
+            pom_score(k, g, w, known, act, &tier, 0u);
+            worst = tier < worst ? tier : worst;
+            share += tier >= 128u;
+        }
+        int64_t total = pom_calm(worst) + (int64_t)share * (worst < 128u ? POM_DREAD : POM_SHARE) / combos + detail - (bounced && mine[m] == w->did ? POM_SHARE : 0);
+        if (total > best) {
+            best = total;
+            bestTier = worst;
+            choice = mine[m];
         }
     }
+    w->was = (uint8_t)cell;
+    w->did = (uint8_t)choice;
     return choice;
 }
 
-static inline __attribute__((always_inline)) uint32_t pom_consult(const pommermanKnobs *k, pomWorld *w, const uint32_t *words) {
+static inline __attribute__((always_inline)) uint32_t pom_consult(const pommermanKnobs *k, pomWorld *w, const uint32_t *words, uint32_t seed) {
     const pomGeo g = pom_geo(k->side);
-    return pom_decide(k, &g, w, words);
+    return pom_decide(k, &g, w, words, seed);
 }
 
 void pommerman_oracle(uint32_t instance, uint32_t seed, uint32_t step, const uint32_t *words, uint32_t *extra, const float *obs, float *ctrl, const float *shared) {
-    (void)seed; (void)step; (void)obs; (void)shared;
+    (void)step; (void)obs; (void)shared;
     pomWorld *w = pom_world(extra);
     switch (instance) {
-        case 0u: ctrl[0] = (float)pom_consult(&POMMERMAN_KNOBS[0], w, words); return;
-        case 1u: ctrl[0] = (float)pom_consult(&POMMERMAN_KNOBS[1], w, words); return;
-        case 2u: ctrl[0] = (float)pom_consult(&POMMERMAN_KNOBS[2], w, words); return;
-        case 3u: ctrl[0] = (float)pom_consult(&POMMERMAN_KNOBS[3], w, words); return;
-        default: ctrl[0] = (float)pom_consult(&POMMERMAN_KNOBS[4], w, words); return;
+        case 0u: ctrl[0] = (float)pom_consult(&POMMERMAN_KNOBS[0], w, words, seed); return;
+        case 1u: ctrl[0] = (float)pom_consult(&POMMERMAN_KNOBS[1], w, words, seed); return;
+        case 2u: ctrl[0] = (float)pom_consult(&POMMERMAN_KNOBS[2], w, words, seed); return;
+        case 3u: ctrl[0] = (float)pom_consult(&POMMERMAN_KNOBS[3], w, words, seed); return;
+        default: ctrl[0] = (float)pom_consult(&POMMERMAN_KNOBS[4], w, words, seed); return;
     }
 }
 
