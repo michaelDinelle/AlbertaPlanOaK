@@ -691,6 +691,10 @@ def check(engine, tree_id):
     return f"check: {len(worlds)} worlds, {len(flagged)} flagged; fuzz: {len(failures)} of {len(fuzzed)} runs failed"
 
 
+def learner_bytes(root):
+    return sum((root / "Sources" / name).stat().st_size for name in ("oak.c", "geometry.h"))
+
+
 def anchor_ratio(recording):
     path = recording.root / "speed.json"
     if not path.exists():
@@ -828,6 +832,10 @@ def execute(tree, verb):
         BEST.write_text(tree_id + "\n")
         CHAMPION.unlink(missing_ok=True)
         return f"PROMOTE on speed: {tree_id}"
+    if not_worse and ratio >= 1 - MARGIN and learner_bytes(tree) < learner_bytes(reference.root / "source"):
+        BEST.write_text(tree_id + "\n")
+        CHAMPION.unlink(missing_ok=True)
+        return f"PROMOTE on simplicity: {tree_id}; learner source falls from {learner_bytes(reference.root / 'source'):,} to {learner_bytes(tree):,} bytes"
     if not_worse and fuzz_candidate < fuzz_best:
         BEST.write_text(tree_id + "\n")
         CHAMPION.unlink(missing_ok=True)
