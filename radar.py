@@ -58,7 +58,7 @@ def chart(best, steps, window, rows, sps):
     height = 800 + 22 * len(AGENTS) + 130
     s = [f'<svg xmlns="http://www.w3.org/2000/svg" width="1250" height="{height}" viewBox="0 0 1250 {height}" role="img" aria-labelledby="title desc">',
          f'<title id="title">Every policy across the {len(axes)} environment categories</title>',
-         f'<desc id="desc">Mean normalized reward per step over the final {window:,} steps of the {steps:,}-step best recording, one axis per declared category with its environment count, the better of Random and the constant do-nothing policy at 0 and Oracle at 1. The radius is linear from the centre at {lo:.2f} to the Oracle ring. A category mean below the centre breaks the outline of its policy at that axis and is printed under the axis label. Outlines only: the polygon area is not the score. The overall ranking is the equal-weight mean over all {len(rows)} environments.</desc>',
+         f'<desc id="desc">Mean normalized reward per step over the final {window:,} steps of the {steps:,}-step best recording, one axis per declared category with its environment count, the better of Random and the constant do-nothing policy at 0 and Oracle at 1. The radius has two linear bands: the inner 30 percent runs from {lo:.2f} at the centre to the floor, and the outer 70 percent from the floor to the Oracle. A category mean below the centre breaks the outline of its policy at that axis and is printed under the axis label. Outlines only: the polygon area is not the score. The overall ranking is the equal-weight mean over all {len(rows)} environments.</desc>',
          f'<rect width="1250" height="{height}" fill="#ffffff"/>', '<g font-family="Arial, Helvetica, sans-serif" fill="#243044">']
 
     def text(x, y, t, size=18, fill="#243044", anchor="start", weight="400", halo=False):
@@ -81,8 +81,11 @@ def chart(best, steps, window, rows, sps):
     cx, cy, R = 430, 390, 240
     angles = [-math.pi / 2 + 2 * math.pi * i / len(axes) for i in range(len(axes))]
 
+    inner = 0.3 * R
+
     def radius(value):
-        return R * (max(value, lo) - lo) / (hi - lo)
+        value = max(value, lo)
+        return inner * (value - lo) / -lo if value < 0 else inner + (R - inner) * value / hi
 
     def xy(i, value):
         return cx + radius(value) * math.cos(angles[i]), cy + radius(value) * math.sin(angles[i])
@@ -111,7 +114,7 @@ def chart(best, steps, window, rows, sps):
     for i in range(len(axes)):
         x, y = xy(i, hi)
         s.append(f'<path d="M {cx} {cy} L {x:.2f} {y:.2f}" stroke="#d0d6df" stroke-width="1"/>')
-    grid = [v for v in (-0.75, -0.5, -0.25, 0.25, 0.5, 0.75) if v > lo]
+    grid = [v for v in (-0.5, 0.25, 0.5, 0.75) if v > lo]
     for value in grid:
         s.append(f'<polygon points="{level(value)}" fill="none" stroke="#d3d1c7" stroke-width="1"/>')
     s.append(f'<polygon points="{level(0.0)}" fill="none" stroke="#5f5e5a" stroke-width="1.5"/>')
@@ -166,7 +169,7 @@ def chart(best, steps, window, rows, sps):
         text(columns[i], base, f"{ahead[name]} of {count}", 15, anchor="middle", fill="#637084")
     text(54, base + 45, f"Equal weight per environment · outlines, not areas · floor = max(Random, Constant) = 0 · Oracle = 1 · final {window:,} of {steps:,} steps", 15, fill="#637084")
     off = [f"{agent} on {name} at {means[agent]:.2f}".replace("-", "\u2212") for name, _, means in axes for agent in AGENTS if means[agent] < lo]
-    text(54, base + 67, f"Linear radius from {lo:.2f} at the centre".replace("-", "\u2212") + (f"; below the chart, so their outlines break at that axis: {', '.join(off)}." if off else "."), 15, fill="#637084")
+    text(54, base + 67, f"Radius in two linear bands: the inner 30% runs from {lo:.2f} at the centre to the floor, the outer 70% from the floor to the Oracle".replace("-", "\u2212") + (f"; below the chart: {', '.join(off)}." if off else "."), 15, fill="#637084")
     s.append("</g></svg>")
     CHART.write_text("\n".join(s) + "\n")
 
