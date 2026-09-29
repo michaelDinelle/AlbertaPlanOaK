@@ -53,15 +53,13 @@ def chart(best, steps, window, rows, sps):
     ranking = sorted(AGENTS, key=overall.get, reverse=True)
     ahead = {name: sum(1 for r in rows if r["category"] == name and normalized(r, "OaK") > normalized(r, "PPO")) for name, _, _ in axes}
 
-    def warp(value):
-        return value if value >= 0 else -math.log1p(-value)
-
-    shown = [means[agent] for _, _, means in axes for agent in AGENTS]
-    lo, hi = min([warp(-0.25)] + [warp(v) - 0.05 for v in shown]), max([1.0] + [v + 0.05 for v in shown])
+    learners = ("PPO", "OaK")
+    shown = [means[agent] for _, _, means in axes for agent in learners]
+    lo, hi = min([-0.25] + [v - 0.05 for v in shown]), max([1.0] + [v + 0.05 for v in shown])
     height = 800 + 22 * len(AGENTS) + 130
     s = [f'<svg xmlns="http://www.w3.org/2000/svg" width="1250" height="{height}" viewBox="0 0 1250 {height}" role="img" aria-labelledby="title desc">',
-         f'<title id="title">Every policy across the {len(axes)} environment categories</title>',
-         f'<desc id="desc">Mean normalized reward per step over the final {window:,} steps of the {steps:,}-step best recording, one axis per declared category with its environment count, the better of Random and the constant do-nothing policy at 0 and Oracle at 1. Above the floor the radius is linear; below it the radius follows minus log(1 minus the score), so every policy stays on the chart unclipped. Outlines only: the polygon area is not the score. The overall ranking is the equal-weight mean over all {len(rows)} environments.</desc>',
+         f'<title id="title">OaK and PPO across the {len(axes)} environment categories</title>',
+         f'<desc id="desc">Mean normalized reward per step over the final {window:,} steps of the {steps:,}-step best recording, one axis per declared category with its environment count, the better of Random and the constant do-nothing policy at 0 and Oracle at 1. The radius is linear. The floor ring is the better of Random and the constant policy in every environment, so their category means lie at or below it; their exact values are in the ranking and the axis table. Outlines only: the polygon area is not the score. The overall ranking is the equal-weight mean over all {len(rows)} environments.</desc>',
          f'<rect width="1250" height="{height}" fill="#ffffff"/>', '<g font-family="Arial, Helvetica, sans-serif" fill="#243044">']
 
     def text(x, y, t, size=18, fill="#243044", anchor="start", weight="400"):
@@ -84,7 +82,7 @@ def chart(best, steps, window, rows, sps):
     angles = [-math.pi / 2 + 2 * math.pi * i / len(axes) for i in range(len(axes))]
 
     def radius(value):
-        return R * (warp(value) - lo) / (hi - lo)
+        return R * (value - lo) / (hi - lo)
 
     def xy(i, value):
         return cx + radius(value) * math.cos(angles[i]), cy + radius(value) * math.sin(angles[i])
@@ -94,23 +92,24 @@ def chart(best, steps, window, rows, sps):
 
     text(54, 55, "Policy comparison", 30, weight="600")
     text(54, 86, f"Mean normalized reward per step · {len(rows)} environments · best recording {best[:9]}", 17, fill="#637084")
-    below = [v for v in (-0.5, -1.0, -2.0, -5.0, -10.0, -20.0) if warp(v) >= lo]
-    for value in (0.25, 0.5, 0.75) + tuple(below):
+    for value in (0.25, 0.5, 0.75):
         s.append(f'<circle cx="{cx}" cy="{cy}" r="{radius(value):.1f}" fill="none" stroke="#cbd2dc" stroke-width="1" stroke-dasharray="2 4"/>')
     s.append(f'<circle cx="{cx}" cy="{cy}" r="{radius(0.0):.1f}" fill="none" stroke="#5f5e5a" stroke-width="2" stroke-dasharray="3 5"/>')
     for i in range(len(axes)):
         x, y = xy(i, hi)
         s.append(f'<path d="M {cx} {cy} L {x:.2f} {y:.2f}" stroke="#d0d6df" stroke-width="1"/>')
-    style = {"Oracle": ("2.5", ' stroke-dasharray="9 6"'), "Random": ("2", ' stroke-dasharray="2 4"'), "Constant": ("2", ' stroke-dasharray="7 4"'), "PPO": ("3", ""), "OaK": ("3.5", "")}
-    for agent in ("Oracle", "Random", "Constant", "PPO", "OaK"):
+    style = {"Oracle": ("2.5", ' stroke-dasharray="9 6"'), "PPO": ("3", ""), "OaK": ("3.5", "")}
+    for agent in ("Oracle",) + learners:
         width, dash = style[agent]
         s.append(f'<polygon points="{points(agent)}" fill="none" stroke="{COLORS[agent]}" stroke-width="{width}"{dash} stroke-linejoin="round"/>')
         for i, (_, _, means) in enumerate(axes):
             mark(agent, *xy(i, means[agent]))
-    for value in (0.0, 0.5, 1.0) + tuple(below):
+    for value in (0.0, 0.25, 0.5, 0.75, 1.0):
         text(cx + radius(value) - 2, cy + 21, f"{value:g}".replace("-", "−"), 13, fill="#647084", anchor="middle")
-    text(cx + radius(0.0) + 6, cy - 8, "Floor", 12, fill="#5f5e5a", weight="600")
-    text(cx + radius(1.0) + 6, cy - 8, "Oracle", 12, fill=COLORS["Oracle"], weight="600")
+    text(cx - 8, cy + 22, f"{lo:.2f}".replace("-", "\u2212"), 12, fill="#647084", anchor="end")
+    between = math.pi / len(axes)
+    text(cx + (radius(0.0) + 6) * math.cos(between), cy + (radius(0.0) + 6) * math.sin(between) + 4, "Floor", 12, fill="#5f5e5a", weight="600")
+    text(cx + (radius(1.0) + 6) * math.cos(between), cy + (radius(1.0) + 6) * math.sin(between) + 4, "Oracle", 12, fill=COLORS["Oracle"], weight="600")
     for i, (name, count, means) in enumerate(axes):
         x, y = cx + (R + 40) * math.cos(angles[i]), cy + (R + 40) * math.sin(angles[i])
         anchor = "start" if math.cos(angles[i]) > 0.35 else "end" if math.cos(angles[i]) < -0.35 else "middle"
@@ -147,7 +146,7 @@ def chart(best, steps, window, rows, sps):
     for i, (name, count, _) in enumerate(axes):
         text(columns[i], base, f"{ahead[name]} of {count}", 15, anchor="middle", fill="#637084")
     text(54, base + 45, f"Equal weight per environment · outlines, not areas · floor = max(Random, Constant) = 0 · Oracle = 1 · final {window:,} of {steps:,} steps", 15, fill="#637084")
-    text(54, base + 67, "Above the floor the radius is linear; below it the radius is log-compressed, so every policy is drawn unclipped.", 15, fill="#637084")
+    text(54, base + 67, "Linear radius. Random and Constant are summarized by the floor ring: the better of the two defines 0 in every environment, so their category means lie at or below it.", 15, fill="#637084")
     s.append("</g></svg>")
     CHART.write_text("\n".join(s) + "\n")
 
