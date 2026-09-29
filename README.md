@@ -14,9 +14,9 @@ Recorded on a binned M4 Max.
 
 ## Best recording
 
-Capacity 64, declared once in `Sources/geometry.h`: standardized observations on a seven-level trace ladder, 64 learned units of fan-in 32, and per step 23 hashed tuple cells plus two cells per observation channel on a 16,384-slot table, feeding three actor heads and five table arms that a Thompson-sampling bandit chooses among every 512 steps, plus an exact memory of the last 256 observations that the Q-cell arm consults where its cells leave the choice undecided; 6,197,248 bytes of state per lane. 6,342,164 SPS on the 245-environment schedule.
+Capacity 64, declared once in `Sources/geometry.h`: standardized observations on a seven-level trace ladder, 64 learned units of fan-in 32, and per step 23 hashed tuple cells plus two cells per observation channel on a 16,384-slot table, feeding three actor heads and five table arms that a Thompson-sampling bandit chooses among every 512 steps, plus an exact memory of the last 256 observations that the Q-cell arm consults where its cells leave the choice undecided; 6,197,248 bytes of state per lane. 6,288,958 SPS on the 245-environment schedule.
 
-Reward per step over the final 100,928 steps of the 1,000,000-step best recording (`fe514e0a2c73ee1b5ba940f7f0a118900c2a49f5`), all 245 environments with 32 seeds each (7,840 lanes), with the Oracle, streaming actor-critic, PPO, constant do-nothing and Random baselines on the same seeds. Mean over seeds; Score = (OaK − Floor) / (Oracle − Floor) with Floor = max(Random, Constant), unclipped; a dash where the Oracle does not rise above the floor.
+Reward per step over the final 100,928 steps of the 1,000,000-step best recording (`6e891e535623aed4610c13240804acb63e131ee3`), all 245 environments with 32 seeds each (7,840 lanes), with the Oracle, streaming actor-critic, PPO, constant do-nothing and Random baselines on the same seeds. Mean over seeds; Score = (OaK − Floor) / (Oracle − Floor) with Floor = max(Random, Constant), unclipped; a dash where the Oracle does not rise above the floor.
 
 | Environment | Category | OaK | Oracle | Stream | PPO | Constant | Random | Score |
 |---|---|---:|---:|---:|---:|---:|---:|---:|

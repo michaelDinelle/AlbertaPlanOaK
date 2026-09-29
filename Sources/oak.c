@@ -84,7 +84,7 @@ typedef struct {
     float actionSignal[OAK_ACTION_PARAMS];
     float actorCredit[OAK_POLICY_MAX], actorCreditStaging[OAK_POLICY_MAX], logit[OAK_POLICY_MAX];
     float reward, td, tdNormalized, tdSquare, advantage, advantageCenter, averageReward, actorStep, betaFloor;
-    float rewardMean, rewardVariance, aspiration, rewardSquare, rewardMagnitude;
+    float rewardMean, rewardVariance, aspiration, rewardSquare;
     OakGeometry g;
     uint32_t observationCount, actionCount, box, stepCount, slot;
     uint32_t qCell[2u * OAK_KEYS], qTag[2u * OAK_KEYS], action;
@@ -101,7 +101,7 @@ typedef struct {
     float memoryQ[OAK_TABLE * OAK_CELL_STRIDE], memoryValue[OAK_POLICY_MAX], memoryTaken, memoryGain, memoryNoise;
 } OakAgent;
 
-enum { SCALE_TD, SCALE_RAW, SCALE_MAGNITUDE };
+enum { SCALE_TD, SCALE_RAW };
 static const uint8_t HEAD_SCALE[OAK_HEADS] = { SCALE_TD, SCALE_RAW, SCALE_RAW };
 static const uint8_t HEAD_NATURAL[OAK_HEADS] = { 0u, 1u, 0u };
 static const uint8_t HEAD_ASPIRE[OAK_HEADS] = { 1u, 1u, 0u };
@@ -223,7 +223,7 @@ static __attribute__((noinline)) void encode(OakAgent *a, const float *x, const 
     uint32_t fineCode[(1u + OAK_TRACE_LEVELS) * OAK_OBSERVATION_LIMIT], coarseCode[(1u + OAK_TRACE_LEVELS) * OAK_OBSERVATION_LIMIT], settledCode[OAK_TRACE_LEVELS * OAK_OBSERVATION_LIMIT];
     for (uint32_t o = 0u; o < observationCount; o += 4u) oak_store4(coded + o, oak_load4(x + o));
     float4 momentRate = splat4(trackingRateFor(a->stepCount, OAK_FEATURE_TIMESCALE)), settleRate = splat4(1.0f / ((float)a->stepCount + 1.0f));
-    float4 ridge = splat4(a->stepCount < 2u * OAK_CAPACITY ? 1.0f / ((float)a->stepCount + 1.0f) : g.ridgeFloor);
+    float4 ridge = splat4(trackingRateFor(a->stepCount, OAK_SLOWEST_TRACE));
     for (uint32_t c = 0u; c < OAK_TRACE_LEVELS * observationCount; c += 4u) {
         float4 value = oak_load4(a->traceLevel + c), mean = oak_load4(a->traceMean + c), second = oak_load4(a->traceSecond + c);
         float4 center = oak_load4(a->settledMean + c), spread = oak_load4(a->settledSecond + c);
@@ -408,7 +408,6 @@ static __attribute__((noinline)) void evaluate(OakAgent *a) {
     float rewardRate = trackingRateFor(a->stepCount, OAK_FEATURE_TIMESCALE);
     float rewardError = a->reward - averageRewardOld;
     a->rewardSquare = keepFinite(a->rewardSquare, a->rewardSquare + rewardRate * (rewardError * rewardError - a->rewardSquare));
-    a->rewardMagnitude = keepFinite(a->rewardMagnitude, a->rewardMagnitude + rewardRate * (fabsf(rewardError) - a->rewardMagnitude));
     float rewardGap = a->reward - a->rewardMean;
     a->rewardMean = keepFinite(a->rewardMean, a->rewardMean + rewardRate * rewardGap);
     a->rewardVariance = keepFinite(a->rewardVariance, a->rewardVariance + rewardRate * (rewardGap * rewardGap - a->rewardVariance));
@@ -419,7 +418,7 @@ static __attribute__((noinline)) void evaluate(OakAgent *a) {
     float informed = a->rewardSquare / a->tdSquare;
     float trust = informed >= 1.0f ? 1.0f : sqrtf(informed);
     uint32_t head = a->learner;
-    float scale = HEAD_SCALE[head] == SCALE_TD ? tdScale : HEAD_SCALE[head] == SCALE_RAW ? 1.0f : a->rewardMagnitude / a->rewardSquare;
+    float scale = HEAD_SCALE[head] == SCALE_TD ? tdScale : 1.0f;
     a->advantage = finiteOrZero((advantageError - (HEAD_ASPIRE[head] ? shortfall : 0.0f)) * scale * (HEAD_TRUST[head] ? trust : 1.0f));
     a->advantageCenter = keepFinite(advantageCenterOld, advantageCenterOld + g.trackingRate * advantageError);
     uint32_t metaAge = a->stepCount < OAK_FEATURE_TIMESCALE ? a->stepCount : OAK_FEATURE_TIMESCALE;
@@ -943,7 +942,7 @@ static uint32_t oak_nonfiniteRun(const float *p, uint32_t count, uint32_t stride
 uint32_t oak_nonfinite(const uint32_t *state) {
     const OakAgent *a = (const OakAgent *)state;
     const float scalars[] = { a->blockReward, a->td, a->tdNormalized, a->tdSquare, a->advantage, a->advantageCenter, a->averageReward, a->actorStep, a->betaFloor,
-                              a->rewardMean, a->rewardVariance, a->aspiration, a->rewardSquare, a->rewardMagnitude, a->qCellTaken, a->qCellGain, a->qCellNoise,
+                              a->rewardMean, a->rewardVariance, a->aspiration, a->rewardSquare, a->qCellTaken, a->qCellGain, a->qCellNoise,
                               a->memoryTaken, a->memoryGain, a->memoryNoise };
     uint32_t bad = oak_nonfiniteRun(scalars, sizeof scalars / sizeof scalars[0], 1u, 1u);
 #define OAK_NONFINITE(field) bad += oak_nonfiniteRun((const float *)(const void *)a->field, (uint32_t)(sizeof a->field / (sizeof(float))), 1u, 1u)
