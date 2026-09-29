@@ -58,11 +58,12 @@ def chart(best, steps, window, rows, sps):
     height = 800 + 22 * len(AGENTS) + 130
     s = [f'<svg xmlns="http://www.w3.org/2000/svg" width="1250" height="{height}" viewBox="0 0 1250 {height}" role="img" aria-labelledby="title desc">',
          f'<title id="title">Every policy across the {len(axes)} environment categories</title>',
-         f'<desc id="desc">Mean normalized reward per step over the final {window:,} steps of the {steps:,}-step best recording, one axis per declared category with its environment count, the better of Random and the constant do-nothing policy at 0 and Oracle at 1. The radius is linear from the centre at {lo:.2f} to the Oracle ring. A category mean below the centre is drawn at the centre and labelled with its value. Outlines only: the polygon area is not the score. The overall ranking is the equal-weight mean over all {len(rows)} environments.</desc>',
+         f'<desc id="desc">Mean normalized reward per step over the final {window:,} steps of the {steps:,}-step best recording, one axis per declared category with its environment count, the better of Random and the constant do-nothing policy at 0 and Oracle at 1. The radius is linear from the centre at {lo:.2f} to the Oracle ring. A category mean below the centre breaks the outline of its policy at that axis and is printed under the axis label. Outlines only: the polygon area is not the score. The overall ranking is the equal-weight mean over all {len(rows)} environments.</desc>',
          f'<rect width="1250" height="{height}" fill="#ffffff"/>', '<g font-family="Arial, Helvetica, sans-serif" fill="#243044">']
 
-    def text(x, y, t, size=18, fill="#243044", anchor="start", weight="400"):
-        s.append(f'<text x="{x:.1f}" y="{y:.1f}" font-size="{size}" fill="{fill}" text-anchor="{anchor}" font-weight="{weight}">{t}</text>')
+    def text(x, y, t, size=18, fill="#243044", anchor="start", weight="400", halo=False):
+        ring = ' stroke="#ffffff" stroke-width="4" stroke-linejoin="round" paint-order="stroke"' if halo else ""
+        s.append(f'<text x="{x:.1f}" y="{y:.1f}" font-size="{size}" fill="{fill}" text-anchor="{anchor}" font-weight="{weight}"{ring}>{t}</text>')
 
     def mark(agent, x, y):
         c = COLORS[agent]
@@ -86,52 +87,69 @@ def chart(best, steps, window, rows, sps):
     def xy(i, value):
         return cx + radius(value) * math.cos(angles[i]), cy + radius(value) * math.sin(angles[i])
 
-    def points(agent):
-        return " ".join(f"{x:.2f},{y:.2f}" for i, (_, _, means) in enumerate(axes) for x, y in [xy(i, means[agent])])
+    def level(value):
+        return " ".join(f"{x:.2f},{y:.2f}" for i in range(len(axes)) for x, y in [xy(i, value)])
+
+    def outline(agent):
+        values = [means[agent] for _, _, means in axes]
+        if all(v >= lo for v in values):
+            return "M " + " L ".join(f"{x:.2f} {y:.2f}" for i, v in enumerate(values) for x, y in [xy(i, v)]) + " Z"
+        first = next(i for i, v in enumerate(values) if v < lo)
+        order = [(first + 1 + j) % len(values) for j in range(len(values))]
+        path, pen = [], False
+        for i in order:
+            if values[i] < lo:
+                pen = False
+                continue
+            x, y = xy(i, values[i])
+            path.append(f"{'L' if pen else 'M'} {x:.2f} {y:.2f}")
+            pen = True
+        return " ".join(path)
 
     text(54, 55, "Policy comparison", 30, weight="600")
-    text(54, 86, f"Mean normalized reward per step · {len(rows)} environments · best recording {best[:9]}", 17, fill="#637084")
-    for value in (0.25, 0.5, 0.75):
-        s.append(f'<circle cx="{cx}" cy="{cy}" r="{radius(value):.1f}" fill="none" stroke="#cbd2dc" stroke-width="1" stroke-dasharray="2 4"/>')
-    s.append(f'<circle cx="{cx}" cy="{cy}" r="{radius(0.0):.1f}" fill="none" stroke="#5f5e5a" stroke-width="2" stroke-dasharray="3 5"/>')
+    text(54, 86, f"Mean normalized reward per step \u00b7 {len(rows)} environments \u00b7 best recording {best[:9]}", 17, fill="#637084")
     for i in range(len(axes)):
         x, y = xy(i, hi)
         s.append(f'<path d="M {cx} {cy} L {x:.2f} {y:.2f}" stroke="#d0d6df" stroke-width="1"/>')
+    grid = [v for v in (-0.75, -0.5, -0.25, 0.25, 0.5, 0.75) if v > lo]
+    for value in grid:
+        s.append(f'<polygon points="{level(value)}" fill="none" stroke="#d3d1c7" stroke-width="1"/>')
+    s.append(f'<polygon points="{level(0.0)}" fill="none" stroke="#5f5e5a" stroke-width="1.5"/>')
     style = {"Oracle": ("2.5", ' stroke-dasharray="9 6"'), "Random": ("2", ' stroke-dasharray="2 4"'), "Constant": ("2", ' stroke-dasharray="7 4"'), "PPO": ("3", ""), "OaK": ("3.5", "")}
     for agent in ("Oracle", "Random", "Constant", "PPO", "OaK"):
         width, dash = style[agent]
-        s.append(f'<polygon points="{points(agent)}" fill="none" stroke="{COLORS[agent]}" stroke-width="{width}"{dash} stroke-linejoin="round"/>')
-        for i, (_, _, means) in enumerate(axes):
-            mark(agent, *xy(i, means[agent]))
-            if means[agent] < lo:
-                text(cx + 34 * math.cos(angles[i]), cy + 34 * math.sin(angles[i]) + 5, f"{means[agent]:.2f}".replace("-", "\u2212"), 13, fill=COLORS[agent], anchor="middle", weight="600")
-    for value in (0.0, 0.25, 0.5, 0.75, 1.0):
-        text(cx + radius(value) - 2, cy + 21, f"{value:g}".replace("-", "−"), 13, fill="#647084", anchor="middle")
-    text(cx - 8, cy + 22, f"{lo:.2f}".replace("-", "\u2212"), 12, fill="#647084", anchor="end")
-    between = math.pi / len(axes)
-    text(cx + (radius(0.0) + 6) * math.cos(between), cy + (radius(0.0) + 6) * math.sin(between) + 4, "Floor", 12, fill="#5f5e5a", weight="600")
-    text(cx + (radius(1.0) + 6) * math.cos(between), cy + (radius(1.0) + 6) * math.sin(between) + 4, "Oracle", 12, fill=COLORS["Oracle"], weight="600")
+        s.append(f'<path d="{outline(agent)}" fill="none" stroke="{COLORS[agent]}" stroke-width="{width}"{dash} stroke-linejoin="round"/>')
+        for i, (name, _, means) in enumerate(axes):
+            if means[agent] >= lo:
+                mark(agent, *xy(i, means[agent]))
+    wedge = angles[0] + math.pi / len(axes)
+    for value in [lo] + grid + [0.0, 1.0]:
+        r = radius(value) + 4
+        name = "Floor 0" if value == 0.0 else "Oracle 1" if value == 1.0 else f"{value:g}"
+        text(cx + r * math.cos(wedge) + 4, cy + r * math.sin(wedge) + 4, name.replace("-", "\u2212"), 12, fill="#5f5e5a" if value == 0.0 else COLORS["Oracle"] if value == 1.0 else "#8a8f98", weight="600" if value in (0.0, 1.0) else "400", halo=True)
     for i, (name, count, means) in enumerate(axes):
         x, y = cx + (R + 40) * math.cos(angles[i]), cy + (R + 40) * math.sin(angles[i])
         anchor = "start" if math.cos(angles[i]) > 0.35 else "end" if math.cos(angles[i]) < -0.35 else "middle"
         text(x, y, name, 20, anchor=anchor)
         text(x, y + 21, f"n = {count}", 14, fill="#687489", anchor=anchor)
+        for k, agent in enumerate(agent for agent in AGENTS if means[agent] < lo):
+            text(x, y + 40 + 17 * k, f"{agent} {means[agent]:.2f}, below the chart".replace("-", "\u2212"), 13, fill=COLORS[agent], anchor=anchor, weight="600")
     top = max([1.0] + [v for v in overall.values() if math.isfinite(v)])
     bottom = min([0.0] + [v for v in overall.values() if math.isfinite(v)])
     zero = 900 + 280 * (-bottom) / (top - bottom)
     text(900, 222, "Overall ranking", 24, weight="600")
     text(900, 248, f"equal weight over all {len(rows)} environments", 15, fill="#637084")
     for j, agent in enumerate(ranking):
-        y = 290 + j * 56
+        y = 290 + j * 66
         mark(agent, 906, y - 6)
         text(920, y, f"{j + 1}. {agent}", 20, fill=COLORS[agent], weight="600")
         text(1180, y, f"{overall[agent]:.3f}".replace("-", "−"), 20, anchor="end")
         left, right = sorted((zero, zero + 280 * overall[agent] / (top - bottom)))
-        s.append(f'<rect x="{left:.2f}" y="{y + 12}" width="{max(right - left, 1.0):.2f}" height="13" fill="{COLORS[agent]}"/>')
-        text(1180, y - 22, f"{sps[agent]:,.0f} steps/s", 13, fill="#637084", anchor="end")
-    s.append(f'<path d="M {zero:.2f} 296 V {290 + 56 * len(ranking) - 20}" stroke="#5f5e5a" stroke-width="1"/>')
-    text(900, 290 + 56 * len(ranking) + 4, "steps per second; baselines", 15, fill="#637084")
-    text(900, 290 + 56 * len(ranking) + 24, "lane-weighted over their recordings", 15, fill="#637084")
+        s.append(f'<rect x="{left:.2f}" y="{y + 27}" width="{max(right - left, 1.0):.2f}" height="13" fill="{COLORS[agent]}"/>')
+        text(920, y + 19, f"{sps[agent]:,.0f} steps/s", 13, fill="#637084")
+    s.append(f'<path d="M {zero:.2f} 313 V {290 + 66 * (len(ranking) - 1) + 44}" stroke="#5f5e5a" stroke-width="1"/>')
+    text(900, 290 + 66 * len(ranking) + 10, "steps per second; baselines", 15, fill="#637084")
+    text(900, 290 + 66 * len(ranking) + 30, "lane-weighted over their recordings", 15, fill="#637084")
     text(54, 745, "Axis scores", 17, weight="600")
     columns = [330 + i * 750 / (len(axes) - 1) for i in range(len(axes))]
     for i, (name, _, _) in enumerate(axes):
@@ -148,7 +166,7 @@ def chart(best, steps, window, rows, sps):
         text(columns[i], base, f"{ahead[name]} of {count}", 15, anchor="middle", fill="#637084")
     text(54, base + 45, f"Equal weight per environment · outlines, not areas · floor = max(Random, Constant) = 0 · Oracle = 1 · final {window:,} of {steps:,} steps", 15, fill="#637084")
     off = [f"{agent} on {name} at {means[agent]:.2f}".replace("-", "\u2212") for name, _, means in axes for agent in AGENTS if means[agent] < lo]
-    text(54, base + 67, f"Linear radius from {lo:.2f} at the centre".replace("-", "\u2212") + (f"; below the centre and drawn at it with its value: {', '.join(off)}." if off else "."), 15, fill="#637084")
+    text(54, base + 67, f"Linear radius from {lo:.2f} at the centre".replace("-", "\u2212") + (f"; below the chart, so their outlines break at that axis: {', '.join(off)}." if off else "."), 15, fill="#637084")
     s.append("</g></svg>")
     CHART.write_text("\n".join(s) + "\n")
 
