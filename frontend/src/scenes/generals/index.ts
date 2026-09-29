@@ -8,7 +8,7 @@ import { TOKENS } from '@kit/tokens';
 import type { FrameUpdate, LegendSpec, SceneContext, SceneFactory, ScenePost } from '@kit/types';
 import {
   CAPITAL, CITY, GEN_CURSOR_X, GEN_CURSOR_Y, GW, JUMP_KEY, NOBODY, PEAK, STEP_X, STEP_Y,
-  armyOf, cellX, cellY, checkWindow, generalsShape, heeded, keyOf, orderOf, ownerOf, sightOf, terrainOf, type GeneralsShape, type Order,
+  armyOf, cellX, cellY, checkPatch, generalsShape, heeded, keyOf, orderOf, ownerOf, patchCell, sightOf, terrainOf, type GeneralsShape, type Order,
 } from '@sim/envs/generals';
 import type { EnvFrame, GridCell } from '@sim/types';
 import { formatCount, formatSigned } from '../../format';
@@ -38,7 +38,7 @@ class GeneralsScene extends Stage2DScene {
   readonly controlHz = 16;
   protected readonly stageName = 'generals';
 
-  private shape: GeneralsShape = { side: 1, players: 2, cities: 0, substeps: 1, turn: 1, round: 1 };
+  private shape: GeneralsShape = { side: 1, players: 2, cities: 0, substeps: 1, turn: 1, round: 1, reach: 0, codes: [] };
   private grid: GridSize = { w: 1, h: 1 };
   private numerals: Numerals | null = null;
   private board: Board | null = null;
@@ -133,12 +133,12 @@ class GeneralsScene extends Stage2DScene {
           if (kind !== 0) terrain.set(this.at.x - 0.34, 0.05, this.at.z + 0.34, kind === CAPITAL ? 0.12 : 0.08, kind === PEAK ? 0x8a857c : kind === CITY ? 0xffffff : TOKENS.celebrationGold);
           if (!sight[i]) fog.set(this.at.x + 0.34, 0.05, this.at.z + 0.34, 0.06, 0x2a3346);
         }
-        const window = kit.marks('window', 5), cursor = now.words[GW.CURSOR]!;
-        for (let i = 0; i < 5; i++) {
-          const u = i < 3 ? cellX(cursor) : cellX(cursor) + 2 * i - 7, v = i === 1 ? cellY(cursor) - 1 : i === 2 ? cellY(cursor) + 1 : cellY(cursor);
+        const span = 2 * this.shape.reach + 1, patch = kit.marks('patch', span * span), cursor = now.words[GW.CURSOR]!, cell: GridCell = { x: 0, y: 0 };
+        for (let i = 0; i < span * span; i++) {
+          const { x: u, y: v } = patchCell(cursor, this.shape.reach, i, cell);
           if (u < 0 || v < 0 || u >= side || v >= side) continue;
           cellToWorldVec(u, v, this.grid, this.at);
-          window.set(this.at.x + 0.34, 0.06, this.at.z - 0.34, 0.07, TOKENS.uiCyan);
+          patch.set(this.at.x + 0.34, 0.06, this.at.z - 0.34, 0.07, TOKENS.uiCyan);
         }
         const order = orderOf(now.words), arrow = kit.curve('order', 5, ACCENT);
         if (!order) return;
@@ -230,7 +230,7 @@ class GeneralsScene extends Stage2DScene {
     this.paint(board.uniforms.former, formerSeat);
     this.paint(this.panel!.palette, seat);
     sightOf(now.view, side, seat, this.sightNow);
-    checkWindow(now, side, this.sightNow);
+    checkPatch(now, this.shape, this.sightNow);
     sightOf(was.view, side, formerSeat, this.sightWas);
     const nowData = board.now.image.data as Float32Array, wasData = board.was.image.data as Float32Array, wipe = board.wipe.image.data as Float32Array;
     let fallen = -1, victim = NOBODY, victor = NOBODY;

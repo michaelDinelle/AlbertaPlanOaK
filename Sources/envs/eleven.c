@@ -22,7 +22,7 @@ enum { ELE_SLOTS = 24, ELE_TEAM = 12, ELE_NONE = 255 };
 enum { ELE_NORMAL, ELE_KICKOFF, ELE_GOALKICK, ELE_FREEKICK, ELE_CORNER, ELE_THROWIN, ELE_PENALTY };
 enum { ELE_GROUND, ELE_LOFT, ELE_SHOT, ELE_THROW };
 enum { ELE_QUIET, ELE_GOAL_FOR, ELE_GOAL_AGAINST, ELE_OUT, ELE_KEPT, ELE_LOST, ELE_DEAD };
-enum { TAG_NOISE = 1, TAG_KICK, TAG_TOUCH, TAG_TACKLE, TAG_TOSS, TAG_AUTO };
+enum { TAG_NOISE = 1, TAG_KICK, TAG_TOUCH, TAG_TACKLE, TAG_TOSS, TAG_AUTO, TAG_ORACLE = 256 };
 
 static const float ELE_DT = 1.0f / 60.0f, ELE_RUN = 7.0f, ELE_SPRINT = 9.0f, ELE_DRIBBLE = 0.85f, ELE_ACCEL = 6.0f, ELE_DIVE_ACCEL = 25.0f, ELE_DIVE_SPEED = 8.0f;
 static const float ELE_AIR = 0.99667222f, ELE_ROLL = 0.99004983f, ELE_AIR_RATE = 0.2f, ELE_ROLL_RATE = 0.6f, ELE_GRAVITY = 9.81f, ELE_BOUNCE = 0.55f, ELE_SKID = 0.85f;
@@ -57,7 +57,7 @@ typedef struct { _Alignas(16) float winRate[LEAGUE_MEMBERS]; float theta[LEAGUE_
 
 typedef struct { eleWorld world; uint32_t pending, game; } eleOracle;
 
-typedef struct { const elevenKnobs *k; eleWorld *w; const float *theta[2]; uint32_t seed, n, groups, shape, cycle; float sigma; } eleCtx;
+typedef struct { const elevenKnobs *k; eleWorld *w; const float *theta[2]; uint32_t seed, n, groups, shape, cycle, bank; float sigma; } eleCtx;
 
 static eleWorld *ele_world(uint32_t *extra) { return (eleWorld *)((uintptr_t)(extra + 4) & ~(uintptr_t)15u); }
 static const eleWorld *ele_worldAt(const uint32_t *extra) { return (const eleWorld *)((uintptr_t)(extra + 4) & ~(uintptr_t)15u); }
@@ -93,6 +93,7 @@ static inline __attribute__((always_inline)) void ele_bind(eleCtx *c, const elev
     c->k = k;
     c->w = w;
     c->seed = seed;
+    c->bank = 0u;
     c->n = k->perSide;
     c->groups = (k->perSide + 3u) / 4u;
     c->shape = k->perSide == 2u ? 0u : k->perSide == 3u ? 1u : 2u;
@@ -102,7 +103,7 @@ static inline __attribute__((always_inline)) void ele_bind(eleCtx *c, const elev
     c->theta[1] = k->league ? g->theta + w->member * ELE_THETA : ELEVEN_THETA;
 }
 
-static u4 ele_draw(const eleCtx *c, uint32_t tag, uint32_t p) { return philox4x32(c->seed, ENV_RNG_STREAM, c->w->game, c->w->clock, tag, p); }
+static u4 ele_draw(const eleCtx *c, uint32_t tag, uint32_t p) { return philox4x32(c->seed, ENV_RNG_STREAM, c->w->game, c->w->clock, tag | c->bank, p); }
 
 static inline uint32_t ele_nearest(const eleCtx *c, uint32_t team, float px, float py, int field, float *d2) {
     const eleWorld *w = c->w;
@@ -427,14 +428,17 @@ static __attribute__((noinline)) void ele_begin(eleCtx *c, uint32_t game) {
     ele_kickoff(c, w->kickoff);
 }
 
+static inline __attribute__((always_inline)) void ele_noise(const eleCtx *c, uint32_t tick) {
+    for (uint32_t b = 0u; b < (ele_groups(c) + 1u) / 2u; b++) {
+        u44 r = philox4(c->seed, ENV_RNG_STREAM, (lane4)c->w->game, (lane4)tick, (lane4){ 0u, 1u, 2u, 3u } + 4u * b, (lane4)(TAG_NOISE | c->bank));
+        memcpy(c->w->noise + 16u * b, &r, sizeof r);
+    }
+}
+
 static inline __attribute__((always_inline)) void ele_tick(eleCtx *c) {
     eleWorld *w = c->w;
     uint32_t tick = w->clock / c->k->slices;
-    if (tick % (c->cycle / c->k->slices) == 0u)
-        for (uint32_t b = 0u; b < (ele_groups(c) + 1u) / 2u; b++) {
-            u44 r = philox4(c->seed, ENV_RNG_STREAM, (lane4)w->game, (lane4)tick, (lane4){ 0u, 1u, 2u, 3u } + 4u * b, (lane4)TAG_NOISE);
-            memcpy(w->noise + 16u * b, &r, sizeof r);
-        }
+    if (tick % (c->cycle / c->k->slices) == 0u) ele_noise(c, tick);
     if (!c->k->drill) {
         uint32_t holder = w->owner == ELE_NONE ? 2u : ele_teamOf(w->owner);
         if (holder != 0u) ele_pair(c, 0u);
@@ -1137,6 +1141,7 @@ static uint32_t ele_rollout(const eleCtx *real, eleWorld *scratch, const float *
     memcpy(scratch, real->w, sizeof *scratch);
     eleCtx c = *real;
     c.w = scratch;
+    ele_noise(&c, scratch->clock / c.k->slices);
     for (uint32_t n = 0u; n < horizon; n++) {
         if (scratch->clock + 1u >= edge || (!real->k->drill && scratch->clock + 1u == half)) return ELE_QUIET;
         uint32_t event = ele_advance(&c, n ? idle : first);
@@ -1249,6 +1254,7 @@ static inline __attribute__((always_inline)) void ele_think(const elevenKnobs *k
     eleOracle *o = ele_oracleOf(extra);
     eleCtx c;
     ele_bind(&c, k, w, ele_league(extra), seed);
+    c.bank = TAG_ORACLE;
     uint32_t a = w->active;
     for (uint32_t d = 0u; d < OAK_ENV_ACT_MAX; d++) ctrl[d] = 0.0f;
     if (w->clock < w->busy[a]) return;

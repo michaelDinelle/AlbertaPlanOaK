@@ -11,8 +11,8 @@ import type { FrameUpdate, LegendSpec, SceneContext, SceneFactory, ScenePost } f
 import {
   ACT_NEXT, ACT_USE, AWAKE, CORRIDOR, DOOR, DW_BLIND, DW_COLD, DW_CONFUSED, DW_DEEPEST, DW_DEPTH, DW_EVENT, DW_FIRE, DW_FOOD, DW_GOLD, DW_HP, DW_LEVEL, DW_MAGNITUDE, DW_POISON,
   DW_RATIONS, DW_RUN, DW_SLOT, DW_STAIRS, DW_TURN, DW_X, DW_XP, DW_Y, EFFECTS, effectOf, EV_BUMP, EV_DESCEND, EV_EAT, EV_GOLD, EV_HIT, EV_HURT, EV_KILL, EV_MISS, EV_NONE,
-  EV_POTION, EV_QUAFF, EV_RATION, EV_REST, EV_RUN, EV_SICK, EV_STARVE, EV_WIN, floorKey, GOLD, GUARD, itemsOf, monstersOf, most, POTION, potions, RATION, SIDE, STAIRS,
-  STEP_X, STEP_Y, terrainAt, turned, WALL, type Item, type Monster,
+  EV_POTION, EV_QUAFF, EV_RATION, EV_REST, EV_RUN, EV_SICK, EV_STARVE, EV_WIN, floorKey, GLYPH_MONSTER, GLYPH_UNSEEN, GOLD, GUARD, itemsOf, monstersOf, most, open, POTION,
+  potions, RATION, REACH, SIDE, SPAN, STAIRS, STEP_X, STEP_Y, terrainAt, turned, WALL, type Item, type Monster,
 } from '@sim/envs/dungeon';
 import type { EnvFrame, GridCell } from '@sim/types';
 import { constantList, parameter } from '../../data/envs';
@@ -93,6 +93,7 @@ class DungeonScene extends Stage2DScene {
   private boss = 14;
   private guardian = 0;
   private kinds: Kind[] = [];
+  private glyphs: number[] = [];
   private board: Board | null = null;
   private readonly time = uniform(0);
   private readonly owned: THREE.Mesh[] = [];
@@ -154,6 +155,7 @@ class DungeonScene extends Stage2DScene {
     this.guardian = parameter(env, 'guardian');
     const hp = constantList(env, 'DUNGEON_HP'), attack = constantList(env, 'DUNGEON_ATTACK'), defence = constantList(env, 'DUNGEON_DEFENCE'), speed = constantList(env, 'DUNGEON_SPEED');
     const damage = constantList(env, 'DUNGEON_DAMAGE'), behaviour = constantList(env, 'DUNGEON_BEHAVIOUR');
+    this.glyphs = constantList(env, 'DUNGEON_GLYPH');
     const low = Math.log(Math.min(...hp)), high = Math.log(Math.max(...hp)), plain = damage.flatMap((d, t) => (d === 0 ? [t] : []));
     this.kinds = hp.map((life, t) => {
       const b = behaviour[t]!, d = damage[t]!;
@@ -926,18 +928,14 @@ class DungeonScene extends Stage2DScene {
       if (r.x < -50) return;
       for (const [px, pz] of [[r.x, r.y], [r.z, r.y], [r.z, r.w], [r.x, r.w], [r.x, r.y]] as const) curve.point(px - HALF, y + 0.01, pz - HALF);
     });
-    const hx = snap.words[DW_X]!, hy = snap.words[DW_Y]!, obs = snap.obs;
-    const vector = (name: string, ox: number, oy: number, tint: number) => {
-      const curve = kit.curve(name, 2, tint);
-      if (ox === 0 && oy === 0) return;
-      world(hx, hy, this.scratch);
-      world(hx + ox * 8, hy + oy * 8, this.other);
-      curve.point(this.scratch.x, y + 0.02, this.scratch.y);
-      curve.point(this.other.x, y + 0.02, this.other.y);
-    };
-    vector('seenMonster', obs[12]!, obs[13]!, 0xff6a5a);
-    vector('seenStairs', obs[14]!, obs[15]!, GOLDEN);
-    vector('seenItem', obs[16]!, obs[17]!, 0x9ee04e);
+    const hx = snap.words[DW_X]!, hy = snap.words[DW_Y]!, patch = kit.marks('patch', SPAN * SPAN);
+    for (let i = 0; i < SPAN * SPAN; i++) {
+      const glyph = this.glyphs.indexOf(snap.obs[i]!);
+      if (glyph < 0 || glyph === GLYPH_UNSEEN) continue;
+      world(hx + (i % SPAN) - REACH, hy + Math.floor(i / SPAN) - REACH, this.scratch);
+      const tint = glyph >= GLYPH_MONSTER ? 0xff6a5a : glyph > STAIRS ? 0x9ee04e : glyph === STAIRS ? GOLDEN : open(glyph) ? TOKENS.uiCyan : 0x5e6a80;
+      patch.set(this.scratch.x, y + 0.02, this.scratch.y, glyph > STAIRS ? 0.14 : 0.06, tint);
+    }
   }
 }
 

@@ -1,5 +1,5 @@
 import * as THREE from 'three/webgpu';
-import { abs, atan, clamp, exp, float, floor, fract, instancedDynamicBufferAttribute, length, max, min, mix, normalize, positionWorld, select, smoothstep, step, uniform, uv, vec2, vec3 } from 'three/tsl';
+import { abs, clamp, exp, float, floor, instancedDynamicBufferAttribute, length, max, min, mix, normalize, positionWorld, select, smoothstep, step, uniform, uv, vec2, vec3 } from 'three/tsl';
 import type { GroundTruthOptions } from '@kit/debug';
 import { cellToWorldVec, type GridSize } from '@kit/grid';
 import { instancedMesh } from '@kit/instances';
@@ -11,11 +11,11 @@ import { TOKENS } from '@kit/tokens';
 import type { FrameUpdate, LegendSpec, SceneContext, SceneFactory, ScenePost } from '@kit/types';
 import { countEvents, lastEvent } from '@sim/events';
 import {
-  C4_AGENT, C4_CELLS, C4_COLUMNS, C4_CURSOR_SLOT, C4_DRAWN, C4_DROP, C4_LEFT, C4_LOST, C4_RIVAL, C4_ROWS, C4_WON,
-  c4Action, c4Cursor, c4Game, c4Height, c4LastColumn, c4LastWho, c4Member, c4Owner, c4Result, c4Slot, c4Think,
+  C4_AGENT, C4_CELLS, C4_COLUMNS, C4_DRAWN, C4_LOST, C4_PLAY, C4_PROPOSED_SLOT, C4_RIVAL, C4_ROWS, C4_WON,
+  c4Action, c4AgentColumn, c4Discs, c4Game, c4Height, c4Member, c4Observed, c4Offered, c4Owner, c4Proposed, c4Result, c4RivalColumn, c4Shown, c4Slot,
 } from '@sim/envs/connect4';
 import type { EnvFrame, GridCell } from '@sim/types';
-import { constant, parameter } from '../../data/envs';
+import { parameter } from '../../data/envs';
 import { formatCount, formatSigned } from '../../format';
 
 type N<T extends string> = THREE.Node<T>;
@@ -39,15 +39,15 @@ const STACK_T = 0.13;
 const WALL = 0.1;
 const SHELF = 0.08;
 const DRAIN = C4_ROWS + 1;
-const RING_R = 0.64;
-const RING_SPRITE = 1.8;
 const LAMPS = 16;
 const CHIPS = 2 * C4_CELLS + 1;
 const WAIT = 0.34;
+const GHOST = 0.42;
+const DROP = 0.4;
+const REPLY = 0.6;
 const RIVAL = 0xe5413b;
 const BLUE = 0x2156d8;
 const GOLD = TOKENS.celebrationGold;
-const BLOCKED = TOKENS.failureBlue;
 const OPPONENTS = ['random', 'greedy', 'search', 'league'] as const;
 const DIRECTIONS = [[1, 0], [0, 1], [1, 1], [1, -1]] as const;
 
@@ -62,6 +62,7 @@ interface Finish { board: Uint8Array; column: number; row: number; who: number; 
 interface Strike { mesh: THREE.Mesh; from: THREE.Vector2; to: THREE.Vector2; tint: THREE.Color; alpha: { value: number } }
 interface Lamp { mesh: THREE.Mesh; tint: THREE.Color }
 interface Falling { column: number; row: number; who: number; fall: number; x: number }
+interface Ghost { column: number; row: number; alpha: number }
 
 function readBoard(words: ArrayLike<number>, out: Uint8Array): Uint8Array {
   for (let column = 0; column < C4_COLUMNS; column++) for (let row = 0; row < C4_ROWS; row++) out[c4Slot(column, row)] = c4Owner(words, column, row);
@@ -83,14 +84,35 @@ function fours(board: Uint8Array, column: number, row: number): number[][] {
 }
 
 function finishOf(before: EnvFrame, end: EnvFrame): Finish {
-  const column = c4LastColumn(end.words), who = c4LastWho(end.words), result = c4Result(end.words);
-  if (column < 0 || result === 0) throw new Error(`Connect Four step ${end.step} ends a game without recording its final move`);
-  const board = readBoard(before.words, new Uint8Array(C4_CELLS)), row = c4Height(before.words, column);
-  if (row >= C4_ROWS) throw new Error(`Connect Four step ${end.step} drops into full column ${column + 1}`);
-  board[c4Slot(column, row)] = who;
+  const agent = c4AgentColumn(end.words), rival = c4RivalColumn(end.words), result = c4Result(end.words);
+  if (agent < 0 || result === 0) throw new Error(`Connect Four step ${end.step} ends a game without recording its final move`);
+  const board = readBoard(before.words, new Uint8Array(C4_CELLS));
+  let column = agent, who = C4_AGENT;
+  const land = (into: number, owner: number) => {
+    const row = c4Height(before.words, into) + (owner === C4_RIVAL && into === agent ? 1 : 0);
+    if (row >= C4_ROWS) throw new Error(`Connect Four step ${end.step} drops into full column ${into + 1}`);
+    board[c4Slot(into, row)] = owner;
+    return row;
+  };
+  let row = land(agent, C4_AGENT);
+  if (rival >= 0) {
+    column = rival;
+    who = C4_RIVAL;
+    row = land(rival, C4_RIVAL);
+  }
   const runs = result === C4_DRAWN ? [] : fours(board, column, row);
   if (result !== C4_DRAWN && runs.length === 0) throw new Error(`Connect Four step ${end.step} records a win without four in a row`);
   return { board, column, row, who, result, line: [...new Set(runs.flat())], runs };
+}
+
+function markedOf(words: ArrayLike<number>): number {
+  if (c4Discs(words) === 1) {
+    for (let column = 0; column < C4_COLUMNS; column++) if (c4Owner(words, column, 0) === C4_RIVAL) return c4Slot(column, 0);
+  }
+  const rival = c4RivalColumn(words);
+  if (c4Result(words) !== 0 || rival < 0) return -1;
+  const height = c4Height(words, rival);
+  return height > 0 && c4Owner(words, rival, height - 1) === C4_RIVAL ? c4Slot(rival, height - 1) : -1;
 }
 
 const composite = (color: N<'vec3'>, face: N<'float'>, under: N<'float'>) => {
@@ -106,13 +128,10 @@ class ConnectFourScene extends Stage2DScene {
   private accent = 0xffd84d;
   private rival: string = OPPONENTS[0];
   private league = false;
-  private budget = 0;
-  private perStep = 0;
   private readonly disposables: { dispose(): void }[] = [];
 
   private chips: THREE.InstancedMesh | null = null;
   private chipLook: THREE.InstancedBufferAttribute | null = null;
-  private chipSeen: THREE.InstancedBufferAttribute | null = null;
   private hands: THREE.InstancedMesh | null = null;
   private handLook: THREE.InstancedBufferAttribute | null = null;
   private stacks: THREE.InstancedMesh | null = null;
@@ -122,26 +141,20 @@ class ConnectFourScene extends Stage2DScene {
   private strikes: Strike[] = [];
   private shaftLamp: Lamp | null = null;
   private seatLamp: Lamp | null = null;
-  private flash: THREE.Mesh | null = null;
-  private readonly ringProgress = uniform(0);
-  private readonly ringAlpha = uniform(0);
-  private readonly flashPower = uniform(0);
 
   private readonly live = new Uint8Array(C4_CELLS);
-  private readonly tops = new Int8Array(C4_COLUMNS);
   private readonly finishes = new Map<number, Finish>();
   private celebrated = -1;
   private readonly matrix = new THREE.Matrix4();
   private readonly at = new THREE.Vector3();
-  private readonly ledger = { think: 0, cursor: 0, action: '—', reward: 0, member: 0, discs: 0, step: 0, game: 0 };
+  private readonly ledger = { proposed: 0, shown: 0, offered: 0, action: '—', reward: 0, member: 0, discs: 0, step: 0, game: 0 };
 
   private legendFor(): LegendSpec {
     return {
       title: 'CONNECT FOUR',
       rows: [
-        { key: 'turn', label: 'turn', tint: this.accent, value: () => this.turnText() },
+        { key: 'proposal', label: 'proposal', tint: this.accent, value: () => `column ${this.ledger.proposed + 1} · ${this.ledger.shown + 1} of ${this.ledger.offered}` },
         { key: 'rival', label: 'rival', tint: RIVAL, value: () => (this.league ? `league member ${this.ledger.member + 1}` : this.rival) },
-        { key: 'cursor', label: 'cursor', tint: this.accent, value: () => `column ${this.ledger.cursor + 1}` },
         { key: 'action', label: 'action', tint: 0xdcf4ff, value: () => this.ledger.action },
         { key: 'reward', label: 'reward', tint: GOLD, value: () => formatSigned(this.ledger.reward) },
         { key: 'last', label: 'last game', tint: GOLD, value: () => this.lastGame() },
@@ -149,13 +162,6 @@ class ConnectFourScene extends Stage2DScene {
       note: () => this.record(),
       bar: () => this.ledger.discs / C4_CELLS,
     };
-  }
-
-  private turnText(): string {
-    const think = this.ledger.think;
-    if (think === 0) return 'agent';
-    if (this.budget === 0) return 'rival';
-    return `rival thinking · ${formatCount(this.perStep * (think - 1))} of ${formatCount(this.budget)} nodes`;
   }
 
   private lastGame(): string {
@@ -181,8 +187,6 @@ class ConnectFourScene extends Stage2DScene {
     this.accent = this.accentOf(ctx);
     this.rival = name;
     this.league = name === 'league';
-    this.budget = parameter(env, 'nodesPerMove');
-    this.perStep = constant(env, 'CONNECT4_NODES_PER_STEP');
     this.legend = this.legendFor();
     return new THREE.Box2(new THREE.Vector2(-SEAT_X - 1.05, HOVER_Z - 0.75), new THREE.Vector2(SEAT_X + 1.05, TABLE + 1.1));
   }
@@ -196,45 +200,27 @@ class ConnectFourScene extends Stage2DScene {
   }
 
   protected override overlayOptions(): GroundTruthOptions {
-    const cursor: GridCell = { x: 0, y: 0 }, spot = new THREE.Vector3();
+    const proposal: GridCell = { x: 0, y: 0 };
     return {
       agentCell: (state) => {
-        cursor.x = state.pose[C4_CURSOR_SLOT]!;
-        cursor.y = -HOVER_ROWS;
-        return cursor;
+        proposal.x = state.pose[C4_PROPOSED_SLOT]!;
+        proposal.y = -HOVER_ROWS;
+        return proposal;
       },
       debug: (frame, kit) => {
         const step = frame.state.step, now = frame.frameAt(step), words = now.words, obs = now.observations;
-        const discs = kit.marks('discs', C4_CELLS), ghosts = kit.marks('finished', C4_CELLS), tops = kit.marks('observed', C4_COLUMNS), last = kit.marks('last', 1);
-        const skyline = kit.curve('skyline', 2 * C4_COLUMNS, 0xffffff), search = kit.curve('search', 65, RIVAL);
+        const discs = kit.marks('discs', C4_CELLS), ghosts = kit.marks('finished', C4_CELLS), seen = kit.marks('observed', C4_CELLS), last = kit.marks('last', 1);
         for (let column = 0; column < C4_COLUMNS; column++) for (let row = 0; row < C4_ROWS; row++) {
-          const owner = c4Owner(words, column, row);
+          const owner = c4Owner(words, column, row), value = obs[c4Observed(column, row)]!;
           if (owner) discs.set(columnX(column), 0.05, rowZ(row), 0.14, owner === C4_AGENT ? TOKENS.uiCyan : TOKENS.cueMagenta);
+          if (value !== 0) seen.set(columnX(column), 0.05, rowZ(row), 0.07, value > 0 ? TOKENS.uiCyan : TOKENS.cueMagenta);
         }
-        for (let column = 0; column < C4_COLUMNS; column++) {
-          const height = Math.round(obs[column]! * C4_ROWS), top = obs[C4_COLUMNS + column]!, z = rowZ(height) + 0.5;
-          skyline.point(columnX(column) - 0.5, 0.05, z);
-          skyline.point(columnX(column) + 0.5, 0.05, z);
-          if (top !== 0) tops.set(columnX(column), 0.05, z, 0.07, top > 0 ? TOKENS.uiCyan : TOKENS.cueMagenta);
-        }
-        const lastColumn = c4LastColumn(words);
-        if (!now.done && lastColumn >= 0) {
-          const height = c4Height(words, lastColumn);
-          if (height > 0) last.set(columnX(lastColumn), 0.05, rowZ(height - 1), 0.24, GOLD);
-        }
+        const marked = markedOf(words);
+        if (marked >= 0) last.set(columnX(Math.floor(marked / C4_ROWS)), 0.05, rowZ(marked % C4_ROWS), 0.24, GOLD);
         const finish = now.done ? this.finishAt(frame, step) : null;
         if (finish) for (let slot = 0; slot < C4_CELLS; slot++) {
           if (!finish.board[slot]) continue;
           ghosts.set(columnX(Math.floor(slot / C4_ROWS)), 0.05, rowZ(slot % C4_ROWS), finish.line.includes(slot) ? 0.2 : 0.07, finish.line.includes(slot) ? GOLD : 0x8fa6c4);
-        }
-        const think = c4Think(words);
-        if (this.budget > 0 && think > 0) {
-          const progress = clamp01(this.perStep * (think - 1) / this.budget);
-          for (let k = 0; k <= 64; k++) {
-            const angle = 2 * Math.PI * progress * k / 64;
-            spot.set(SEAT_X + Math.sin(angle) * (RING_R + 0.2), 0.05, HOVER_Z - Math.cos(angle) * (RING_R + 0.2));
-            search.point(spot.x, spot.y, spot.z);
-          }
         }
       },
     };
@@ -264,14 +250,13 @@ class ConnectFourScene extends Stage2DScene {
     this.disposables.push(room.geometry, room.material as THREE.Material, face.geometry, face.material as THREE.Material);
 
     this.chipLook = new THREE.InstancedBufferAttribute(new Float32Array(CHIPS * 4), 4).setUsage(THREE.DynamicDrawUsage);
-    this.chipSeen = new THREE.InstancedBufferAttribute(new Float32Array(CHIPS), 1).setUsage(THREE.DynamicDrawUsage);
-    const chips = instancedMesh(flat(SPRITE, SPRITE), this.discMaterial(light, this.chipLook, this.chipSeen, true), CHIPS);
+    const chips = instancedMesh(flat(SPRITE, SPRITE), this.discMaterial(light, this.chipLook, true), CHIPS);
     chips.renderOrder = 1;
     chips.frustumCulled = false;
     this.chips = chips;
 
     this.handLook = new THREE.InstancedBufferAttribute(new Float32Array(2 * 4), 4).setUsage(THREE.DynamicDrawUsage);
-    const hands = instancedMesh(flat(SPRITE, SPRITE), this.discMaterial(light, this.handLook, null, false), 2);
+    const hands = instancedMesh(flat(SPRITE, SPRITE), this.discMaterial(light, this.handLook, false), 2);
     hands.renderOrder = 4;
     hands.frustumCulled = false;
     this.hands = hands;
@@ -282,14 +267,8 @@ class ConnectFourScene extends Stage2DScene {
     stacks.frustumCulled = false;
     this.stacks = stacks;
 
-    const ring = new THREE.Mesh(flat(RING_SPRITE, RING_SPRITE), this.ringMaterial());
-    ring.position.set(SEAT_X, 0, HOVER_Z);
-    ring.renderOrder = 5;
-    const flash = new THREE.Mesh(flat(1, 0.5), this.flashMaterial());
-    flash.renderOrder = 5;
-    this.flash = flash;
-    this.scene.add(chips, hands, stacks, ring, flash);
-    for (const mesh of [chips, hands, stacks, ring, flash]) this.disposables.push(mesh.geometry, mesh.material as THREE.Material);
+    this.scene.add(chips, hands, stacks);
+    for (const mesh of [chips, hands, stacks]) this.disposables.push(mesh.geometry, mesh.material as THREE.Material);
     this.disposables.push(chips, hands, stacks);
 
     const wallGeometry = flat(WALL, C4_ROWS / 2 + 0.1 - TOP);
@@ -399,8 +378,8 @@ class ConnectFourScene extends Stage2DScene {
     return material;
   }
 
-  private discMaterial(light: Light2D, look: THREE.InstancedBufferAttribute, seen: THREE.InstancedBufferAttribute | null, board: boolean): THREE.MeshBasicNodeMaterial {
-    const v = instancedDynamicBufferAttribute(look, 'vec4') as N<'vec4'>, observed = seen ? instancedDynamicBufferAttribute(seen, 'float') as N<'float'> : float(1);
+  private discMaterial(light: Light2D, look: THREE.InstancedBufferAttribute, board: boolean): THREE.MeshBasicNodeMaterial {
+    const v = instancedDynamicBufferAttribute(look, 'vec4') as N<'vec4'>;
     const material = new THREE.MeshBasicNodeMaterial({ transparent: true, depthTest: false, depthWrite: false, fog: false });
     const t = uv().sub(0.5).mul(SPRITE), r = length(t), rival = v.x, glow = v.y, alpha = v.z, marker = v.w;
     const body = mix(rgb(this.accent), rgb(RIVAL), rival);
@@ -413,8 +392,7 @@ class ConnectFourScene extends Stage2DScene {
     const sheen = exp(length(t.sub(vec2(-0.12, 0.15))).mul(-10)).mul(0.2);
     const ring = exp(abs(r.sub(0.2)).mul(-55)).mul(marker);
     const crest = smoothstep(0.24, 0.36, r).mul(smoothstep(HOLE, 0.35, r)).mul(max(dir.y, 0).pow(1.5));
-    const exposure = mix(float(0.8), float(1), observed).add(crest.mul(observed).mul(0.3));
-    const albedo = mix(body.mul(shade).mul(exposure).add(vec3(sheen)), vec3(1, 0.97, 0.9), ring.mul(0.85));
+    const albedo = mix(body.mul(shade).mul(crest.mul(0.3).add(1)).add(vec3(sheen)), vec3(1, 0.97, 0.9), ring.mul(0.85));
     const glowing = albedo.mul(glow.mul(0.5).add(1));
     const shaded = board ? min(light.lit(albedo), albedo.mul(1.5)) : albedo.mul(alpha.mul(0.36).add(0.6));
     material.colorNode = mix(shaded, glowing, clamp(glow.mul(4), 0, 1));
@@ -437,32 +415,6 @@ class ConnectFourScene extends Stage2DScene {
     return material;
   }
 
-  private ringMaterial(): THREE.MeshBasicNodeMaterial {
-    const material = new THREE.MeshBasicNodeMaterial({ transparent: true, depthTest: false, depthWrite: false, fog: false });
-    const t = uv().sub(0.5).mul(RING_SPRITE), r = length(t);
-    const turn = fract(atan(t.x, t.y).div(2 * Math.PI).add(1));
-    const band = abs(r.sub(RING_R));
-    const track = coverage(band.sub(0.028));
-    const filled = step(turn, this.ringProgress);
-    const head = this.ringProgress.mul(2 * Math.PI);
-    const tip = vec2(head.sin(), head.cos()).mul(RING_R);
-    const spark = exp(length(t.sub(tip)).mul(-14)).mul(step(0.002, this.ringProgress));
-    const ticks = coverage(abs(fract(turn.mul(16)).sub(0.5)).mul(-1).add(0.5).mul(RING_R * 2 * Math.PI / 16).sub(0.018)).mul(coverage(abs(r.sub(RING_R + 0.12)).sub(0.035)));
-    const glow = exp(band.mul(-26)).mul(filled).mul(0.35);
-    const intensity = track.mul(filled.mul(0.72).add(0.28)).add(glow).add(spark.mul(0.9)).add(ticks.mul(0.35));
-    material.colorNode = mix(rgb(0x6b2a2a), rgb(0xff6a4f).mul(1.7), clamp(filled.add(spark), 0, 1));
-    material.opacityNode = clamp(intensity, 0, 1).mul(this.ringAlpha);
-    return material;
-  }
-
-  private flashMaterial(): THREE.MeshBasicNodeMaterial {
-    const material = new THREE.MeshBasicNodeMaterial({ transparent: true, depthTest: false, depthWrite: false, fog: false, blending: THREE.AdditiveBlending });
-    const t = uv().sub(0.5).mul(vec2(1, 0.5)), d = sdBox(t, vec2(0.36, 0.05), 0.05);
-    material.colorNode = mix(rgb(BLOCKED), vec3(1), 0.35).mul(2.6);
-    material.opacityNode = min(coverage(d).add(exp(max(d, 0).mul(-16)).mul(0.8)), 1).mul(this.flashPower);
-    return material;
-  }
-
   protected override drop(): void {
     for (const item of this.disposables) item.dispose();
     this.disposables.length = 0;
@@ -481,90 +433,67 @@ class ConnectFourScene extends Stage2DScene {
     this.ledgerOf(frame, now);
 
     readBoard(now.words, this.live);
-    for (let column = 0; column < C4_COLUMNS; column++) this.tops[column] = Math.round(now.observations[column]! * C4_ROWS) - 1;
-    const cursor = c4Cursor(now.words), think = c4Think(now.words), thinking = think > 0 && this.budget > 0;
-    let hoverX = columnX(cursor), hoverZ = HOVER_Z, hoverAlpha = think === 0 ? 1 : WAIT, seatAlpha = think === 0 ? WAIT : 1, beam = think === 0 ? 1 : 0, beamX = hoverX;
-    let flash = 0, falling: Falling | null = null, line: Set<number> | null = null, lineGlow = 0, struck: Finish | null = null, strike = 0;
-    let ring = thinking ? this.searched(think) : 0, ringAlpha = thinking ? 1 : 0;
+    const proposed = c4Proposed(now.words), settle = now.done && ahead ? smoothstep01((a - 0.6) / 0.4) : 1;
+    let hoverX = columnX(proposed), hoverAlpha = settle, seatAlpha = WAIT, seatGlow = 0, beam = settle, beamX = hoverX;
+    let ghost: Ghost | null = { column: proposed, row: c4Height(now.words, proposed), alpha: GHOST * settle };
+    let line: Set<number> | null = null, lineGlow = 0, struck: Finish | null = null, strike = 0;
+    const falls: Falling[] = [];
 
-    if (ahead) {
-      const after = c4Think(ahead.words), moved = ahead.done || (think === 0 ? after > 0 : after === 0);
-      const opens = ahead.done && after === 0, rests = ahead.done && after > 0;
-      if (moved) {
-        const column = c4LastColumn(ahead.words), who = c4LastWho(ahead.words), row = c4Height(now.words, column);
-        if (column < 0 || row >= C4_ROWS || who !== (think === 0 ? C4_AGENT : C4_RIVAL)) throw new Error(`Connect Four step ${ahead.step} records a move the board cannot hold`);
-        if (who === C4_AGENT) {
-          const arrive = smoothstep01((a - 0.55) / 0.45);
-          falling = { column, row, who, fall: a, x: columnX(column) };
-          hoverX = columnX(c4Cursor(ahead.words));
-          hoverAlpha = (opens ? 1 : WAIT) * arrive;
-          beam = a < 0.55 ? 1 - a / 0.55 : opens ? arrive : 0;
-          beamX = a < 0.55 ? columnX(column) : hoverX;
-          seatAlpha = lerp(WAIT, opens ? WAIT : 1, a);
-          if (this.budget > 0 && !ahead.done) ringAlpha = a;
-        } else {
-          falling = { column, row, who, fall: clamp01((a - 0.4) / 0.6), x: lerp(SEAT_X, columnX(column), smoothstep01(a / 0.4)) };
-          seatAlpha = (rests ? 1 : WAIT) * smoothstep01((a - 0.5) / 0.5);
-          hoverX = lerp(columnX(cursor), columnX(c4Cursor(ahead.words)), smoothstep01(a));
-          hoverAlpha = lerp(WAIT, rests ? WAIT : 1, a);
-          beam = rests ? 0 : a;
-          beamX = hoverX;
-          if (this.budget > 0) {
-            ring = lerp(ring, this.searched(think + 1), a);
-            ringAlpha = 1 - smoothstep01((a - 0.3) / 0.5);
-          }
-        }
-        const finish = ahead.done ? this.finishAt(frame, t + 1) : null;
-        if (finish) {
-          line = new Set(finish.line);
-          lineGlow = strike = smoothstep01((a - 0.6) / 0.4);
-          struck = finish;
-        }
-      } else if (think === 0) {
-        const action = c4Action(ahead.actions), aim = c4Cursor(ahead.words), swing = Math.sin(Math.PI * a);
-        if (action === C4_DROP) {
-          flash = swing;
-          hoverZ += 0.2 * swing;
-        } else if (aim !== cursor) hoverX = beamX = lerp(columnX(cursor), columnX(aim), smoothstep01(a));
-        else hoverX += (action === C4_LEFT ? -1 : 1) * 0.14 * swing;
-      } else if (this.budget > 0) ring = lerp(ring, this.searched(after), a);
+    if (ahead && (ahead.done || c4Discs(ahead.words) !== c4Discs(now.words))) {
+      const column = c4AgentColumn(ahead.words), row = c4Height(now.words, column), rival = c4RivalColumn(ahead.words);
+      if (column !== proposed || row >= C4_ROWS) throw new Error(`Connect Four step ${ahead.step} drops a disc the proposal did not offer`);
+      const fall = clamp01(a / DROP), next = c4Proposed(ahead.words), arrive = smoothstep01((a - 0.8) / 0.2);
+      falls.push({ column, row, who: C4_AGENT, fall, x: columnX(column) });
+      if (rival >= 0) {
+        const lands = c4Height(now.words, rival) + (rival === column ? 1 : 0);
+        if (lands >= C4_ROWS) throw new Error(`Connect Four step ${ahead.step} records a reply into full column ${rival + 1}`);
+        falls.push({ column: rival, row: lands, who: C4_RIVAL, fall: clamp01((a - REPLY) / (1 - REPLY)), x: lerp(SEAT_X, columnX(rival), smoothstep01((a - DROP) / (REPLY - DROP))) });
+        seatAlpha = a < DROP ? WAIT : WAIT * smoothstep01((a - 0.85) / 0.15);
+        seatGlow = Math.sin(Math.PI * clamp01((a - DROP) / (1 - DROP)));
+      }
+      hoverX = columnX(next);
+      hoverAlpha = arrive;
+      beam = a < DROP ? 1 - fall : arrive;
+      beamX = a < DROP ? columnX(column) : hoverX;
+      if (a < DROP) ghost.alpha *= 1 - fall;
+      else ghost = ahead.done ? null : { column: next, row: c4Height(ahead.words, next), alpha: GHOST * arrive };
+      const finish = ahead.done ? this.finishAt(frame, t + 1) : null;
+      if (finish) {
+        const landed = rival >= 0 ? 0.85 : DROP;
+        line = new Set(finish.line);
+        lineGlow = strike = smoothstep01((a - landed) / (1 - landed));
+        struck = finish;
+      }
+    } else if (ahead) {
+      const next = c4Proposed(ahead.words);
+      hoverX = beamX = lerp(columnX(proposed), columnX(next), smoothstep01(a));
+      if (a >= 0.5) ghost = { column: next, row: c4Height(ahead.words, next), alpha: GHOST * settle };
+      ghost.alpha *= Math.abs(1 - 2 * a);
     }
 
-    const lastColumn = c4LastColumn(now.words), top = lastColumn >= 0 && c4Result(now.words) === 0 ? c4Height(now.words, lastColumn) - 1 : -1;
-    const marked = top >= 0 && this.live[c4Slot(lastColumn, top)] === c4LastWho(now.words) ? c4Slot(lastColumn, top) : -1;
     const ended = now.done ? this.finishAt(frame, t) : null;
     if (ended) {
       struck = ended;
       strike = 1 - smoothstep01(a / 0.7);
     }
-    this.drawChips(falling, line, lineGlow, marked, ended, a);
+    this.drawChips(falls, line, lineGlow, markedOf(now.words), ended, ghost, settle, a);
     this.drawStrikes(struck, strike);
-    this.drawHands(hoverX, hoverZ, hoverAlpha, seatAlpha, ringAlpha);
-    this.drawStacks(falling);
-    this.ringProgress.value = ring;
-    this.ringAlpha.value = ringAlpha;
-    this.flashPower.value = flash;
-    this.flash!.position.set(columnX(cursor), 0, TOP + 0.14);
+    this.drawHands(hoverX, hoverAlpha, seatAlpha, seatGlow);
+    this.drawStacks(falls);
     const shaft = this.shaftLamp!, seat = this.seatLamp!;
     shaft.mesh.visible = seat.mesh.visible = true;
     shaft.mesh.position.set(beamX, 0, -C4_ROWS / 2 - 0.1);
     shaft.tint.set(this.accent).multiplyScalar(9 * beam);
-    seat.tint.set(RIVAL).multiplyScalar(1.2 + 4 * ring * ringAlpha + 2.5 * Math.max(0, seatAlpha - WAIT));
+    seat.tint.set(RIVAL).multiplyScalar(1.2 + 3 * seatGlow);
   }
 
-  private searched(think: number): number {
-    return clamp01(this.perStep * (think - 1) / this.budget);
-  }
-
-  private drawChips(falling: Falling | null, line: Set<number> | null, lineGlow: number, marked: number, finish: Finish | null, a: number): void {
+  private drawChips(falls: Falling[], line: Set<number> | null, lineGlow: number, marked: number, finish: Finish | null, ghost: Ghost | null, settle: number, a: number): void {
     const chips = this.chips!, look = this.chipLook!;
     let i = 0, shelf = 0, lamp = 0;
-    const seen = this.chipSeen!;
-    const place = (x: number, z: number, who: number, glow: number, alpha: number, marker: number, observed: number, occlude: boolean) => {
+    const place = (x: number, z: number, who: number, glow: number, alpha: number, marker: number, occlude: boolean) => {
       this.matrix.makeTranslation(x, 0, z);
       chips.setMatrixAt(i, this.matrix);
       look.setXYZW(i, who === C4_RIVAL ? 1 : 0, glow, alpha, marker);
-      seen.setX(i, observed);
       i++;
       if (occlude) {
         const mesh = this.shelves[shelf++]!;
@@ -578,28 +507,26 @@ class ConnectFourScene extends Stage2DScene {
         item.tint.set(who === C4_RIVAL ? RIVAL : this.accent).multiplyScalar(1.8 * glow);
       }
     };
-    const covered = falling ? smoothstep01((falling.fall - 0.7) / 0.3) : 0;
+    const fading = falls.length ? 1 - a : 1;
     for (let column = 0; column < C4_COLUMNS; column++) for (let row = 0; row < C4_ROWS; row++) {
       const slot = c4Slot(column, row), who = this.live[slot]!;
-      if (!who) continue;
-      const top = row === this.tops[column] ? (falling?.column === column ? 1 - covered : 1) : 0;
-      place(columnX(column), rowZ(row), who, line?.has(slot) ? lineGlow : 0, 1, slot === marked ? 1 - (falling ? a : 0) : 0, top, true);
+      if (who) place(columnX(column), rowZ(row), who, line?.has(slot) ? lineGlow : 0, settle, slot === marked ? fading : 0, true);
     }
-    if (falling) {
-      const s = falling.fall, z = lerp(HOVER_Z, rowZ(falling.row), s * s);
-      place(falling.x, z, falling.who, line?.has(c4Slot(falling.column, falling.row)) ? lineGlow : 0, 1, covered, 1, true);
+    if (ghost && ghost.alpha > 0.01 && ghost.row < C4_ROWS) place(columnX(ghost.column), rowZ(ghost.row), C4_AGENT, 0, ghost.alpha, 0, false);
+    for (const falling of falls) {
+      const s = falling.fall, z = lerp(HOVER_Z, rowZ(falling.row), s * s), landing = falling.who === C4_RIVAL ? smoothstep01((s - 0.7) / 0.3) : 0;
+      place(falling.x, z, falling.who, line?.has(c4Slot(falling.column, falling.row)) ? lineGlow : 0, 1, landing, true);
     }
     if (finish) {
       const drop = DRAIN * a * a, fade = 1 - smoothstep01((a - 0.75) / 0.25);
       for (let slot = 0; slot < C4_CELLS; slot++) {
         const who = finish.board[slot]!;
-        if (who) place(columnX(Math.floor(slot / C4_ROWS)), rowZ(slot % C4_ROWS) + drop, who, finish.line.includes(slot) ? 1 - 0.6 * a : 0, fade, 0, 0, false);
+        if (who) place(columnX(Math.floor(slot / C4_ROWS)), rowZ(slot % C4_ROWS) + drop, who, finish.line.includes(slot) ? 1 - 0.6 * a : 0, fade, 0, false);
       }
     }
     chips.count = i;
     chips.instanceMatrix.needsUpdate = true;
     look.needsUpdate = true;
-    seen.needsUpdate = true;
     for (; shelf < this.shelves.length; shelf++) this.shelves[shelf]!.visible = false;
     for (; lamp < LAMPS; lamp++) this.lamps[lamp]!.mesh.visible = false;
   }
@@ -617,23 +544,23 @@ class ConnectFourScene extends Stage2DScene {
     });
   }
 
-  private drawHands(hoverX: number, hoverZ: number, hoverAlpha: number, seatAlpha: number, ringAlpha: number): void {
+  private drawHands(hoverX: number, hoverAlpha: number, seatAlpha: number, seatGlow: number): void {
     const hands = this.hands!, look = this.handLook!;
-    this.matrix.makeTranslation(hoverX, 0, hoverZ);
+    this.matrix.makeTranslation(hoverX, 0, HOVER_Z);
     hands.setMatrixAt(0, this.matrix);
     look.setXYZW(0, 0, 0, hoverAlpha, 0);
     this.matrix.makeTranslation(SEAT_X, 0, HOVER_Z);
     hands.setMatrixAt(1, this.matrix);
-    look.setXYZW(1, 1, 0.12 * ringAlpha, seatAlpha, 0);
+    look.setXYZW(1, 1, 0.12 * seatGlow, seatAlpha, 0);
     hands.instanceMatrix.needsUpdate = true;
     look.needsUpdate = true;
   }
 
-  private drawStacks(falling: Falling | null): void {
+  private drawStacks(falls: Falling[]): void {
     const stacks = this.stacks!, look = this.stackLook!, placed = [0, 0];
     let i = 0;
     for (const who of this.live) if (who) placed[who === C4_AGENT ? 0 : 1]!++;
-    if (falling) placed[falling.who === C4_AGENT ? 0 : 1]!++;
+    for (const falling of falls) placed[falling.who === C4_AGENT ? 0 : 1]!++;
     for (let side = 0; side < 2; side++) for (let k = 0; k < HALF - placed[side]! - 1; k++) {
       this.matrix.makeTranslation(side ? SEAT_X : -SEAT_X, 0, TABLE - (k + 0.5) * STACK_T);
       stacks.setMatrixAt(i, this.matrix);
@@ -648,21 +575,19 @@ class ConnectFourScene extends Stage2DScene {
   private ledgerOf(frame: FrameUpdate, now: EnvFrame): void {
     const words = now.words, ledger = this.ledger;
     ledger.step = now.step;
-    ledger.think = c4Think(words);
-    ledger.cursor = c4Cursor(words);
+    ledger.proposed = c4Proposed(words);
+    ledger.shown = c4Shown(words);
+    ledger.offered = c4Offered(words);
     ledger.member = c4Member(words);
     ledger.game = c4Game(words);
     ledger.reward = now.reward;
-    ledger.discs = 0;
-    for (let column = 0; column < C4_COLUMNS; column++) ledger.discs += c4Height(words, column);
+    ledger.discs = c4Discs(words);
     const before = now.step > 0 ? frame.frameAt(now.step - 1) : null;
     if (!before || before.step !== now.step - 1) ledger.action = '—';
-    else if (c4Think(before.words) > 0) ledger.action = 'waiting';
-    else {
-      const action = c4Action(now.actions), column = c4Cursor(before.words);
-      if (action === C4_DROP) ledger.action = `drop · column ${column + 1}${now.done || c4Think(words) > 0 ? '' : ' full'}`;
-      else ledger.action = `${action === C4_LEFT ? '← left' : 'right →'}${c4Cursor(words) === column ? ' · at edge' : ''}`;
-    }
+    else if (now.done || c4Discs(before.words) !== ledger.discs) {
+      const rival = c4RivalColumn(words);
+      ledger.action = `${c4Action(now.actions) === C4_PLAY ? 'play' : 'clock plays'} · column ${c4Proposed(before.words) + 1}${rival >= 0 ? ` · reply ${rival + 1}` : ''}`;
+    } else ledger.action = `next → column ${ledger.proposed + 1}`;
   }
 
   private celebrate(frame: FrameUpdate, pool: Stage2D['pool'], time: number): void {

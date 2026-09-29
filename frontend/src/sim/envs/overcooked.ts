@@ -16,7 +16,7 @@ export const OC_PARTNER_X = 2;
 export const OC_PARTNER_Y = 3;
 
 const ACTIONS = 6;
-const OBS = 17;
+const OBS = 19;
 const SIDE = 16;
 const COUNTER_SLOTS = 32;
 const POT_SLOTS = 2;
@@ -56,7 +56,7 @@ export function tileAt(kitchen: Kitchen, x: number, y: number): number {
 }
 
 export function kitchenOf(env: EnvDescriptor): Kitchen {
-  if (env.words !== OW.COUNT || env.view !== 0 || env.obs !== OBS || env.actions !== ACTIONS || env.box !== 0) throw new Error(`${env.envId} records ${env.words} words, ${env.view} view words, ${env.obs} observations and ${env.actions} actions where the kitchen reads ${OW.COUNT}, 0, ${OBS} and ${ACTIONS}`);
+  if (env.words !== OW.COUNT || env.view !== 0 || env.actions !== ACTIONS || env.box !== 0) throw new Error(`${env.envId} records ${env.words} words, ${env.view} view words and ${env.actions} actions where the kitchen reads ${OW.COUNT}, 0 and ${ACTIONS}`);
   const terrain = constantList(env, 'OVERCOOKED_TERRAIN'), at = parameter(env, 'terrain'), w = parameter(env, 'width'), h = parameter(env, 'height');
   if (w < 3 || h < 3 || w > SIDE || h > SIDE || at < 0 || at + w * h > terrain.length) throw new Error(`${env.envId} lays a ${w}x${h} kitchen at ${at} of ${terrain.length} terrain cells`);
   const tiles = Uint8Array.from(terrain.slice(at, at + w * h)), counters: number[] = [], pots: number[] = [];
@@ -66,6 +66,7 @@ export function kitchenOf(env: EnvDescriptor): Kitchen {
     if (code === TILE.POT) pots.push(cell);
   });
   if (counters.length > COUNTER_SLOTS || pots.length < 1 || pots.length > POT_SLOTS) throw new Error(`${env.envId} fits ${counters.length} counters and ${pots.length} pots where its words hold ${COUNTER_SLOTS} and ${POT_SLOTS}`);
+  if (env.obs !== OBS + counters.length) throw new Error(`${env.envId} records ${env.obs} observations where its ${counters.length} counters make ${OBS + counters.length}`);
   const start = (key: string) => {
     const x = parameter(env, `x${key}`), y = parameter(env, `y${key}`);
     if (x >= w || y >= h || tiles[y * w + x] !== TILE.FLOOR) throw new Error(`${env.envId} starts a chef at (${x}, ${y}) off the floor`);

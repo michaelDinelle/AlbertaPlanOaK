@@ -13,7 +13,8 @@ enum { RWARE_CLOCK, RWARE_AGENT };
 enum { RWARE_STRIDE = 16, RWARE_CELL = 511, RWARE_NONE = 511, RWARE_FACING = 9, RWARE_LOADED = 11, RWARE_AIM = 13, RWARE_STUCK = 22, RWARE_SCORE = 24 };
 enum { RWARE_CARRIED = 0x8000, RWARE_HEADER = 64, RWARE_PATIENCE = 3, RWARE_ROOM = 4, RWARE_CROWDED = 8, RWARE_BUSY = 4, RWARE_WANTED = 2 };
 enum { RWARE_DEAL, RWARE_REQUEST = 3, RWARE_WANDER = 5 };
-enum { RWARE_MAX_ROWS = 20, RWARE_MAX_CELLS = RWARE_MAX_ROWS * RWARE_STRIDE, RWARE_PITCH = RWARE_STRIDE + 2, RWARE_MARGIN = RWARE_PITCH + 1, RWARE_SLACK = 8 };
+enum { RWARE_TICK, RWARE_SELF, RWARE_PRESSED, RWARE_NOTES };
+enum { RWARE_MAX_ROWS = 20, RWARE_MAX_CELLS = RWARE_MAX_ROWS * RWARE_STRIDE, RWARE_PITCH = RWARE_STRIDE + 2, RWARE_MARGIN = RWARE_PITCH + 1, RWARE_SLACK = 8, RWARE_VIEW = (RWARE_MAX_ROWS + 2) * RWARE_PITCH + RWARE_SLACK };
 
 static const uint8_t RWARE_FACE[64] = { 0u, 0u, 0u, 0u, 1u, 3u, 3u, 2u, 3u, 1u, 2u, 3u, 1u, 1u, 2u, 2u, 2u, 3u, 1u, 3u, 1u, 3u, 1u, 2u, 2u, 1u, 1u, 3u, 1u, 1u, 1u, 2u,
                                         3u, 2u, 3u, 1u, 1u, 2u, 3u, 1u, 3u, 1u, 2u, 1u, 1u, 1u, 2u, 1u, 2u, 2u, 1u, 1u, 1u, 2u, 1u, 1u, 2u, 1u, 1u, 1u, 1u, 1u, 1u, 1u };
@@ -30,6 +31,8 @@ static uint32_t rware_queue(const rwareKnobs *k) { return RWARE_AGENT + k->agent
 static uint32_t rware_board(const rwareKnobs *k) { return rware_queue(k) + (k->requests + 1u) / 2u; }
 static uint32_t rware_goal(const rwareKnobs *k) { return (rware_height(k) - 1u) * RWARE_STRIDE + rware_width(k) / 2u - 1u; }
 static uint32_t rware_floorBytes(const rwareKnobs *k) { return (rware_height(k) + 2u) * RWARE_PITCH + RWARE_SLACK; }
+static uint32_t rware_floorWords(const rwareKnobs *k) { return (rware_floorBytes(k) + 3u) / 4u; }
+static uint32_t rware_boardWords(const rwareKnobs *k) { return (rware_height(k) + 1u) / 2u; }
 static uint64_t rware_block(const rwareKnobs *k) { uint64_t cells = rware_cells(k); return RWARE_HEADER + 2u * cells + 2u * cells * cells; }
 static const uint16_t *rware_parking(const uint8_t *chart) { return (const uint16_t *)(chart + RWARE_HEADER); }
 static const uint8_t *rware_reach(const rwareKnobs *k, const uint8_t *chart) { return chart + RWARE_HEADER + 2u * rware_cells(k); }
@@ -387,13 +390,13 @@ static __attribute__((noinline)) uint32_t rware_claim(const rwareKnobs *k, uint3
     return best;
 }
 
-static __attribute__((noinline)) uint32_t rware_vacancy(const rwareKnobs *k, const uint8_t *chart, const uint32_t *words, const uint8_t *floor, uint32_t cell, uint64_t shun) {
+static __attribute__((noinline)) uint32_t rware_vacancy(const rwareKnobs *k, const uint8_t *chart, const uint32_t *board, const uint8_t *floor, uint32_t cell) {
     const uint8_t *reach = rware_reach(k, chart);
     uint32_t best = RWARE_NONE, far = ~0u;
     for (uint32_t y = 0u; y < rware_height(k); y++)
-        for (uint32_t open = rware_home(k, y) & ~rware_row(words + rware_board(k), y); open; open &= open - 1u) {
+        for (uint32_t open = rware_home(k, y) & ~rware_row(board, y); open; open &= open - 1u) {
             uint32_t spot = y * RWARE_STRIDE + (uint32_t)__builtin_ctz(open);
-            uint32_t cost = reach[(size_t)spot * rware_cells(k) + cell] + RWARE_CROWDED * (rware_busy(floor, spot) | rware_among(shun, spot));
+            uint32_t cost = reach[(size_t)spot * rware_cells(k) + cell] + RWARE_CROWDED * rware_busy(floor, spot);
             if (cost < far) { far = cost; best = spot; }
         }
     return best;
@@ -416,7 +419,7 @@ static inline __attribute__((always_inline)) uint32_t rware_robot(const rwareKno
         if (rware_among(wanted, RWARE_CARRIED | j)) target = rware_dock(k, chart, floor, cell);
         else {
             if (rware_standing(words + rware_board(k), aim)) {
-                target = rware_vacancy(k, chart, words, floor, cell, ~0ull);
+                target = rware_vacancy(k, chart, words + rware_board(k), floor, cell);
                 words[RWARE_AGENT + j] = (a & ~((uint32_t)RWARE_NONE << RWARE_AIM)) | target << RWARE_AIM;
             }
             if (cell == target) return RWARE_TOGGLE;
@@ -550,7 +553,7 @@ uint64_t rware_shared(float *table) {
 
 uint32_t rware_extraWords(uint32_t instance, uint32_t steps) {
     (void)steps;
-    return (rware_floorBytes(&RWARE_KNOBS[instance]) + 3u) / 4u;
+    return rware_floorWords(&RWARE_KNOBS[instance]) + RWARE_NOTES + 3u * rware_boardWords(&RWARE_KNOBS[instance]) + rware_cells(&RWARE_KNOBS[instance]);
 }
 
 void rware_reset(uint32_t instance, uint32_t seed, uint32_t *words, uint32_t *extra, uint32_t steps) {
@@ -572,47 +575,141 @@ void rware_observe(uint32_t instance, uint32_t seed, const uint32_t *words, cons
     rware_obs(&RWARE_KNOBS[instance], words, (const uint8_t *)extra, obs);
 }
 
-static inline __attribute__((always_inline)) uint32_t rware_guide(const rwareKnobs *k, const uint8_t *chart, const uint32_t *words, const uint8_t *floor) {
-    uint32_t a = words[RWARE_AGENT], cell = a & RWARE_CELL, facing = a >> RWARE_FACING & 3u, cells = rware_cells(k);
-    uint64_t wanted = rware_wanted(k, words);
-    const uint8_t *reach = rware_reach(k, chart), *steer = rware_steer(k, chart);
-    if (a >> RWARE_LOADED & 1u) {
-        uint32_t target;
-        if (rware_among(wanted, RWARE_CARRIED)) target = rware_dock(k, chart, floor, cell);
-        else {
-            if (rware_homeCell(k, cell)) return RWARE_TOGGLE;
-            uint64_t shun = ~0ull;
-            for (uint32_t m = 1u; m < k->agents; m++) {
-                uint32_t b = words[RWARE_AGENT + m];
-                shun = (shun & ~(0xFFFFull << 16u * m)) | (uint64_t)(b >> RWARE_LOADED & 1u ? b >> RWARE_AIM & RWARE_NONE : RWARE_NONE) << 16u * m;
-            }
-            target = rware_vacancy(k, chart, words, floor, cell, shun);
-        }
-        return RWARE_FACE[rware_clear(steer[(size_t)target * cells + cell], cell, facing, floor) << 2 | facing];
+static void rware_mark(uint32_t *board, uint32_t cell, uint32_t bit) {
+    board[cell >> 5] = (board[cell >> 5] & ~(1u << (cell & 31u))) | bit << (cell & 31u);
+}
+
+static uint32_t rware_follows(uint32_t before, uint32_t pressed, uint32_t after) {
+    uint32_t cell = before & RWARE_CELL, facing = before >> RWARE_FACING & 3u, now = after & RWARE_CELL, turned = after >> RWARE_FACING & 3u;
+    uint32_t same = !((before ^ after) & ((uint32_t)RWARE_CELL | 3u << RWARE_FACING | 1u << RWARE_LOADED));
+    int dx, dy;
+    gridDelta(facing, &dx, &dy);
+    switch (pressed) {
+        case RWARE_NOOP + 1u: return same;
+        case RWARE_FORWARD + 1u: return same || (turned == facing && !((before ^ after) >> RWARE_LOADED & 1u) && now == cell + (uint32_t)(dy * RWARE_STRIDE + dx));
+        case RWARE_LEFT + 1u:
+        case RWARE_RIGHT + 1u: return now == cell && !((before ^ after) >> RWARE_LOADED & 1u) && turned == ((facing ^ facing >> 1) ^ (2u | (pressed == RWARE_RIGHT + 1u)));
+        case RWARE_TOGGLE + 1u: return now == cell && turned == facing;
+        default: return 0u;
     }
-    uint32_t best = RWARE_NONE, far = ~0u, left = rware_goal(k), right = left + 1u;
-    for (uint32_t s = 0u; s < k->requests; s++) {
-        uint32_t spot = rware_entry(words + rware_queue(k), s);
-        if (spot & RWARE_CARRIED) continue;
-        uint32_t mine = rware_effort(cell, spot, facing), trip = reach[(size_t)left * cells + spot], other = reach[(size_t)right * cells + spot], beaten = 0u;
-        for (uint32_t m = 1u; m < k->agents; m++) {
-            uint32_t b = words[RWARE_AGENT + m];
-            beaten |= !(b >> RWARE_LOADED & 1u) && (b >> RWARE_AIM & RWARE_NONE) == spot && rware_effort(b & RWARE_CELL, spot, b >> RWARE_FACING & 3u) < mine;
-        }
-        uint32_t cost = mine + 2u * (trip < other ? trip : other);
-        if (!beaten && cost < far) { far = cost; best = spot; }
+}
+
+static void rware_forget(const rwareKnobs *k, uint32_t *memory) {
+    uint32_t *standing = memory + RWARE_NOTES;
+    for (uint32_t i = 0u; i < 3u * rware_boardWords(k) + rware_cells(k); i++) standing[i] = 0u;
+    for (uint32_t y = 0u; y < rware_height(k); y++) rware_assign(standing, y, rware_home(k, y));
+}
+
+static void rware_glance(const rwareKnobs *k, uint32_t *memory, uint32_t cell, uint32_t loaded, const uint8_t *view) {
+    uint32_t boards = rware_boardWords(k), *standing = memory + RWARE_NOTES, *wanted = standing + boards, *avoid = wanted + boards, *stamp = avoid + boards;
+    for (uint32_t v = 0u; v < 9u; v++) {
+        uint32_t x = (cell & 15u) + v % 3u - 1u, y = (cell >> 4) + v / 3u - 1u, at = y * RWARE_STRIDE + x;
+        if (x >= rware_width(k) || y >= rware_height(k)) continue;
+        uint32_t code = view[rware_spot(at)], other = (uint32_t)(at != cell), shelf = code & 1u & (other | (loaded ^ 1u));
+        if (!other || code < RWARE_BUSY) rware_mark(avoid, at, 0u);
+        if (!rware_homeCell(k, at)) continue;
+        stamp[at] = memory[RWARE_TICK];
+        if (other && code >= RWARE_BUSY && shelf) continue;
+        rware_mark(standing, at, shelf);
+        rware_mark(wanted, at, shelf & code >> 1);
     }
-    if (best == cell) return RWARE_TOGGLE;
-    uint32_t good = rware_heading(cell, best == RWARE_NONE ? ((const uint16_t *)chart)[0] : best);
-    return RWARE_FACE[rware_clear(good, cell, facing, floor) << 2 | facing];
+}
+
+static void rware_recall(const rwareKnobs *k, uint32_t *memory, uint32_t cell, uint32_t loaded, const uint8_t *view) {
+    uint32_t boards = rware_boardWords(k), *standing = memory + RWARE_NOTES, *wanted = standing + boards, gaps = 0u;
+    rware_glance(k, memory, cell, loaded, view);
+    for (uint32_t y = 0u; y < rware_height(k); y++) gaps |= rware_home(k, y) & ~rware_row(standing, y);
+    if (gaps || !loaded) return;
+    for (uint32_t i = 0u; i < boards; i++) standing[i] = wanted[i];
+    rware_glance(k, memory, cell, loaded, view);
+}
+
+static uint32_t rware_fetch(const rwareKnobs *k, const uint8_t *chart, const uint32_t *memory, uint32_t cell) {
+    const uint8_t *reach = rware_reach(k, chart);
+    uint32_t boards = rware_boardWords(k), cells = rware_cells(k), left = rware_goal(k), best = RWARE_NONE, fresh = 0u, far = ~0u;
+    const uint32_t *wanted = memory + RWARE_NOTES + boards, *avoid = wanted + boards, *stamp = avoid + boards;
+    for (uint32_t y = 0u; y < rware_height(k); y++)
+        for (uint32_t open = rware_home(k, y) & rware_row(wanted, y) & ~rware_row(avoid, y); open; open &= open - 1u) {
+            uint32_t spot = y * RWARE_STRIDE + (uint32_t)__builtin_ctz(open), trip = reach[(size_t)left * cells + spot], other = reach[(size_t)(left + 1u) * cells + spot];
+            uint32_t cost = rware_span(cell, spot) + 2u * (trip < other ? trip : other);
+            if (stamp[spot] > fresh || (stamp[spot] == fresh && cost < far)) { fresh = stamp[spot]; far = cost; best = spot; }
+        }
+    return best;
+}
+
+static uint32_t rware_sweep(const rwareKnobs *k, const uint32_t *memory, uint32_t cell) {
+    uint32_t boards = rware_boardWords(k), best = RWARE_NONE, stale = ~0u, far = ~0u;
+    const uint32_t *avoid = memory + RWARE_NOTES + 2u * boards, *stamp = avoid + boards;
+    for (uint32_t y = 0u; y < rware_height(k); y++)
+        for (uint32_t open = rware_home(k, y) & ~rware_row(avoid, y); open; open &= open - 1u) {
+            uint32_t spot = y * RWARE_STRIDE + (uint32_t)__builtin_ctz(open), cost = rware_span(cell, spot);
+            if (stamp[spot] < stale || (stamp[spot] == stale && cost < far)) { stale = stamp[spot]; far = cost; best = spot; }
+        }
+    return best;
+}
+
+static uint32_t rware_haul(const rwareKnobs *k, const uint8_t *chart, const uint32_t *memory, const uint8_t *view, uint32_t cell) {
+    uint32_t boards = rware_boardWords(k), shut[RWARE_MAX_ROWS / 2u];
+    const uint32_t *standing = memory + RWARE_NOTES, *avoid = standing + 2u * boards;
+    if (view[rware_spot(cell)] & RWARE_WANTED) {
+        uint32_t left = rware_goal(k), target = rware_dock(k, chart, view, cell), other = 2u * left + 1u - target;
+        return target - left < 2u && rware_standing(avoid, target) && !rware_standing(avoid, other) ? other : target;
+    }
+    for (uint32_t i = 0u; i < boards; i++) shut[i] = standing[i] | avoid[i];
+    uint32_t target = rware_vacancy(k, chart, shut, view, cell);
+    if (target == RWARE_NONE) target = rware_sweep(k, memory, cell);
+    return target == RWARE_NONE ? rware_vacancy(k, chart, standing, view, cell) : target;
+}
+
+static uint32_t rware_aside(const rwareKnobs *k, const uint8_t *view, uint32_t cell, uint32_t loaded, uint32_t facing) {
+    uint32_t best = RWARE_NONE, far = ~0u;
+    for (uint32_t d = 0u; d < 4u; d++) {
+        int dx, dy;
+        gridDelta(d, &dx, &dy);
+        uint32_t x = (cell & 15u) + (uint32_t)dx, y = (cell >> 4) + (uint32_t)dy, spot = y * RWARE_STRIDE + x, turns = (d != facing) + (d == (facing ^ 1u));
+        if (x >= rware_width(k) || y >= rware_height(k) || view[rware_spot(spot)] >= RWARE_BUSY || (loaded & view[rware_spot(spot)]) || turns >= far) continue;
+        far = turns;
+        best = spot;
+    }
+    return best;
+}
+
+static inline __attribute__((always_inline)) uint32_t rware_guide(const rwareKnobs *k, const uint8_t *chart, const float *obs, uint32_t *memory) {
+    uint32_t cell = (uint32_t)obs[1] * RWARE_STRIDE + (uint32_t)obs[0], loaded = (uint32_t)obs[2], facing = (uint32_t)obs[3], boards = rware_boardWords(k);
+    uint32_t last = memory[RWARE_SELF], held = last >> RWARE_STUCK & 3u, self = cell | facing << RWARE_FACING | loaded << RWARE_LOADED, *avoid = memory + RWARE_NOTES + 2u * boards, target, act, side;
+    uint32_t stall = (last & RWARE_CELL) != cell ? 0u : held + (held < RWARE_PATIENCE && memory[RWARE_PRESSED] != RWARE_TOGGLE + 1u);
+    uint8_t view[RWARE_VIEW] = { 0u };
+    for (uint32_t v = 0u; v < 9u; v++) view[rware_spot(cell) - RWARE_MARGIN + v / 3u * RWARE_PITCH + v % 3u] = (uint8_t)obs[5u + v];
+    if (!rware_follows(last, memory[RWARE_PRESSED], self)) { rware_forget(k, memory); stall = 0u; }
+    else if ((last ^ self) >> RWARE_LOADED & 1u)
+        for (uint32_t i = 0u; i < boards; i++) avoid[i] = 0u;
+    if (stall > held && stall == RWARE_PATIENCE) rware_mark(avoid, last >> RWARE_AIM & RWARE_NONE, 1u);
+    memory[RWARE_TICK]++;
+    rware_recall(k, memory, cell, loaded, view);
+    if (loaded && rware_homeCell(k, cell) && !(view[rware_spot(cell)] & RWARE_WANTED)) { target = cell; act = RWARE_TOGGLE; }
+    else if (loaded) {
+        target = rware_haul(k, chart, memory, view, cell);
+        act = RWARE_FACE[rware_clear(rware_steer(k, chart)[(size_t)target * rware_cells(k) + cell], cell, facing, view) << 2 | facing];
+    } else {
+        target = rware_fetch(k, chart, memory, cell);
+        if (target == RWARE_NONE) target = rware_sweep(k, memory, cell);
+        if (target == RWARE_NONE) target = ((const uint16_t *)chart)[0];
+        act = target == cell ? RWARE_TOGGLE : RWARE_FACE[rware_clear(rware_heading(cell, target), cell, facing, view) << 2 | facing];
+    }
+    side = stall == RWARE_PATIENCE ? rware_aside(k, view, cell, loaded, facing) : RWARE_NONE;
+    if (side != RWARE_NONE) { target = side; act = RWARE_FACE[rware_heading(cell, side) << 2 | facing]; }
+    else if (stall == RWARE_PATIENCE && loaded && rware_homeCell(k, cell) && rware_aside(k, view, cell, 0u, facing) != RWARE_NONE) { target = cell; act = RWARE_TOGGLE; }
+    memory[RWARE_SELF] = self | target << RWARE_AIM | stall << RWARE_STUCK;
+    memory[RWARE_PRESSED] = act + 1u;
+    return act;
 }
 
 void rware_oracle(uint32_t instance, uint32_t seed, uint32_t step, const uint32_t *words, uint32_t *extra, const float *obs, float *ctrl, const float *shared) {
-    (void)seed; (void)step; (void)obs;
+    (void)seed; (void)step; (void)words;
     switch (instance) {
-        case 0u: ctrl[0] = (float)rware_guide(&RWARE_KNOBS[0], rware_chartOf(0u, shared), words, (const uint8_t *)extra); return;
-        case 1u: ctrl[0] = (float)rware_guide(&RWARE_KNOBS[1], rware_chartOf(1u, shared), words, (const uint8_t *)extra); return;
-        case 2u: ctrl[0] = (float)rware_guide(&RWARE_KNOBS[2], rware_chartOf(2u, shared), words, (const uint8_t *)extra); return;
+        case 0u: ctrl[0] = (float)rware_guide(&RWARE_KNOBS[0], rware_chartOf(0u, shared), obs, extra + rware_floorWords(&RWARE_KNOBS[0])); return;
+        case 1u: ctrl[0] = (float)rware_guide(&RWARE_KNOBS[1], rware_chartOf(1u, shared), obs, extra + rware_floorWords(&RWARE_KNOBS[1])); return;
+        case 2u: ctrl[0] = (float)rware_guide(&RWARE_KNOBS[2], rware_chartOf(2u, shared), obs, extra + rware_floorWords(&RWARE_KNOBS[2])); return;
         default: __builtin_trap();
     }
 }

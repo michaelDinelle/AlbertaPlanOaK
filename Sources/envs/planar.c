@@ -2242,7 +2242,7 @@ __attribute__((noinline)) static float planar_cheetah(const planarTable *P, uint
     planarForward buffer[2];
     for (int k = 0; k < PLANAR_SUBSTEPS; k++) {
         int outcome = planar_substep(P, grip, &s, &tau, &travel, &buffer[k & 1], &buffer[(k + 1) & 1], &pending, &bad, k == PLANAR_SUBSTEPS - 1);
-        torso = outcome & 1;
+        torso |= outcome & 1;
         cleared |= outcome >> 1;
     }
     if (pending) planar_warm(P, &buffer[(PLANAR_SUBSTEPS - 1) & 1], &s);

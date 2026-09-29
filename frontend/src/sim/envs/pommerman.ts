@@ -1,9 +1,10 @@
 import { constant, parameter, type EnvDescriptor } from '../../data/envs';
 import { NO_EVENTS, type EnvDecoder, type SimEvent } from '../types';
 
-const PW = { TICK: 0, GAME: 1, SEAT: 2, CYCLE: 3, PHASE: 4, ALIVE: 5, RESULT: 6, CELL: 7 } as const;
+const PW = { TICK: 0, GAME: 1, SEAT: 2, ALIVE: 3, RESULT: 4, CELL: 5 } as const;
 const PER_SEAT = 5;
-const OBSERVED = 18;
+const SELF = 4;
+const PER_OTHER = 3;
 const KEYS = 6;
 const CELL_BITS = 7;
 
@@ -19,8 +20,6 @@ export const WON = 1;
 export const LOST = 2;
 export const TIED = 3;
 
-export const OBS_OTHER = 15;
-
 export const STEP_X = [0, 0, 0, -1, 1, 0] as const;
 export const STEP_Y = [0, -1, 1, 0, 0, 0] as const;
 
@@ -31,7 +30,8 @@ export interface PomShape {
   cells: number;
   seats: number;
   slots: number;
-  phases: number;
+  sight: number;
+  others: number;
   team: boolean;
   fog: number;
   tickLimit: number;
@@ -47,20 +47,21 @@ export interface PomShape {
 }
 
 export interface PomBomb { cell: number; life: number; dir: number; owner: number; blast: number }
+export interface PomSighting { seat: number; code: number; dx: number; dy: number }
 
 export function pomShape(env: EnvDescriptor): PomShape {
   const side = parameter(env, 'side'), cells = side * side, seats = parameter(env, 'seats'), slots = (env.words - PW.CELL) / PER_SEAT, roster = (cells + 1) >> 1;
   if (!Number.isInteger(slots) || slots < seats) throw new Error(`${env.envId} records ${env.words} words, which do not hold ${seats} seats of ${PER_SEAT} words after ${PW.CELL}`);
   if (cells > 1 << CELL_BITS) throw new Error(`${env.envId} lays a ${side}-cell side past the ${CELL_BITS}-bit cells its bomb list packs`);
   if (env.view <= roster) throw new Error(`${env.envId} views ${env.view} words, too few for ${cells} cells and a bomb list`);
-  if (env.obs !== OBSERVED) throw new Error(`${env.envId} observes ${env.obs} values where a bomber senses ${OBSERVED}`);
+  const sight = constant(env, 'POMMERMAN_SIGHT'), span = 2 * sight + 1, others = span * span + SELF, observed = others + PER_OTHER * (seats - 1);
+  if (env.obs !== observed) throw new Error(`${env.envId} observes ${env.obs} values where a bomber senses ${observed}`);
   if (env.actions !== KEYS) throw new Error(`${env.envId} offers ${env.actions} actions where a bomber reads ${KEYS}`);
   if (seats !== 2 && seats !== 4) throw new Error(`${env.envId} seats ${seats} bombers`);
   const team = parameter(env, 'team') !== 0;
   if (team && seats !== 4) throw new Error(`${env.envId} plays teams with ${seats} seats`);
   return {
-    side, cells, seats, slots, team, roster,
-    phases: parameter(env, 'phases'),
+    side, cells, seats, slots, team, roster, sight, others,
     fog: parameter(env, 'fog'),
     tickLimit: parameter(env, 'tickLimit'),
     collapseStart: parameter(env, 'collapseStart'),
@@ -77,8 +78,6 @@ export function pomShape(env: EnvDescriptor): PomShape {
 export const tickOf = (words: ArrayLike<number>): number => words[PW.TICK]!;
 export const gameOf = (words: ArrayLike<number>): number => words[PW.GAME]!;
 export const seatOf = (words: ArrayLike<number>): number => words[PW.SEAT]!;
-export const cycleOf = (words: ArrayLike<number>): number => words[PW.CYCLE]!;
-export const phaseOf = (words: ArrayLike<number>): number => words[PW.PHASE]!;
 export const resultOf = (words: ArrayLike<number>): number => words[PW.RESULT]!;
 export const aliveOf = (words: ArrayLike<number>, seat: number): boolean => ((words[PW.ALIVE]! >>> seat) & 1) === 1;
 export const cellOf = (words: ArrayLike<number>, seat: number): number => words[PW.CELL + seat]!;
@@ -87,6 +86,16 @@ export const blastOf = (words: ArrayLike<number>, shape: PomShape, seat: number)
 export const kickOf = (words: ArrayLike<number>, shape: PomShape, seat: number): boolean => words[PW.CELL + 3 * shape.slots + seat]! !== 0;
 export const actOf = (words: ArrayLike<number>, shape: PomShape, seat: number): number => words[PW.CELL + 4 * shape.slots + seat]!;
 export const partnerOf = (shape: PomShape, seat: number): number => (shape.team ? (seat + 2) & 3 : -1);
+
+export function sightingsOf(observations: ArrayLike<number>, shape: PomShape, me: number): PomSighting[] {
+  const out: PomSighting[] = [];
+  for (let j = 1; j < shape.seats; j++) {
+    const at = shape.others + PER_OTHER * (j - 1), code = observations[at]!;
+    if (code === 0) continue;
+    out.push({ seat: (me + j) % shape.seats, code, dx: Math.round(observations[at + 1]! * shape.side), dy: Math.round(observations[at + 2]! * shape.side) });
+  }
+  return out;
+}
 
 export const fieldOf = (view: ArrayLike<number>, cell: number): number => (view[cell >> 1]! >>> ((cell & 1) << 4)) & 0xffff;
 export const terrainOf = (field: number): number => field & 3;
@@ -128,7 +137,7 @@ export const pommermanDecoder: EnvDecoder = {
   },
   geometry({ environment }, initial) {
     const shape = pomShape(environment), words = initial.words, full = (1 << shape.seats) - 1;
-    if (tickOf(words) !== 0 || phaseOf(words) !== 0 || words[PW.ALIVE] !== full) throw new Error(`${environment.envId} opens at tick ${tickOf(words)}, phase ${phaseOf(words)}, alive mask ${words[PW.ALIVE]}`);
+    if (tickOf(words) !== 0 || words[PW.ALIVE] !== full) throw new Error(`${environment.envId} opens at tick ${tickOf(words)}, alive mask ${words[PW.ALIVE]}`);
     if (seatOf(words) >= shape.seats) throw new Error(`${environment.envId} seats the agent at ${seatOf(words)} of ${shape.seats}`);
     for (let s = 0; s < shape.seats; s++) if (cellOf(words, s) >= shape.cells) throw new Error(`${environment.envId} opens with seat ${s} off the board`);
     if (bombsOf(initial.view, shape).length) throw new Error(`${environment.envId} opens with bombs on the board`);

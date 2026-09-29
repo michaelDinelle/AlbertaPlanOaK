@@ -1,17 +1,17 @@
 #include "../env.h"
 
-typedef struct { uint32_t width, height, startLeft, startRight, startTop, startBottom, bot, layers; } lightcyclesKnobs;
+typedef struct { uint32_t width, height, startLeft, startRight, startTop, startBottom, bot; } lightcyclesKnobs;
 
 static const lightcyclesKnobs LIGHTCYCLES_KNOBS[3] = {
-    { 16u, 16u, 2u, 5u, 2u, 13u, 0u, 0u },
-    { 16u, 16u, 2u, 5u, 2u, 13u, 1u, 16u },
-    { 16u, 16u, 2u, 5u, 2u, 13u, 2u, 10u }
+    { 16u, 16u, 2u, 5u, 2u, 13u, 0u },
+    { 16u, 16u, 2u, 5u, 2u, 13u, 1u },
+    { 16u, 16u, 2u, 5u, 2u, 13u, 2u }
 };
 
 enum { LIGHTCYCLES_RAMBLER, LIGHTCYCLES_HOARDER, LIGHTCYCLES_TACTICIAN };
 enum { LIGHTCYCLES_LEFT, LIGHTCYCLES_STRAIGHT, LIGHTCYCLES_RIGHT };
-enum { LIGHTCYCLES_MINE = 0, LIGHTCYCLES_THEIRS = 8, LIGHTCYCLES_AGENT = 16, LIGHTCYCLES_BOT, LIGHTCYCLES_GAME, LIGHTCYCLES_TICK, LIGHTCYCLES_THINK, LIGHTCYCLES_LAST, LIGHTCYCLES_WORDS };
-enum { LIGHTCYCLES_SENSES = 16, LIGHTCYCLES_LEAVES = 9, LIGHTCYCLES_DRAWN = 512, LIGHTCYCLES_WIN = 1024 };
+enum { LIGHTCYCLES_MINE = 0, LIGHTCYCLES_THEIRS = 8, LIGHTCYCLES_AGENT = 16, LIGHTCYCLES_BOT, LIGHTCYCLES_GAME, LIGHTCYCLES_TICK, LIGHTCYCLES_LAST, LIGHTCYCLES_WORDS };
+enum { LIGHTCYCLES_SENSES = 16, LIGHTCYCLES_WIN = 1024 };
 
 static const uint8_t LIGHTCYCLES_TURN[4][3] = { { 2u, 0u, 3u }, { 3u, 1u, 2u }, { 1u, 2u, 0u }, { 0u, 3u, 1u } };
 static const uint16_t LIGHTCYCLES_LANES[16] = { 0u, 1u, 2u, 3u, 4u, 5u, 6u, 7u, 8u, 9u, 10u, 11u, 12u, 13u, 14u, 15u };
@@ -19,23 +19,16 @@ static const uint16_t LIGHTCYCLES_LANES[16] = { 0u, 1u, 2u, 3u, 4u, 5u, 6u, 7u, 
 typedef struct { uint16x8_t lo, hi; } lightcyclesBoard;
 
 typedef struct {
-    lightcyclesBoard wall, claimed, front[2], reach[2], targets;
-    int32_t best, worst, area[3];
-    uint32_t open, leaf, active, flood, assigned, bestSet, choice;
-} lightcyclesSearch;
-
-typedef struct {
-    lightcyclesSearch search;
     float senses[LIGHTCYCLES_SENSES];
     uint16_t rows[16], cols[16];
 } lightcyclesLane;
 
-static lightcyclesLane *lightcycles_lane(uint32_t *extra) { return (lightcyclesLane *)(((uintptr_t)extra + 15u) & ~(uintptr_t)15u); }
-static const lightcyclesLane *lightcycles_peek(const uint32_t *extra) { return (const lightcyclesLane *)(((uintptr_t)extra + 15u) & ~(uintptr_t)15u); }
+static lightcyclesLane *lightcycles_lane(uint32_t *extra) { return (lightcyclesLane *)extra; }
+static const lightcyclesLane *lightcycles_peek(const uint32_t *extra) { return (const lightcyclesLane *)extra; }
 
 uint32_t lightcycles_extraWords(uint32_t instance, uint32_t steps) {
     (void)instance; (void)steps;
-    return (uint32_t)(sizeof(lightcyclesLane) / sizeof(uint32_t)) + 4u;
+    return (uint32_t)(sizeof(lightcyclesLane) / sizeof(uint32_t));
 }
 
 static inline __attribute__((always_inline)) lightcyclesBoard lightcycles_or(lightcyclesBoard a, lightcyclesBoard b) { return (lightcyclesBoard){ vorrq_u16(a.lo, b.lo), vorrq_u16(a.hi, b.hi) }; }
@@ -122,13 +115,8 @@ static inline __attribute__((always_inline)) uint32_t lightcycles_draw(uint32_t 
     return (uint32_t)__builtin_ctz(set);
 }
 
-static inline __attribute__((always_inline)) uint32_t lightcycles_ramble(const lightcyclesKnobs *k, const lightcyclesLane *l, uint32_t seed, const uint32_t *words) {
-    uint32_t open = lightcycles_open(k, l->rows, words[LIGHTCYCLES_BOT]);
-    return open ? lightcycles_draw(seed, words, open) : LIGHTCYCLES_STRAIGHT;
-}
-
-static inline __attribute__((always_inline)) uint32_t lightcycles_pick(const lightcyclesKnobs *k, const lightcyclesLane *l, uint32_t seed, const uint32_t *words, uint32_t set) {
-    return lightcycles_draw(seed, words, lightcycles_hugging(k, l->rows, words[LIGHTCYCLES_BOT], set));
+static inline __attribute__((always_inline)) uint32_t lightcycles_pick(const lightcyclesKnobs *k, const uint16_t *rows, uint32_t seed, const uint32_t *words, uint32_t set) {
+    return lightcycles_draw(seed, words, lightcycles_hugging(k, rows, words[LIGHTCYCLES_BOT], set));
 }
 
 static inline __attribute__((always_inline)) uint32_t lightcycles_joined(const lightcyclesKnobs *k, const uint16_t *rows, uint32_t head, uint32_t open) {
@@ -142,146 +130,76 @@ static inline __attribute__((always_inline)) uint32_t lightcycles_joined(const l
     return (open & 2u) && leftLink && rightLink;
 }
 
-static inline __attribute__((always_inline)) uint32_t lightcycles_begin(const lightcyclesKnobs *k, lightcyclesLane *l, uint32_t seed, const uint32_t *words) {
-    lightcyclesSearch *s = &l->search;
-    s->open = lightcycles_open(k, l->rows, words[LIGHTCYCLES_BOT]);
-    s->active = 0u;
-    if (!(s->open & (s->open - 1u))) {
-        s->choice = s->open ? (uint32_t)__builtin_ctz(s->open) : LIGHTCYCLES_STRAIGHT;
-        return 1u;
-    }
-    if (k->bot == LIGHTCYCLES_HOARDER && lightcycles_joined(k, l->rows, words[LIGHTCYCLES_BOT], s->open)) {
-        s->choice = lightcycles_pick(k, l, seed, words, s->open);
-        return 1u;
-    }
-    s->wall = lightcycles_board(k, l->rows);
-    s->flood = s->assigned = s->leaf = s->bestSet = 0u;
-    s->best = INT32_MIN;
-    s->worst = INT32_MAX;
-    return 0u;
-}
-
-static inline __attribute__((always_inline)) uint32_t lightcycles_hoard(const lightcyclesKnobs *k, lightcyclesLane *l, uint32_t seed, const uint32_t *words, uint32_t quota) {
-    lightcyclesSearch *s = &l->search;
-    lightcyclesBoard claimed = s->claimed, front = s->front[0], targets = s->targets;
-    for (;;) {
-        if (s->active) {
-            uint32_t alive = 1u, joined = 0u;
-            for (; quota && alive && !joined; quota--) {
-                front = lightcycles_without(lightcycles_spread(front), claimed);
-                claimed = lightcycles_or(claimed, front);
-                alive = lightcycles_any(front);
-                joined = !s->flood && !lightcycles_any(lightcycles_without(targets, claimed));
-            }
-            if (joined) {
-                s->choice = lightcycles_pick(k, l, seed, words, s->open);
-                return 1u;
-            }
-            if (alive) {
-                s->claimed = claimed;
-                s->front[0] = front;
-                return 0u;
-            }
-            s->active = 0u;
-            int32_t area = lightcycles_count(lightcycles_without(claimed, s->wall));
-            for (uint32_t a = 0u; a < 3u; a++) {
-                uint32_t x, y;
-                if (!((s->open & ~s->assigned) >> a & 1u)) continue;
-                lightcycles_ahead(words[LIGHTCYCLES_BOT], a, &x, &y);
-                if (lightcycles_any(lightcycles_without(lightcycles_cell(x, y), claimed))) continue;
-                s->area[a] = area;
-                s->assigned |= 1u << a;
-            }
-            s->flood++;
-        }
-        uint32_t rest = s->open & ~s->assigned;
-        if (!rest) {
-            int32_t top = -1;
-            uint32_t set = 0u;
-            for (uint32_t a = 0u; a < 3u; a++) {
-                if (!(s->open >> a & 1u)) continue;
-                if (s->area[a] > top) { top = s->area[a]; set = 0u; }
-                if (s->area[a] == top) set |= 1u << a;
-            }
-            s->choice = lightcycles_pick(k, l, seed, words, set);
-            return 1u;
-        }
+static inline __attribute__((always_inline)) uint32_t lightcycles_hoard(const lightcyclesKnobs *k, const uint16_t *rows, uint32_t seed, const uint32_t *words, uint32_t open) {
+    lightcyclesBoard wall = lightcycles_board(k, rows);
+    int32_t area[3] = { 0, 0, 0 };
+    for (uint32_t flood = 0u, rest = open; rest; flood++) {
         uint32_t first = (uint32_t)__builtin_ctz(rest), x, y;
         lightcycles_ahead(words[LIGHTCYCLES_BOT], first, &x, &y);
-        front = lightcycles_cell(x, y);
-        claimed = lightcycles_or(s->wall, front);
-        targets = (lightcyclesBoard){ vdupq_n_u16(0), vdupq_n_u16(0) };
+        lightcyclesBoard front = lightcycles_cell(x, y), claimed = lightcycles_or(wall, front), targets = { vdupq_n_u16(0), vdupq_n_u16(0) };
         for (uint32_t a = first + 1u; a < 3u; a++) {
             if (!(rest >> a & 1u)) continue;
             lightcycles_ahead(words[LIGHTCYCLES_BOT], a, &x, &y);
             targets = lightcycles_or(targets, lightcycles_cell(x, y));
         }
-        s->targets = targets;
-        s->active = 1u;
+        do {
+            front = lightcycles_without(lightcycles_spread(front), claimed);
+            claimed = lightcycles_or(claimed, front);
+            if (!flood && !lightcycles_any(lightcycles_without(targets, claimed))) return lightcycles_pick(k, rows, seed, words, open);
+        } while (lightcycles_any(front));
+        int32_t size = lightcycles_count(lightcycles_without(claimed, wall));
+        for (uint32_t a = 0u; a < 3u; a++) {
+            if (!(rest >> a & 1u)) continue;
+            lightcycles_ahead(words[LIGHTCYCLES_BOT], a, &x, &y);
+            if (lightcycles_any(lightcycles_without(lightcycles_cell(x, y), claimed))) continue;
+            area[a] = size;
+            rest &= ~(1u << a);
+        }
     }
+    int32_t top = -1;
+    uint32_t set = 0u;
+    for (uint32_t a = 0u; a < 3u; a++) {
+        if (!(open >> a & 1u)) continue;
+        if (area[a] > top) { top = area[a]; set = 0u; }
+        if (area[a] == top) set |= 1u << a;
+    }
+    return lightcycles_pick(k, rows, seed, words, set);
 }
 
-static void lightcycles_score(lightcyclesSearch *s, int32_t value) {
-    uint32_t leaf = s->leaf - 1u, move = leaf / 3u;
-    if (value < s->worst) s->worst = value;
-    if (leaf % 3u != 2u && s->worst >= s->best) return;
-    if (s->worst > s->best) {
-        s->best = s->worst;
-        s->bestSet = 0u;
-    }
-    if (s->worst == s->best) s->bestSet |= 1u << move;
-    s->worst = INT32_MAX;
-    s->leaf = 3u * (move + 1u);
+static int32_t lightcycles_territory(lightcyclesBoard wall, uint32_t ux, uint32_t uy, uint32_t vx, uint32_t vy) {
+    lightcyclesBoard fu = lightcycles_cell(ux, uy), fv = lightcycles_cell(vx, vy), claimed = lightcycles_or(wall, lightcycles_or(fu, fv));
+    lightcyclesBoard ru = { vdupq_n_u16(0), vdupq_n_u16(0) }, rv = ru;
+    while (lightcycles_layer(&claimed, &fu, &fv, &ru, &rv)) {}
+    return lightcycles_count(ru) - lightcycles_count(rv);
 }
 
-static inline __attribute__((always_inline)) uint32_t lightcycles_scheme(const lightcyclesKnobs *k, lightcyclesLane *l, uint32_t seed, const uint32_t *words, uint32_t quota) {
-    lightcyclesSearch *s = &l->search;
-    lightcyclesBoard claimed = s->claimed, fa = s->front[0], fb = s->front[1], ra = s->reach[0], rb = s->reach[1];
-    for (;;) {
-        if (s->active) {
-            uint32_t alive = 1u;
-            for (; quota && alive; quota--) alive = lightcycles_layer(&claimed, &fa, &fb, &ra, &rb);
-            if (alive) {
-                s->claimed = claimed;
-                s->front[0] = fa;
-                s->front[1] = fb;
-                s->reach[0] = ra;
-                s->reach[1] = rb;
-                return 0u;
-            }
-            s->active = 0u;
-            lightcycles_score(s, lightcycles_count(rb) - lightcycles_count(ra));
+static inline __attribute__((always_inline)) uint32_t lightcycles_minimax(const lightcyclesKnobs *k, const uint16_t *rows, uint32_t us, uint32_t them, uint32_t open) {
+    lightcyclesBoard wall = lightcycles_board(k, rows);
+    int32_t best = INT32_MIN;
+    uint32_t set = 0u;
+    for (uint32_t move = 0u; move < 3u; move++) {
+        uint32_t ux, uy;
+        if (!(open >> move & 1u)) continue;
+        lightcycles_ahead(us, move, &ux, &uy);
+        int32_t worst = INT32_MAX;
+        for (uint32_t reply = 0u; reply < 3u && worst >= best; reply++) {
+            uint32_t vx, vy;
+            lightcycles_ahead(them, reply, &vx, &vy);
+            int32_t value = lightcycles_blocked(k, rows, vx, vy) ? LIGHTCYCLES_WIN : vx == ux && vy == uy ? 0 : lightcycles_territory(wall, ux, uy, vx, vy);
+            worst = value < worst ? value : worst;
         }
-        if (s->leaf >= LIGHTCYCLES_LEAVES) {
-            s->choice = lightcycles_pick(k, l, seed, words, s->bestSet);
-            return 1u;
-        }
-        uint32_t move = s->leaf / 3u, reply = s->leaf % 3u, ax, ay, bx, by;
-        if (!(s->open >> move & 1u)) {
-            s->leaf = 3u * (move + 1u);
-            continue;
-        }
-        s->leaf++;
-        lightcycles_ahead(words[LIGHTCYCLES_AGENT], reply, &ax, &ay);
-        lightcycles_ahead(words[LIGHTCYCLES_BOT], move, &bx, &by);
-        if (lightcycles_blocked(k, l->rows, ax, ay)) {
-            lightcycles_score(s, LIGHTCYCLES_WIN);
-            continue;
-        }
-        if (ax == bx && ay == by) {
-            lightcycles_score(s, 0);
-            continue;
-        }
-        fa = lightcycles_cell(ax, ay);
-        fb = lightcycles_cell(bx, by);
-        claimed = lightcycles_or(s->wall, lightcycles_or(fa, fb));
-        ra = rb = (lightcyclesBoard){ vdupq_n_u16(0), vdupq_n_u16(0) };
-        s->active = 1u;
+        if (worst > best) { best = worst; set = 0u; }
+        if (worst == best) set |= 1u << move;
     }
+    return set;
 }
 
-static inline __attribute__((always_inline)) uint32_t lightcycles_think(const lightcyclesKnobs *k, lightcyclesLane *l, uint32_t seed, const uint32_t *words) {
-    return k->bot == LIGHTCYCLES_HOARDER ? lightcycles_hoard(k, l, seed, words, k->layers) : lightcycles_scheme(k, l, seed, words, k->layers);
+static inline __attribute__((always_inline)) uint32_t lightcycles_bot(const lightcyclesKnobs *k, const uint16_t *rows, uint32_t seed, const uint32_t *words) {
+    uint32_t bot = words[LIGHTCYCLES_BOT], open = lightcycles_open(k, rows, bot);
+    if (!(open & (open - 1u))) return open ? (uint32_t)__builtin_ctz(open) : LIGHTCYCLES_STRAIGHT;
+    if (k->bot == LIGHTCYCLES_RAMBLER) return lightcycles_draw(seed, words, open);
+    if (k->bot == LIGHTCYCLES_HOARDER) return lightcycles_joined(k, rows, bot, open) ? lightcycles_pick(k, rows, seed, words, open) : lightcycles_hoard(k, rows, seed, words, open);
+    return lightcycles_pick(k, rows, seed, words, lightcycles_minimax(k, rows, bot, words[LIGHTCYCLES_AGENT], open));
 }
 
 static inline __attribute__((always_inline)) void lightcycles_mark(lightcyclesLane *l, uint32_t *words, uint32_t side, uint32_t x, uint32_t y) {
@@ -361,32 +279,19 @@ static inline __attribute__((always_inline)) void lightcycles_sense(const lightc
     o[15] = lightcycles_ray(theirs, LIGHTCYCLES_TURN[bh][LIGHTCYCLES_RIGHT], scale);
 }
 
-static inline __attribute__((always_inline)) void lightcycles_emit(const lightcyclesLane *l, const uint32_t *words, float *obs) {
-    __builtin_memcpy(obs, l->senses, sizeof l->senses);
-    obs[LIGHTCYCLES_SENSES] = words[LIGHTCYCLES_THINK] ? 1.0f : 0.0f;
-}
+static inline __attribute__((always_inline)) void lightcycles_emit(const lightcyclesLane *l, float *obs) { __builtin_memcpy(obs, l->senses, sizeof l->senses); }
 
 static inline __attribute__((always_inline)) uint32_t lightcycles_action(const float *ctrl) {
     float c = ctrl[0];
     return c >= 0.0f && c < 3.0f ? (uint32_t)c : LIGHTCYCLES_STRAIGHT;
 }
 
-static inline __attribute__((always_inline)) uint32_t lightcycles_decide(const lightcyclesKnobs *k, lightcyclesLane *l, uint32_t seed, const uint32_t *words) {
-    return k->bot == LIGHTCYCLES_RAMBLER || lightcycles_begin(k, l, seed, words) || lightcycles_think(k, l, seed, words);
-}
-
 static inline __attribute__((always_inline)) float lightcycles_play(const lightcyclesKnobs *k, uint32_t seed, const float *ctrl, uint32_t *words, uint32_t *extra, float *obs, uint32_t *done) {
     lightcyclesLane *l = lightcycles_lane(extra);
-    float reward = 0.0f;
     *done = 0u;
-    if (words[LIGHTCYCLES_THINK]) words[LIGHTCYCLES_THINK] = lightcycles_think(k, l, seed, words) ? 0u : words[LIGHTCYCLES_THINK] + 1u;
-    else {
-        uint32_t move = k->bot == LIGHTCYCLES_RAMBLER ? lightcycles_ramble(k, l, seed, words) : l->search.choice;
-        reward = lightcycles_tick(k, l, seed, words, lightcycles_action(ctrl), move, done);
-        words[LIGHTCYCLES_THINK] = !lightcycles_decide(k, l, seed, words);
-        lightcycles_sense(k, words, l);
-    }
-    lightcycles_emit(l, words, obs);
+    float reward = lightcycles_tick(k, l, seed, words, lightcycles_action(ctrl), lightcycles_bot(k, l->rows, seed, words), done);
+    lightcycles_sense(k, words, l);
+    lightcycles_emit(l, obs);
     return reward;
 }
 
@@ -394,7 +299,6 @@ static void lightcycles_setup(const lightcyclesKnobs *k, uint32_t seed, uint32_t
     lightcyclesLane *l = lightcycles_lane(extra);
     for (uint32_t i = 0u; i < LIGHTCYCLES_WORDS; i++) words[i] = 0u;
     lightcycles_start(k, l, seed, words);
-    words[LIGHTCYCLES_THINK] = !lightcycles_decide(k, l, seed, words);
     lightcycles_sense(k, words, l);
 }
 
@@ -419,86 +323,23 @@ float lightcycles_step(uint32_t instance, uint32_t seed, uint32_t step, const fl
 }
 
 void lightcycles_observe(uint32_t instance, uint32_t seed, const uint32_t *words, const uint32_t *extra, uint32_t step, float *obs, const float *shared) {
-    (void)instance; (void)seed; (void)step; (void)shared;
-    lightcycles_emit(lightcycles_peek(extra), words, obs);
+    (void)instance; (void)seed; (void)words; (void)step; (void)shared;
+    lightcycles_emit(lightcycles_peek(extra), obs);
 }
 
-static int32_t lightcycles_territory(lightcyclesBoard wall, uint32_t ax, uint32_t ay, uint32_t bx, uint32_t by) {
-    lightcyclesBoard fa = lightcycles_cell(ax, ay), fb = lightcycles_cell(bx, by), claimed = lightcycles_or(wall, lightcycles_or(fa, fb));
-    lightcyclesBoard ra = { vdupq_n_u16(0), vdupq_n_u16(0) }, rb = ra;
-    while (lightcycles_layer(&claimed, &fa, &fb, &ra, &rb)) {}
-    return lightcycles_count(ra) - lightcycles_count(rb);
-}
-
-static int32_t lightcycles_verdict(uint32_t agentCrash, uint32_t botCrash) { return agentCrash ? (botCrash ? -LIGHTCYCLES_DRAWN : -LIGHTCYCLES_WIN) : LIGHTCYCLES_WIN; }
-
-static inline __attribute__((always_inline)) uint32_t lightcycles_respond(const lightcyclesKnobs *k, lightcyclesLane *sim, uint32_t seed, const uint32_t *words) {
-    if (k->bot == LIGHTCYCLES_RAMBLER) return lightcycles_ramble(k, sim, seed, words);
-    if (!lightcycles_begin(k, sim, seed, words))
-        while (!lightcycles_think(k, sim, seed, words)) {}
-    return sim->search.choice;
-}
-
-static inline __attribute__((always_inline)) int32_t lightcycles_future(const lightcyclesKnobs *k, lightcyclesLane *sim, uint32_t seed, const uint32_t *words) {
-    uint32_t bx, by;
-    lightcycles_ahead(words[LIGHTCYCLES_BOT], lightcycles_respond(k, sim, seed, words), &bx, &by);
-    uint32_t botBlocked = lightcycles_blocked(k, sim->rows, bx, by);
-    lightcyclesBoard wall = lightcycles_board(k, sim->rows);
-    int32_t best = INT32_MIN;
-    for (uint32_t a = 0u; a < 3u; a++) {
-        uint32_t ax, ay;
-        lightcycles_ahead(words[LIGHTCYCLES_AGENT], a, &ax, &ay);
-        uint32_t meet = ax == bx && ay == by, agentCrash = meet | lightcycles_blocked(k, sim->rows, ax, ay), botCrash = meet | botBlocked;
-        int32_t value = agentCrash | botCrash ? lightcycles_verdict(agentCrash, botCrash) : lightcycles_territory(wall, ax, ay, bx, by);
-        best = value > best ? value : best;
-    }
-    return best;
-}
-
-static inline __attribute__((always_inline)) uint32_t lightcycles_foresee(const lightcyclesKnobs *k, const lightcyclesLane *l, uint32_t seed, const uint32_t *words, uint32_t move) {
-    uint32_t agent = words[LIGHTCYCLES_AGENT], bx, by, set = 0u;
-    uint32_t bh = lightcycles_ahead(words[LIGHTCYCLES_BOT], move, &bx, &by), botBlocked = lightcycles_blocked(k, l->rows, bx, by);
-    int32_t best = INT32_MIN;
-    for (uint32_t a = 0u; a < 3u; a++) {
-        uint32_t ax, ay, ah = lightcycles_ahead(agent, a, &ax, &ay);
-        uint32_t meet = ax == bx && ay == by, agentCrash = meet | lightcycles_blocked(k, l->rows, ax, ay), botCrash = meet | botBlocked;
-        int32_t value;
-        if (agentCrash | botCrash) value = lightcycles_verdict(agentCrash, botCrash);
-        else {
-            lightcyclesLane sim = { 0 };
-            uint32_t next[LIGHTCYCLES_WORDS];
-            __builtin_memcpy(sim.rows, l->rows, sizeof sim.rows);
-            __builtin_memcpy(next, words, sizeof next);
-            sim.rows[ay] = (uint16_t)(sim.rows[ay] | 1u << ax);
-            sim.rows[by] = (uint16_t)(sim.rows[by] | 1u << bx);
-            next[LIGHTCYCLES_AGENT] = ax | ay << 4 | ah << 8;
-            next[LIGHTCYCLES_BOT] = bx | by << 4 | bh << 8;
-            next[LIGHTCYCLES_TICK]++;
-            value = lightcycles_future(k, &sim, seed, next);
-        }
-        if (value > best) { best = value; set = 0u; }
-        if (value == best) set |= 1u << a;
-    }
-    uint32_t open = set & lightcycles_open(k, l->rows, agent);
-    return (uint32_t)__builtin_ctz(open ? lightcycles_hugging(k, l->rows, agent, open) : set);
-}
-
-static inline __attribute__((always_inline)) uint32_t lightcycles_counsel(const lightcyclesKnobs *k, uint32_t seed, const uint32_t *words, const lightcyclesLane *l) {
-    uint32_t move = k->bot == LIGHTCYCLES_RAMBLER ? lightcycles_ramble(k, l, seed, words) : l->search.choice;
-    return lightcycles_foresee(k, l, seed, words, move);
+static inline __attribute__((always_inline)) uint32_t lightcycles_counsel(const lightcyclesKnobs *k, const uint16_t *rows, const uint32_t *words) {
+    uint32_t agent = words[LIGHTCYCLES_AGENT], open = lightcycles_open(k, rows, agent);
+    if (!(open & (open - 1u))) return open ? (uint32_t)__builtin_ctz(open) : LIGHTCYCLES_STRAIGHT;
+    return (uint32_t)__builtin_ctz(lightcycles_hugging(k, rows, agent, lightcycles_minimax(k, rows, agent, words[LIGHTCYCLES_BOT], open)));
 }
 
 void lightcycles_oracle(uint32_t instance, uint32_t seed, uint32_t step, const uint32_t *words, uint32_t *extra, const float *obs, float *ctrl, const float *shared) {
-    (void)step; (void)obs; (void)shared;
-    const lightcyclesLane *l = lightcycles_lane(extra);
-    if (words[LIGHTCYCLES_THINK]) {
-        ctrl[0] = (float)LIGHTCYCLES_STRAIGHT;
-        return;
-    }
+    (void)seed; (void)step; (void)obs; (void)shared;
+    const uint16_t *rows = lightcycles_peek(extra)->rows;
     switch (instance) {
-        case 0u: ctrl[0] = (float)lightcycles_counsel(&LIGHTCYCLES_KNOBS[0], seed, words, l); return;
-        case 1u: ctrl[0] = (float)lightcycles_counsel(&LIGHTCYCLES_KNOBS[1], seed, words, l); return;
-        case 2u: ctrl[0] = (float)lightcycles_counsel(&LIGHTCYCLES_KNOBS[2], seed, words, l); return;
+        case 0u: ctrl[0] = (float)lightcycles_counsel(&LIGHTCYCLES_KNOBS[0], rows, words); return;
+        case 1u: ctrl[0] = (float)lightcycles_counsel(&LIGHTCYCLES_KNOBS[1], rows, words); return;
+        case 2u: ctrl[0] = (float)lightcycles_counsel(&LIGHTCYCLES_KNOBS[2], rows, words); return;
         default: __builtin_trap();
     }
 }

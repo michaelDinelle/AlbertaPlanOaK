@@ -343,7 +343,7 @@ class SkirmishScene extends Stage2DScene {
       const outcome = outcomeOf(before, after);
       found.outcome = outcome;
       for (let k = 0; k < n; k++) {
-        const ours = k < allies, gone = outcome === 'drawn' || (outcome === 'won' && !ours) || (outcome === 'lost' && ours);
+        const ours = k < allies, gone = k === 0 ? outcome === 'lost' || outcome === 'drawn' : !ours && (outcome === 'won' || outcome === 'drawn');
         if (gone && hpOf(before, k) > 0) found.deaths.push({ index: k, kind: kindOf(before, k), team: ours ? 0 : 1, x: xOf(before, k), y: yOf(before, k), blast: false });
       }
     } else {

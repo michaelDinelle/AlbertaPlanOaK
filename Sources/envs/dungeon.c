@@ -19,11 +19,22 @@ static const uint32_t DUNGEON_XP[16] = { 1u, 2u, 3u, 4u, 5u, 6u, 8u, 9u, 12u, 12
 static const uint32_t DUNGEON_FLOOR[16] = { 1u, 1u, 2u, 2u, 3u, 3u, 4u, 4u, 5u, 5u, 6u, 6u, 7u, 7u, 6u, 9u };
 
 enum { DUNGEON_SIDE = 32, DUNGEON_CELLS = DUNGEON_SIDE * DUNGEON_SIDE, DUNGEON_SLOTS = 32, DUNGEON_ALIVE = 24, DUNGEON_ITEMS = 16, DUNGEON_REGULAR = 14, DUNGEON_VIEW = 160 };
+enum { DUNGEON_REACH = 3, DUNGEON_SPAN = 2 * DUNGEON_REACH + 1, DUNGEON_PATCH = DUNGEON_SPAN * DUNGEON_SPAN };
+enum { DUNGEON_WARD = 300, DUNGEON_DAZE = 12, DUNGEON_DARK = 40, DUNGEON_ILL = 20 };
 enum { DW_X, DW_Y, DW_HP, DW_LEVEL, DW_XP, DW_FOOD, DW_DEPTH, DW_TURN, DW_RUN, DW_SLOT, DW_RATIONS, DW_PACK, DW_PACK_HIGH, DW_POISON, DW_CONFUSED, DW_BLIND, DW_FIRE, DW_COLD,
        DW_EVENT, DW_MAGNITUDE, DW_GOLD, DW_SCORE, DW_PERM, DW_ROBIN, DW_MONSTERS, DW_ITEMS, DW_STAIRS, DW_LIT, DW_DEEPEST, DW_WORDS };
+enum { DO_HEALTH = DUNGEON_PATCH, DO_FOOD, DO_LEVEL, DO_DEPTH, DO_MESSAGE, DO_SLOT, DO_RATIONS, DO_POTIONS, DO_COUNT = DO_POTIONS + 8 };
 enum { DT_ROCK, DT_WALL, DT_FLOOR, DT_CORRIDOR, DT_DOOR, DT_STAIRS };
 enum { DC_TERRAIN = 7, DC_ITEM = 15 << 3, DC_WHO = 31 << 7 };
 enum { DI_GOLD = 1, DI_RATION, DI_POTION };
+enum { DG_ITEM = DT_STAIRS, DG_MONSTER = DG_ITEM + DI_POTION + 8, DG_UNSEEN = DG_MONSTER + 16 };
+enum { DK_SEEN = 1, DK_OPEN = 2, DK_ITEM = 4, DK_STILL = 8, DK_STAIRS = 16 };
+_Static_assert(DO_COUNT <= OAK_ENV_OBS_MAX && DW_WORDS <= OAK_ENV_WORDS_MAX, "");
+
+static const float DUNGEON_GLYPH[DG_UNSEEN + 1] = { -0.5f, -1.0f, 0.5f, 1.0f, 1.5f, 2.5f,
+                                                    3.0f, 3.5f, 4.0f, 4.5f, 5.0f, 5.5f, 6.0f, 6.5f, 7.0f, 7.5f,
+                                                    -2.0f, -2.5f, -3.0f, -3.5f, -4.0f, -4.5f, -5.0f, -5.5f, -6.0f, -6.5f, -7.0f, -7.5f, -8.0f, -8.5f, -9.0f, -9.5f,
+                                                    0.0f };
 enum { DE_HEAL, DE_EXTRA, DE_CURE, DE_FIRE, DE_COLD, DE_POISON, DE_CONFUSION, DE_BLINDNESS };
 enum { DB_CHASE, DB_ERRATIC, DB_RANGED, DB_STILL };
 enum { DD_PHYSICAL, DD_FIRE, DD_COLD, DD_POISON, DD_DRAIN };
@@ -35,18 +46,22 @@ enum { DUNGEON_ACT = 4, DUNGEON_NEXT = 5, DUNGEON_USE = 8 };
 typedef struct { uint32_t word[16], next, fill, seed, pad; } dungeonDice;
 
 typedef struct {
+    uint8_t known[DUNGEON_CELLS], lore[8];
+    uint32_t floor, run, turn, health, quaffed, boss, sick, fire, cold, dizzy;
+} dungeonMind;
+
+typedef struct {
     uint16_t cell[DUNGEON_CELLS];
     uint8_t mx[DUNGEON_SLOTS], my[DUNGEON_SLOTS], type[DUNGEON_SLOTS], hp[DUNGEON_SLOTS], energy[DUNGEON_SLOTS], speed[DUNGEON_SLOTS], flag[DUNGEON_SLOTS], kind[DUNGEON_SLOTS];
     uint8_t ix[DUNGEON_ITEMS], iy[DUNGEON_ITEMS], gold[DUNGEON_ITEMS];
     uint8_t rx0[16], ry0[16], rx1[16], ry1[16];
     dungeonDice dice;
-    uint8_t goal[DUNGEON_CELLS], loot[DUNGEON_CELLS], avoid[DUNGEON_CELLS];
-    uint64_t goalKey, lootKey, avoidKey;
+    dungeonMind mind;
 } dungeonWorld;
 
 typedef struct { uint32_t seed, run, depth, block, at; uint16_t half[32]; } dungeonDraw;
 typedef struct { uint8_t first[DUNGEON_SLOTS], second[DUNGEON_SLOTS], code[DUNGEON_SLOTS]; } dungeonPlan;
-typedef struct { uint32_t x, y, radius, x0, y0, x1, y1; } dungeonSight;
+typedef struct { uint32_t x, y, radius, x0, y0, x1, y1, blind; } dungeonSight;
 
 static dungeonWorld *dungeon_world(uint32_t *extra) { return (dungeonWorld *)(((uintptr_t)extra + 15u) & ~(uintptr_t)15u); }
 static const dungeonWorld *dungeon_read(const uint32_t *extra) { return (const dungeonWorld *)(((uintptr_t)extra + 15u) & ~(uintptr_t)15u); }
@@ -246,7 +261,7 @@ static void dungeon_run(const dungeonKnobs *k, uint32_t seed, uint32_t *words, d
 
 static dungeonSight dungeon_sight(const dungeonKnobs *k, const uint32_t *words, const dungeonWorld *w) {
     uint32_t x = words[DW_X], y = words[DW_Y], room = (uint32_t)w->cell[y * DUNGEON_SIDE + x] >> 12;
-    dungeonSight s = { x, y, k->radius, 255u, 255u, 0u, 0u };
+    dungeonSight s = { x, y, k->radius, 255u, 255u, 0u, 0u, words[DW_BLIND] != 0u };
     if (room && (words[DW_LIT] >> (room - 1u) & 1u)) {
         s.x0 = w->rx0[room - 1u] - 1u; s.y0 = w->ry0[room - 1u] - 1u;
         s.x1 = w->rx1[room - 1u] + 1u; s.y1 = w->ry1[room - 1u] + 1u;
@@ -259,11 +274,28 @@ static uint32_t dungeon_lit(const dungeonSight *s, uint32_t x, uint32_t y) {
     return (dx > dy ? dx : dy) <= s->radius || (x >= s->x0 && x <= s->x1 && y >= s->y0 && y <= s->y1);
 }
 
-static inline uint8x16_t dungeon_lit16(const dungeonSight *s, uint8x16_t x, uint8x16_t y, uint8x16_t *far) {
+static int dungeon_span(const dungeonSight *s, int dy, int *hi) {
+    uint32_t ay = (uint32_t)(dy < 0 ? -dy : dy), y = s->y + (uint32_t)dy;
+    int half = s->blind ? (ay == 0u) - (ay > 1u) : ay <= s->radius ? (int)s->radius : -1, lo = -half;
+    *hi = half;
+    if (!s->blind && y >= s->y0 && y <= s->y1) {
+        int left = (int)s->x0 - (int)s->x, right = (int)s->x1 - (int)s->x;
+        lo = left < lo ? left : lo;
+        *hi = right > half ? right : half;
+    }
+    *hi = *hi < DUNGEON_REACH ? *hi : DUNGEON_REACH;
+    return ay > DUNGEON_REACH ? DUNGEON_REACH + 1 : lo > -DUNGEON_REACH ? lo : -DUNGEON_REACH;
+}
+
+static uint32_t dungeon_visible(const dungeonSight *s, int dx, int dy) {
+    int hi, lo = dungeon_span(s, dy, &hi);
+    return dx >= lo && dx <= hi;
+}
+
+static inline uint8x16_t dungeon_lit16(const dungeonSight *s, uint8x16_t x, uint8x16_t y) {
     uint8x16_t dx = vabdq_u8(x, vdupq_n_u8((uint8_t)s->x)), dy = vabdq_u8(y, vdupq_n_u8((uint8_t)s->y));
     uint8x16_t across = vandq_u8(vcgeq_u8(x, vdupq_n_u8((uint8_t)s->x0)), vcleq_u8(x, vdupq_n_u8((uint8_t)s->x1)));
     uint8x16_t down = vandq_u8(vcgeq_u8(y, vdupq_n_u8((uint8_t)s->y0)), vcleq_u8(y, vdupq_n_u8((uint8_t)s->y1)));
-    *far = vqaddq_u8(dx, dy);
     return vorrq_u8(vcleq_u8(vmaxq_u8(dx, dy), vdupq_n_u8((uint8_t)s->radius)), vandq_u8(across, down));
 }
 
@@ -278,68 +310,41 @@ static inline uint32_t dungeon_bits(uint8x16_t set) {
     return (uint32_t)vaddv_u8(vget_low_u8(m)) | (uint32_t)vaddv_u8(vget_high_u8(m)) << 8;
 }
 
-static inline uint64_t dungeon_nibbles(uint8x16_t set) { return vget_lane_u64(vreinterpret_u64_u8(vshrn_n_u16(vreinterpretq_u16_u8(set), 4)), 0); }
-
-static uint32_t dungeon_nearest(const dungeonSight *s, const uint8_t *xs, const uint8_t *ys, uint32_t n, uint8_t *wake, uint32_t blind) {
-    uint8x16_t none = vdupq_n_u8(255u), far, low, high = none, lit = vandq_u8(dungeon_lit16(s, vld1q_u8(xs), vld1q_u8(ys), &far), dungeon_valid(0u, n));
-    if (wake) vst1q_u8(wake, vorrq_u8(vld1q_u8(wake), vandq_u8(lit, vdupq_n_u8(DM_AWAKE))));
-    low = vbslq_u8(lit, far, none);
-    if (n > 16u) {
-        lit = vandq_u8(dungeon_lit16(s, vld1q_u8(xs + 16u), vld1q_u8(ys + 16u), &far), dungeon_valid(1u, n));
-        if (wake) vst1q_u8(wake + 16u, vorrq_u8(vld1q_u8(wake + 16u), vandq_u8(lit, vdupq_n_u8(DM_AWAKE))));
-        high = vbslq_u8(lit, far, none);
-    }
-    if (blind) return DUNGEON_SLOTS;
-    uint32_t best = vminvq_u8(vminq_u8(low, high));
-    if (best == 255u) return DUNGEON_SLOTS;
-    uint64_t first = dungeon_nibbles(vceqq_u8(low, vdupq_n_u8((uint8_t)best)));
-    return first ? (uint32_t)__builtin_ctzll(first) >> 2 : 16u + ((uint32_t)__builtin_ctzll(dungeon_nibbles(vceqq_u8(high, vdupq_n_u8((uint8_t)best)))) >> 2);
-}
-
-static uint32_t dungeon_count(const uint32_t *words, const dungeonWorld *w, uint32_t slot) {
-    if (slot == 0u) return (w->cell[words[DW_Y] * DUNGEON_SIDE + words[DW_X]] & DC_TERRAIN) == DT_STAIRS;
-    if (slot == 1u) return words[DW_RATIONS];
-    return dungeon_potions(words, slot - 2u);
-}
-
-static inline __attribute__((always_inline)) void dungeon_look(const dungeonKnobs *k, const uint32_t *words, const dungeonWorld *w, float *obs, uint8_t *wake) {
-    static const float CODE[32] = { -1.0f, -1.0f, 0.0f, 0.0f, 0.25f, 1.0f, 0.5f, 0.625f, 0.75f, 0.78125f, 0.8125f, 0.84375f, 0.875f, 0.90625f, 0.9375f, 0.96875f,
-                                    -0.25f, -0.28125f, -0.3125f, -0.34375f, -0.375f, -0.40625f, -0.4375f, -0.46875f, -0.5f, -0.53125f, -0.5625f, -0.59375f, -0.625f, -0.65625f, -0.6875f, -0.71875f };
-    uint32_t x = words[DW_X], y = words[DW_Y], at = y * DUNGEON_SIDE + x, level = words[DW_LEVEL], slot = words[DW_SLOT];
-    for (uint32_t d = 0u; d < 4u; d++) {
-        uint32_t c = w->cell[dungeon_toward(at, d)], who = c >> 7 & 31u, item = c >> 3 & 15u;
-        obs[d] = CODE[who ? 16u + w->type[who - 1u] : item ? 5u + item : c & DC_TERRAIN];
-    }
-    obs[4] = (float)(int32_t)words[DW_HP] / (float)dungeon_most(level);
-    obs[5] = (float)words[DW_FOOD] * 0.001f;
-    obs[6] = (float)level * 0.1f;
-    obs[7] = (float)words[DW_DEPTH] * (1.0f / (float)k->floors);
-    obs[8] = (float)slot * (1.0f / 9.0f);
-    obs[9] = (float)dungeon_count(words, w, slot) * 0.125f;
-    obs[10] = (float)words[DW_EVENT] * (1.0f / 24.0f);
-    obs[11] = (float)words[DW_MAGNITUDE] * 0.0625f;
-    for (uint32_t i = 12u; i < 18u; i++) obs[i] = 0.0f;
+static void dungeon_rouse(const dungeonKnobs *k, const uint32_t *words, dungeonWorld *w) {
     dungeonSight s = dungeon_sight(k, words, w);
-    uint32_t m = dungeon_nearest(&s, w->mx, w->my, words[DW_MONSTERS], wake, words[DW_BLIND]);
-    if (words[DW_BLIND]) return;
-    uint32_t stairs = words[DW_STAIRS], item = dungeon_nearest(&s, w->ix, w->iy, words[DW_ITEMS], 0, 0u);
-    if (m < DUNGEON_SLOTS) {
-        obs[12] = (float)((int)w->mx[m] - (int)x) * 0.125f;
-        obs[13] = (float)((int)w->my[m] - (int)y) * 0.125f;
-    }
-    if (stairs && dungeon_lit(&s, stairs & 31u, stairs >> 5)) {
-        obs[14] = (float)((int)(stairs & 31u) - (int)x) * 0.125f;
-        obs[15] = (float)((int)(stairs >> 5) - (int)y) * 0.125f;
-    }
-    if (item < DUNGEON_SLOTS) {
-        obs[16] = (float)((int)w->ix[item] - (int)x) * 0.125f;
-        obs[17] = (float)((int)w->iy[item] - (int)y) * 0.125f;
+    uint32_t n = words[DW_MONSTERS];
+    for (uint32_t h = 0u; h < (n > 16u ? 2u : 1u); h++) {
+        uint8x16_t lit = vandq_u8(dungeon_lit16(&s, vld1q_u8(w->mx + 16u * h), vld1q_u8(w->my + 16u * h)), dungeon_valid(h, n));
+        vst1q_u8(w->flag + 16u * h, vorrq_u8(vld1q_u8(w->flag + 16u * h), vandq_u8(lit, vdupq_n_u8(DM_AWAKE))));
     }
 }
 
-static void dungeon_obs(const dungeonKnobs *k, const uint32_t *words, const dungeonWorld *w, float *obs) { dungeon_look(k, words, w, obs, 0); }
+static uint32_t dungeon_count(const uint32_t *words, uint32_t slot) { return slot == 1u ? words[DW_RATIONS] : dungeon_potions(words, slot - 2u); }
 
-static void dungeon_wakeful(const dungeonKnobs *k, const uint32_t *words, dungeonWorld *w, float *obs) { dungeon_look(k, words, w, obs, w->flag); }
+static float dungeon_glyph(const dungeonWorld *w, uint32_t at) {
+    uint32_t c = w->cell[at], who = c >> 7 & 31u, item = c >> 3 & 15u;
+    return DUNGEON_GLYPH[who ? DG_MONSTER + w->type[who - 1u] : item ? DG_ITEM + item : c & DC_TERRAIN];
+}
+
+static void dungeon_obs(const dungeonKnobs *k, const uint32_t *words, const dungeonWorld *w, float *obs) {
+    dungeonSight s = dungeon_sight(k, words, w);
+    uint32_t level = words[DW_LEVEL];
+    for (int dy = -DUNGEON_REACH; dy <= DUNGEON_REACH; dy++) {
+        float *row = obs + (dy + DUNGEON_REACH) * DUNGEON_SPAN + DUNGEON_REACH;
+        uint32_t centre = (s.y + (uint32_t)dy) * DUNGEON_SIDE + s.x;
+        int hi, lo = dungeon_span(&s, dy, &hi);
+        for (int dx = -DUNGEON_REACH; dx <= DUNGEON_REACH; dx++) row[dx] = DUNGEON_GLYPH[DG_UNSEEN];
+        for (int dx = lo; dx <= hi; dx++) row[dx] = dungeon_glyph(w, centre + (uint32_t)dx);
+    }
+    obs[DO_HEALTH] = (float)(int32_t)words[DW_HP] / (float)dungeon_most(level);
+    obs[DO_FOOD] = (float)words[DW_FOOD] * 0.001f;
+    obs[DO_LEVEL] = (float)level * 0.1f;
+    obs[DO_DEPTH] = (float)words[DW_DEPTH] * (1.0f / (float)k->floors);
+    obs[DO_MESSAGE] = (float)words[DW_EVENT] * 0.25f;
+    obs[DO_SLOT] = (float)words[DW_SLOT] * 0.25f;
+    obs[DO_RATIONS] = (float)words[DW_RATIONS] * 0.25f;
+    for (uint32_t c = 0u; c < 8u; c++) obs[DO_POTIONS + c] = (float)dungeon_potions(words, c) * 0.25f;
+}
 
 static uint32_t dungeon_player(const uint32_t *words) { return words[DW_Y] * DUNGEON_SIDE + words[DW_X]; }
 
@@ -371,7 +376,7 @@ static inline __attribute__((always_inline)) void dungeon_bite(dungeonDice *d, u
     uint32_t damage = dungeon_damage(roll, attack);
     if ((kind == DD_FIRE && words[DW_FIRE]) || (kind == DD_COLD && words[DW_COLD])) damage /= 3u;
     words[DW_HP] -= damage;
-    if (kind == DD_POISON && words[DW_POISON] < 20u) words[DW_POISON] = 20u;
+    if (kind == DD_POISON && words[DW_POISON] < DUNGEON_ILL) words[DW_POISON] = DUNGEON_ILL;
     if (kind == DD_DRAIN && level > 1u && (roll >> 16) * 20u >> 16 >= 15u) {
         level--;
         words[DW_LEVEL] = level;
@@ -506,15 +511,15 @@ static void dungeon_quaff(dungeonDice *d, uint32_t *words, uint32_t effect) {
         case DE_HEAL: hp += most / 2 > 6 ? most / 2 : 6; hp = hp < most ? hp : most; words[DW_BLIND] = 0u; break;
         case DE_EXTRA: hp = most; words[DW_POISON] = 0u; words[DW_BLIND] = 0u; break;
         case DE_CURE: words[DW_POISON] = 0u; words[DW_CONFUSED] = 0u; words[DW_BLIND] = 0u; break;
-        case DE_FIRE: words[DW_FIRE] = 300u; magnitude = 300u; break;
-        case DE_COLD: words[DW_COLD] = 300u; magnitude = 300u; break;
+        case DE_FIRE: words[DW_FIRE] = DUNGEON_WARD; magnitude = DUNGEON_WARD; break;
+        case DE_COLD: words[DW_COLD] = DUNGEON_WARD; magnitude = DUNGEON_WARD; break;
         case DE_POISON:
             hp -= (int32_t)dungeon_damage(dungeon_roll(d), 4u);
             hp = hp > 1 ? hp : 1;
-            if (words[DW_POISON] < 20u) words[DW_POISON] = 20u;
+            if (words[DW_POISON] < DUNGEON_ILL) words[DW_POISON] = DUNGEON_ILL;
             break;
-        case DE_CONFUSION: words[DW_CONFUSED] = 12u; magnitude = 12u; break;
-        default: words[DW_BLIND] = 40u; magnitude = 40u; break;
+        case DE_CONFUSION: words[DW_CONFUSED] = DUNGEON_DAZE; magnitude = DUNGEON_DAZE; break;
+        default: words[DW_BLIND] = DUNGEON_DARK; magnitude = DUNGEON_DARK; break;
     }
     words[DW_HP] = (uint32_t)hp;
     dungeon_note(words, DV_QUAFF + effect, hp != before ? (uint32_t)(hp > before ? hp - before : before - hp) : magnitude);
@@ -522,7 +527,7 @@ static void dungeon_quaff(dungeonDice *d, uint32_t *words, uint32_t effect) {
 
 static uint32_t dungeon_use(const dungeonKnobs *k, uint32_t seed, dungeonDice *d, uint32_t *words, dungeonWorld *w, uint32_t *descended) {
     uint32_t slot = words[DW_SLOT];
-    if (slot == 0u || !dungeon_count(words, w, slot)) {
+    if (slot == 0u || !dungeon_count(words, slot)) {
         if (slot == 0u && (w->cell[words[DW_Y] * DUNGEON_SIDE + words[DW_X]] & DC_TERRAIN) == DT_STAIRS) {
             uint32_t depth = ++words[DW_DEPTH], record = depth > words[DW_DEEPEST];
             dungeon_floor(k, seed, words, w);
@@ -617,7 +622,8 @@ static inline __attribute__((always_inline)) float dungeon_play(uint32_t instanc
     *done = 0u;
     if (action == DUNGEON_NEXT) words[DW_SLOT] = dungeon_next(words);
     else reward = dungeon_turn(k, seed, action, words, w, done);
-    dungeon_wakeful(k, words, w, obs);
+    dungeon_rouse(k, words, w);
+    dungeon_obs(k, words, w, obs);
     return reward;
 }
 
@@ -637,9 +643,6 @@ void dungeon_reset(uint32_t instance, uint32_t seed, uint32_t *words, uint32_t *
     const dungeonKnobs *k = &DUNGEON_KNOBS[instance];
     dungeonWorld *w = dungeon_world(extra);
     __builtin_memset(w, 0, sizeof *w);
-    w->goalKey = ~0ull;
-    w->lootKey = ~0ull;
-    w->avoidKey = ~0ull;
     w->dice.seed = seed;
     w->dice.next = 16u;
     for (uint32_t i = 0u; i < DW_WORDS; i++) words[i] = 0u;
@@ -679,20 +682,74 @@ uint32_t dungeon_view(uint32_t instance, const uint32_t *words, const uint32_t *
     return DUNGEON_VIEW;
 }
 
-static void dungeon_flood(const dungeonWorld *w, uint32_t careful, uint8_t *dist, const uint16_t *source, uint32_t sources) {
+static void dungeon_recall(const dungeonKnobs *k, const dungeonWorld *w, dungeonMind *mind, uint32_t at) {
+    uint32_t c = w->cell[at], who = c >> 7 & 31u, terrain = c & DC_TERRAIN;
+    uint32_t still = who && (w->kind[who - 1u] & DP_STILL), boss = who && w->type[who - 1u] == k->boss;
+    uint32_t under = who ? mind->known[at] & (DK_STAIRS | DK_ITEM) : (terrain == DT_STAIRS ? DK_STAIRS : 0u) | (c & DC_ITEM ? DK_ITEM : 0u);
+    mind->known[at] = (uint8_t)(DK_SEEN | (terrain >= DT_FLOOR ? DK_OPEN : 0u) | under | (still ? DK_STILL : 0u));
+    if (boss) mind->boss = at + 1u;
+    else if (mind->boss == at + 1u) mind->boss = 0u;
+}
+
+static void dungeon_survey(const dungeonKnobs *k, const uint32_t *words, const dungeonWorld *w, dungeonMind *mind) {
+    dungeonSight s = dungeon_sight(k, words, w);
+    for (int dy = -DUNGEON_REACH; dy <= DUNGEON_REACH; dy++)
+        for (int dx = -DUNGEON_REACH; dx <= DUNGEON_REACH; dx++)
+            if (dungeon_visible(&s, dx, dy)) dungeon_recall(k, w, mind, (s.y + (uint32_t)dy) * DUNGEON_SIDE + s.x + (uint32_t)dx);
+}
+
+static uint32_t dungeon_venom(const dungeonWorld *w, uint32_t at) {
+    for (uint32_t d = 0u; d < 4u; d++) {
+        uint32_t who = w->cell[dungeon_toward(at, d)] >> 7 & 31u;
+        if (who && DUNGEON_DAMAGE[w->type[who - 1u]] == DD_POISON) return 1u;
+    }
+    return 0u;
+}
+
+static void dungeon_remember(const dungeonKnobs *k, const uint32_t *words, dungeonWorld *w) {
+    dungeonMind *mind = &w->mind;
+    uint32_t run = words[DW_RUN], turn = words[DW_TURN], floor = run * 16u + words[DW_DEPTH], event = words[DW_EVENT], effect = event - DV_QUAFF;
+    if (mind->run != run) {
+        if (k->shuffle) __builtin_memset(mind->lore, 0, sizeof mind->lore);
+        mind->run = run;
+        mind->sick = mind->fire = mind->cold = mind->dizzy = 0u;
+    }
+    if (mind->floor != floor) {
+        __builtin_memset(mind->known, 0, sizeof mind->known);
+        mind->floor = floor;
+        mind->boss = 0u;
+    }
+    if (mind->turn != turn) {
+        if (effect < 8u) {
+            if (mind->quaffed) mind->lore[mind->quaffed - 1u] = (uint8_t)(effect + 1u);
+            if (effect == DE_FIRE) mind->fire = turn + DUNGEON_WARD;
+            if (effect == DE_COLD) mind->cold = turn + DUNGEON_WARD;
+            if (effect == DE_CONFUSION) mind->dizzy = turn + DUNGEON_DAZE;
+            if (effect == DE_POISON) mind->sick = turn + DUNGEON_ILL;
+            if (effect == DE_EXTRA || effect == DE_CURE) mind->sick = 0u;
+            if (effect == DE_CURE) mind->dizzy = 0u;
+        }
+        if ((int32_t)words[DW_HP] < (int32_t)mind->health && dungeon_venom(w, dungeon_player(words))) mind->sick = turn + DUNGEON_ILL;
+        if (event == DV_SICK && mind->sick < turn + 4u) mind->sick = turn + 4u;
+    }
+    mind->turn = turn;
+    mind->health = words[DW_HP];
+    dungeon_survey(k, words, w, mind);
+}
+
+static void dungeon_flood(const dungeonMind *mind, const uint8_t *avoid, uint8_t *dist) {
     uint16_t queue[DUNGEON_CELLS];
     uint32_t head = 0u, tail = 0u;
-    __builtin_memset(dist, 255, DUNGEON_CELLS);
-    for (uint32_t s = 0u; s < sources; s++) {
-        if (careful && w->avoid[source[s]]) continue;
-        dist[source[s]] = 0u;
-        queue[tail++] = source[s];
+    for (uint32_t at = 0u; at < DUNGEON_CELLS; at++) {
+        if (dist[at]) continue;
+        if (avoid && avoid[at]) dist[at] = 255u;
+        else queue[tail++] = (uint16_t)at;
     }
     while (head < tail) {
         uint32_t at = queue[head++], next = dist[at] < 254u ? dist[at] + 1u : 254u;
         for (uint32_t d = 0u; d < 4u; d++) {
             uint32_t to = dungeon_toward(at, d);
-            if ((w->cell[to] & DC_TERRAIN) < DT_FLOOR || dist[to] != 255u || (careful && w->avoid[to])) continue;
+            if (!(mind->known[to] & DK_OPEN) || dist[to] != 255u || (avoid && avoid[to])) continue;
             dist[to] = (uint8_t)next;
             queue[tail++] = (uint16_t)to;
         }
@@ -708,18 +765,67 @@ static uint32_t dungeon_downhill(const uint8_t *dist, uint32_t at) {
     return direction;
 }
 
-static uint32_t dungeon_find(const uint32_t *words, uint32_t effect) {
+static uint32_t dungeon_seek(const dungeonMind *mind, const uint8_t *avoid, const uint8_t *want, uint32_t at) {
+    uint8_t dist[DUNGEON_CELLS];
+    for (uint32_t c = 0u; c < DUNGEON_CELLS; c++) dist[c] = (uint8_t)(want[c] ? 0u : 255u);
+    dungeon_flood(mind, avoid, dist);
+    return dungeon_downhill(dist, at);
+}
+
+static uint32_t dungeon_head(const dungeonMind *mind, const uint8_t *avoid, const uint8_t *want, uint32_t at) {
+    uint32_t direction = dungeon_seek(mind, avoid, want, at);
+    return direction < 4u || want[at] ? direction : dungeon_seek(mind, 0, want, at);
+}
+
+static void dungeon_wary(const dungeonMind *mind, uint8_t *avoid) {
+    __builtin_memset(avoid, 0, DUNGEON_CELLS);
+    for (uint32_t at = 0u; at < DUNGEON_CELLS; at++) {
+        if (!(mind->known[at] & DK_STILL)) continue;
+        avoid[at] = 1u;
+        for (uint32_t d = 0u; d < 4u; d++) avoid[dungeon_toward(at, d)] = 1u;
+    }
+}
+
+static uint32_t dungeon_mark(const dungeonMind *mind, uint8_t *want, uint32_t flag) {
+    uint32_t any = 0u;
+    for (uint32_t at = 0u; at < DUNGEON_CELLS; at++) {
+        want[at] = (uint8_t)((mind->known[at] & flag) != 0u);
+        any |= want[at];
+    }
+    return any;
+}
+
+static uint32_t dungeon_frontier(const dungeonMind *mind, uint8_t *want) {
+    uint32_t any = 0u;
+    for (uint32_t at = 0u; at < DUNGEON_CELLS; at++) {
+        uint32_t edge = 0u;
+        if (mind->known[at] & DK_OPEN)
+            for (uint32_t d = 0u; d < 4u; d++) edge |= !mind->known[dungeon_toward(at, d)];
+        want[at] = (uint8_t)edge;
+        any |= edge;
+    }
+    return any;
+}
+
+static uint32_t dungeon_goal(const dungeonMind *mind, uint32_t last, uint8_t *want) {
+    if (!last) return dungeon_mark(mind, want, DK_STAIRS);
+    __builtin_memset(want, 0, DUNGEON_CELLS);
+    if (mind->boss) want[mind->boss - 1u] = 1u;
+    return mind->boss != 0u;
+}
+
+static uint32_t dungeon_find(const dungeonMind *mind, const uint32_t *words, uint32_t lore) {
     for (uint32_t c = 0u; c < 8u; c++)
-        if ((words[DW_PERM] >> 3u * c & 7u) == effect && dungeon_potions(words, c)) return 2u + c;
+        if (mind->lore[c] == lore && dungeon_potions(words, c)) return 2u + c;
     return 0u;
 }
 
 static uint32_t dungeon_still(const dungeonWorld *w, uint32_t m) { return w->kind[m] & DP_STILL; }
 
-static uint32_t dungeon_exposed(const dungeonWorld *w, const uint32_t *words, uint32_t at) {
+static uint32_t dungeon_exposed(const dungeonWorld *w, const uint32_t *words, const dungeonSight *s, uint32_t at) {
     uint32_t x = at & 31u, y = at >> 5;
     for (uint32_t m = 0u; m < words[DW_MONSTERS]; m++) {
-        if (!(w->flag[m] & DM_AWAKE) || !(w->kind[m] & DP_RANGED)) continue;
+        if (!(w->kind[m] & DP_RANGED) || !dungeon_visible(s, (int)w->mx[m] - (int)s->x, (int)w->my[m] - (int)s->y)) continue;
         uint32_t dx = w->mx[m] > x ? w->mx[m] - x : x - w->mx[m], dy = w->my[m] > y ? w->my[m] - y : y - w->my[m];
         uint32_t from = w->my[m] * DUNGEON_SIDE + w->mx[m];
         if ((dx == 0u || dy == 0u) && dx + dy >= 2u && dx + dy <= 5u && dungeon_clear(w, from, at, dx ? (x > w->mx[m] ? 1u : 0u - 1u) : (y > w->my[m] ? (uint32_t)DUNGEON_SIDE : 0u - (uint32_t)DUNGEON_SIDE))) return 1u;
@@ -727,39 +833,28 @@ static uint32_t dungeon_exposed(const dungeonWorld *w, const uint32_t *words, ui
     return 0u;
 }
 
-static uint32_t dungeon_route(dungeonWorld *w, uint64_t key, uint32_t goal, uint32_t at) {
-    uint16_t source = (uint16_t)goal;
-    if ((w->goalKey & ~(1ull << 17)) != key) {
-        dungeon_flood(w, 1u, w->goal, &source, 1u);
-        w->goalKey = key;
-    }
-    uint32_t direction = dungeon_downhill(w->goal, at);
-    if (direction == 4u && w->goal[at] != 0u && !(w->goalKey >> 17 & 1u)) {
-        dungeon_flood(w, 0u, w->goal, &source, 1u);
-        w->goalKey = key | 1ull << 17;
-        direction = dungeon_downhill(w->goal, at);
-    }
-    return direction < 4u ? direction : DUNGEON_USE;
-}
-
 static uint32_t dungeon_decide(const dungeonKnobs *k, const uint32_t *words, dungeonWorld *w) {
-    uint32_t x = words[DW_X], y = words[DW_Y], at = y * DUNGEON_SIDE + x, most = dungeon_most(words[DW_LEVEL]), n = words[DW_MONSTERS];
+    dungeon_remember(k, words, w);
+    const dungeonMind *mind = &w->mind;
+    dungeonSight s = dungeon_sight(k, words, w);
+    uint32_t x = words[DW_X], y = words[DW_Y], at = y * DUNGEON_SIDE + x, most = dungeon_most(words[DW_LEVEL]), n = words[DW_MONSTERS], turn = words[DW_TURN];
     int32_t hp = (int32_t)words[DW_HP];
-    uint32_t heal = dungeon_find(words, DE_HEAL), full = dungeon_find(words, DE_EXTRA), cure = dungeon_find(words, DE_CURE);
-    uint32_t warm = dungeon_find(words, DE_FIRE), cool = dungeon_find(words, DE_COLD), target = 4u, weakest = 256u, cornered = 0u, swift = 0u;
+    uint32_t heal = dungeon_find(mind, words, DE_HEAL + 1u), full = dungeon_find(mind, words, DE_EXTRA + 1u), cure = dungeon_find(mind, words, DE_CURE + 1u);
+    uint32_t warm = dungeon_find(mind, words, DE_FIRE + 1u), cool = dungeon_find(mind, words, DE_COLD + 1u), guess = dungeon_find(mind, words, 0u);
+    uint32_t target = 4u, weakest = 256u, cornered = 0u, swift = 0u;
     for (uint32_t d = 0u; d < 4u; d++) {
         uint32_t who = w->cell[dungeon_toward(at, d)] >> 7 & 31u;
         if (!who) continue;
         if (dungeon_still(w, who - 1u)) { cornered = 1u; continue; }
-        swift |= w->speed[who - 1u] > 12u;
-        if (w->hp[who - 1u] < weakest) { weakest = w->hp[who - 1u]; target = d; }
+        uint32_t type = w->type[who - 1u];
+        swift |= DUNGEON_SPEED[type] > 12u;
+        if (DUNGEON_HP[type] < weakest) { weakest = DUNGEON_HP[type]; target = d; }
     }
-    uint32_t near = 255u, hot = 0u, chill = 0u, bossAwake = 0u, bossAt = 0u, sign = 0u;
+    uint32_t near = 255u, hot = 0u, chill = 0u;
     for (uint32_t m = 0u; m < n; m++) {
-        uint32_t dist = (w->mx[m] > x ? w->mx[m] - x : x - w->mx[m]) + (w->my[m] > y ? w->my[m] - y : y - w->my[m]);
-        if (w->type[m] == k->boss) { bossAt = w->my[m] * DUNGEON_SIDE + w->mx[m]; bossAwake = w->flag[m] & DM_AWAKE; }
-        if (dungeon_still(w, m)) { sign += 1u + ((uint32_t)w->my[m] * DUNGEON_SIDE + w->mx[m]) * 32u; continue; }
-        if (!(w->flag[m] & DM_AWAKE)) continue;
+        int dx = (int)w->mx[m] - (int)x, dy = (int)w->my[m] - (int)y;
+        if (dungeon_still(w, m) || !dungeon_visible(&s, dx, dy)) continue;
+        uint32_t dist = (uint32_t)((dx < 0 ? -dx : dx) + (dy < 0 ? -dy : dy));
         near = dist < near ? dist : near;
         if (dist <= 6u) {
             hot |= DUNGEON_DAMAGE[w->type[m]] == DD_FIRE;
@@ -767,55 +862,48 @@ static uint32_t dungeon_decide(const dungeonKnobs *k, const uint32_t *words, dun
         }
     }
     uint32_t last = words[DW_DEPTH] == k->floors, stairs = (w->cell[at] & DC_TERRAIN) == DT_STAIRS, danger = !last && hp * 100 < (int32_t)most * 35 && !heal && !full;
+    uint32_t calm = near > 8u && !cornered && (words[DW_FOOD] > 200u || words[DW_RATIONS]);
     if (hp * 5 < (int32_t)most * 2) {
         if (heal) return DUNGEON_USE + heal;
         if (full) return DUNGEON_USE + full;
+        if (guess && !calm) return DUNGEON_USE + guess;
     }
-    if (words[DW_POISON] && hp <= (int32_t)(words[DW_POISON] / 4u) + 2) {
+    if (mind->sick > turn && hp <= (int32_t)((mind->sick - turn) / 4u) + 2) {
         if (cure) return DUNGEON_USE + cure;
         if (full) return DUNGEON_USE + full;
         if (heal) return DUNGEON_USE + heal;
     }
-    if (hot && words[DW_FIRE] < 5u && warm) return DUNGEON_USE + warm;
-    if (chill && words[DW_COLD] < 5u && cool) return DUNGEON_USE + cool;
+    if (hot && mind->fire < turn + 5u && warm) return DUNGEON_USE + warm;
+    if (chill && mind->cold < turn + 5u && cool) return DUNGEON_USE + cool;
     if (target < 4u && (!danger || swift)) return target;
     if (words[DW_FOOD] < 150u && words[DW_RATIONS]) return DUNGEON_USE + 1u;
-    uint32_t calm = near > 8u && !cornered && (words[DW_FOOD] > 200u || words[DW_RATIONS]);
-    if (calm && !stairs && (hp * 10 < (int32_t)most * 7 || (last && !bossAwake && hp < (int32_t)most) || words[DW_CONFUSED])) return DUNGEON_USE;
-    if (dungeon_exposed(w, words, at))
+    if (calm && guess && hp * 10 < (int32_t)most * 7 && hp * 5 >= (int32_t)most * 2) return DUNGEON_USE + guess;
+    if (calm && !stairs && (hp * 10 < (int32_t)most * 7 || (last && !mind->boss && hp < (int32_t)most) || mind->dizzy > turn)) return DUNGEON_USE;
+    if (dungeon_exposed(w, words, &s, at))
         for (uint32_t d = 0u; d < 4u; d++) {
             uint32_t to = dungeon_toward(at, d);
-            if (dungeon_free(w, to, at) && !dungeon_exposed(w, words, to)) return d;
+            if (dungeon_free(w, to, at) && !dungeon_exposed(w, words, &s, to)) return d;
         }
-    uint64_t key = (uint64_t)words[DW_RUN] << 32 | (uint64_t)words[DW_DEPTH] << 28 | (sign & 0x1FFFFu);
-    if (w->avoidKey != key) {
-        __builtin_memset(w->avoid, 0, sizeof w->avoid);
-        for (uint32_t m = 0u; m < n; m++) {
-            if (!dungeon_still(w, m)) continue;
-            uint32_t cell = w->my[m] * DUNGEON_SIDE + w->mx[m];
-            w->avoid[cell] = 1u;
-            for (uint32_t d = 0u; d < 4u; d++) w->avoid[dungeon_toward(cell, d)] = 1u;
-        }
-        w->avoidKey = key;
-    }
-    if (words[DW_ITEMS] && !danger) {
-        uint64_t loot = key | (uint64_t)words[DW_ITEMS] << 18;
-        if (w->lootKey != loot) {
-            uint16_t source[DUNGEON_ITEMS];
-            for (uint32_t i = 0u; i < words[DW_ITEMS]; i++) source[i] = (uint16_t)(w->iy[i] * DUNGEON_SIDE + w->ix[i]);
-            dungeon_flood(w, 1u, w->loot, source, words[DW_ITEMS]);
-            w->lootKey = loot;
-        }
-        uint32_t direction = dungeon_downhill(w->loot, at);
+    uint8_t avoid[DUNGEON_CELLS], want[DUNGEON_CELLS];
+    dungeon_wary(mind, avoid);
+    if (!danger && dungeon_mark(mind, want, DK_ITEM)) {
+        uint32_t direction = dungeon_seek(mind, avoid, want, at);
         if (direction < 4u) return direction;
     }
-    uint32_t goal = last ? bossAt : words[DW_STAIRS];
-    if (!goal) return DUNGEON_USE;
-    return dungeon_route(w, key | (uint64_t)goal << 18, goal, at);
+    if (!(danger && dungeon_goal(mind, last, want)) && dungeon_frontier(mind, want)) {
+        uint32_t direction = dungeon_head(mind, avoid, want, at);
+        if (direction < 4u) return direction;
+    }
+    if (!dungeon_goal(mind, last, want) && (last || !dungeon_mark(mind, want, DK_STILL))) return DUNGEON_USE;
+    uint32_t direction = dungeon_head(mind, avoid, want, at);
+    return direction < 4u ? direction : DUNGEON_USE;
 }
 
 void dungeon_oracle(uint32_t instance, uint32_t seed, uint32_t step, const uint32_t *words, uint32_t *extra, const float *obs, float *ctrl, const float *shared) {
     (void)seed; (void)step; (void)obs; (void)shared;
-    uint32_t choice = dungeon_decide(&DUNGEON_KNOBS[instance], words, dungeon_world(extra));
-    ctrl[0] = (float)(choice < DUNGEON_USE ? choice : choice - DUNGEON_USE == words[DW_SLOT] ? DUNGEON_ACT : DUNGEON_NEXT);
+    dungeonWorld *w = dungeon_world(extra);
+    uint32_t choice = dungeon_decide(&DUNGEON_KNOBS[instance], words, w), slot = choice - DUNGEON_USE;
+    uint32_t act = choice < DUNGEON_USE ? choice : slot == words[DW_SLOT] ? DUNGEON_ACT : DUNGEON_NEXT;
+    w->mind.quaffed = act == DUNGEON_ACT && slot >= 2u ? slot - 1u : 0u;
+    ctrl[0] = (float)act;
 }

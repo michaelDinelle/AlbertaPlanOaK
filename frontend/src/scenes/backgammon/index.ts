@@ -10,8 +10,8 @@ import { fbm } from '@kit/textures';
 import { TOKENS } from '@kit/tokens';
 import type { FrameUpdate, LegendSpec, SceneContext, SceneFactory, ScenePost } from '@kit/types';
 import {
-  BG_AGENT_MOVE, BG_AGENT_THINK, BG_BAR, BG_CURSOR, BG_CURSOR_SLOT, BG_DICE, BG_FROM_SLOT, BG_GAME_SLOT, BG_HIGH, BG_HIGH_LEGAL, BG_HIGH_SLOT, BG_LAST, BG_LOW, BG_LOW_SLOT, BG_MEMBER_SLOT,
-  BG_MEN, BG_NONE, BG_OFF, BG_OPPONENT_THINK, BG_OWNER_SLOT, BG_PHASE, BG_PHASE_SLOT, BG_POINTS, BG_TO_SLOT, BG_TURN_SLOT, BG_USED_SLOT, bgDoubles, bgMen, bgRemaining, bgSlot,
+  BG_BAR, BG_DICE, BG_GAME_SLOT, BG_HIGH_SLOT, BG_LOW_SLOT, BG_MEMBER_SLOT, BG_MEN, BG_NEXT, BG_OFF, BG_PATH, BG_POINTS, BG_PROPOSAL, BG_PROPOSAL_SLOT, BG_PROPOSALS,
+  BG_PROPOSALS_SLOT, BG_REPLY, BG_REPLY_DICE, BG_REPLY_HIGH_SLOT, BG_REPLY_LOW_SLOT, BG_STEPS, BG_TURN_SLOT, bgCounts, bgFrom, bgHops, bgMoveSlot, bgSlot, bgTo,
 } from '@sim/envs/backgammon';
 import { countEvents, lastEvent } from '@sim/events';
 import { parameter } from '../../data/envs';
@@ -46,10 +46,9 @@ const DICE_X = BAR / 2 + 3;
 const COLS = 8;
 const CELL_PX = 128;
 const SIDE = BG_OFF + 1;
-const WINDOW = 5;
+const THROWS = 2 * BG_STEPS;
 
 const GLIDE = 11;
-const CURSOR_GLIDE = 18;
 const FADE = 10;
 const ROLL_SECONDS = 0.5;
 const FINALE_SECONDS = 1.2;
@@ -73,7 +72,6 @@ const IVORY = 0xf2eadb;
 const GOLD = TOKENS.celebrationGold;
 const OPPONENTS = ['random', 'pubeval', 'league'] as const;
 const RESULTS = ['single', 'gammon', 'backgammon'] as const;
-const ACTIONS = ['cursor −1', 'cursor +1', 'play high', 'play low', 'jump'] as const;
 
 const SERIF = 'Palatino, "Palatino Linotype", "Book Antiqua", "Times New Roman", serif';
 const SANS = 'ui-rounded, "SF Pro Rounded", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif';
@@ -87,17 +85,14 @@ const columnX = (point: number): number => {
 
 const spacing = (n: number): number => (n > FULL ? (LENGTH - PITCH) / (n - 1) : PITCH);
 
+const rollText = (high: number, low: number): string => (high === low ? `double ${high}s` : `${high}·${low}`);
+
 function slot(side: number, at: number, k: number, n: number, out: THREE.Vector3): THREE.Vector3 {
   if (at === BG_OFF) return out.set(TRAY_X, 0, side === 0 ? HZ - 0.22 - k * SLAB : -HZ + 0.22 + k * SLAB);
   const along = PITCH / 2 + k * spacing(n);
   if (at === BG_BAR) return out.set(0, 0, side === 0 ? -(BAND / 2 + along) : BAND / 2 + along);
   const inward = at > 12 ? 1 : -1;
   return out.set(columnX(at), 0, inward * (along - HZ));
-}
-
-function column(at: number, out: THREE.Vector3): THREE.Vector3 {
-  if (at === BG_BAR) return out.set(0, 0, -(BAND + LENGTH) / 2);
-  return out.set(columnX(at), 0, (at > 12 ? -1 : 1) * (HZ - LENGTH / 2));
 }
 
 interface Atlas { texture: THREE.DataTexture; rows: number }
@@ -144,8 +139,9 @@ const composite = (color: N<'vec3'>, face: N<'float'>, under: N<'float'>, glow: 
 };
 
 interface Man { side: number; at: number; k: number; x: number; z: number; tx: number; tz: number; morph: number; lift: number; moved: number }
-interface Bracket { x: number; z: number; alpha: number }
-interface Die { value: number; used: number; x: number; angle: number }
+interface Ghost { x: number; z: number; alpha: number; aim: number }
+interface Arrow { from: THREE.UniformNode<'vec2', THREE.Vector2>; to: THREE.UniformNode<'vec2', THREE.Vector2>; strength: THREE.UniformNode<'float', number>; aim: number }
+interface Die { value: number; owner: number; x: number; angle: number }
 
 class BackgammonScene extends Stage2DScene {
   readonly post: ScenePost = { bloom: 0.42, fog: { from: ['dusk', 'fog'], blend: [[['night', 'fog'], 0.6]] } };
@@ -168,33 +164,23 @@ class BackgammonScene extends Stage2DScene {
   private step = -1;
   private roll = '';
   private rollAt = -Infinity;
-  private lastMove = -1;
-  private lastAt = -Infinity;
-  private phase = BG_AGENT_THINK;
-  private cursor = 24;
+  private replyAt = -Infinity;
+  private closing = false;
 
   private checkers: THREE.InstancedMesh | null = null;
   private lookAttr: THREE.InstancedBufferAttribute | null = null;
   private fxAttr: THREE.InstancedBufferAttribute | null = null;
   private diceMesh: THREE.InstancedMesh | null = null;
   private diceAttr: THREE.InstancedBufferAttribute | null = null;
-  private frameMesh: THREE.InstancedMesh | null = null;
-  private frameAttr: THREE.InstancedBufferAttribute | null = null;
-  private lamps: { mesh: THREE.Mesh; tint: THREE.Color }[] = [];
   private diceLamp: { mesh: THREE.Mesh; tint: THREE.Color } | null = null;
 
   private readonly pointState = new THREE.DataTexture(new Float32Array(4 * (BG_BAR + 1)), BG_BAR + 1, 1, THREE.RGBAFormat, THREE.FloatType);
-  private readonly legalTarget = new Float32Array(2 * (BG_BAR + 1));
-  private readonly arrowFrom = uniform(new THREE.Vector2());
-  private readonly arrowTo = uniform(new THREE.Vector2());
-  private readonly arrowStrength = uniform(0);
+  private readonly pointTarget = new Float32Array(3 * (BG_BAR + 1));
   private readonly clock = uniform(0);
-  private arrowAim = 0;
+  private readonly arrows: Arrow[] = Array.from({ length: 2 * BG_STEPS }, () => ({ from: uniform(new THREE.Vector2()), to: uniform(new THREE.Vector2()), strength: uniform(0), aim: 0 }));
 
-  private readonly brackets: Bracket[] = Array.from({ length: WINDOW }, () => ({ x: 0, z: 0, alpha: 0 }));
-  private readonly ghosts: { x: number; z: number; alpha: number; aim: number; tray: number }[] = [{ x: 0, z: 0, alpha: 0, aim: 0, tray: 0 }, { x: 0, z: 0, alpha: 0, aim: 0, tray: 0 }];
+  private readonly ghosts: Ghost[] = Array.from({ length: BG_STEPS }, () => ({ x: 0, z: 0, alpha: 0, aim: 0 }));
   private readonly dice: Die[] = [];
-  private dieOwner = 0;
   private diceFade = 1;
   private readonly order: Man[] = [];
   private readonly matrix = new THREE.Matrix4();
@@ -203,16 +189,16 @@ class BackgammonScene extends Stage2DScene {
   private readonly scale = new THREE.Vector3();
   private readonly at = new THREE.Vector3();
   private readonly scratch = new THREE.Vector3();
-  private readonly ledger = { turn: '—', dice: '—', cursor: '—', action: '—', pips: '—', last: '—', note: '', off: 0 };
+  private readonly ledger = { proposal: '—', dice: '—', action: '—', reply: '—', pips: '—', last: '—', note: '', off: 0 };
 
   private legendFor(accent: number): LegendSpec {
     return {
     title: 'BACKGAMMON',
     rows: [
-      { key: 'turn', label: 'turn', tint: accent, value: () => this.ledger.turn },
+      { key: 'proposal', label: 'proposal', tint: accent, value: () => this.ledger.proposal },
       { key: 'dice', label: 'dice', tint: IVORY, value: () => this.ledger.dice },
-      { key: 'cursor', label: 'cursor', tint: 0xffb866, value: () => this.ledger.cursor },
       { key: 'action', label: 'action', tint: 0xdcf4ff, value: () => this.ledger.action },
+      { key: 'reply', label: 'reply', tint: EBONY_RIM, value: () => this.ledger.reply },
       { key: 'pips', label: 'pips', tint: BRASS, value: () => this.ledger.pips },
       { key: 'last', label: 'last game', tint: GOLD, value: () => this.ledger.last },
     ],
@@ -241,15 +227,16 @@ class BackgammonScene extends Stage2DScene {
   }
 
   protected override overlayOptions(): GroundTruthOptions {
-    const truth = new THREE.Vector3();
+    const truth = new THREE.Vector3(), counts = new Int8Array(2 * BG_OFF);
     return {
       debug: (frame, kit) => {
-        const words = frame.frameAt(frame.state.step).words, cursor = words[BG_CURSOR]!;
-        const men = kit.marks('men', 2 * BG_MEN), legal = kit.marks('legal', 2 * BG_BAR), window = kit.marks('window', WINDOW), pips = kit.marks('dice', 24);
+        const words = frame.frameAt(frame.state.step).words, dice = words[BG_DICE]!, reply = words[BG_REPLY_DICE]!;
+        const men = kit.marks('men', 2 * BG_MEN), pips = kit.marks('dice', 2 * 4 * 6);
+        bgCounts(words, counts);
         for (let side = 0; side < 2; side++) {
           const tint = side ? 0xffd166 : TOKENS.uiCyan;
           for (let at = 1; at <= BG_OFF; at++) {
-            const n = bgMen(words, side, at);
+            const n = counts[bgSlot(side, at)]!;
             for (let k = 0; k < n; k++) {
               if (at === BG_OFF) slot(side, at, k, n, truth);
               else if (at === BG_BAR) truth.set(0, 0, (side ? 1 : -1) * (BAND / 2 + 0.25 + 0.3 * k));
@@ -258,41 +245,25 @@ class BackgammonScene extends Stage2DScene {
             }
           }
         }
-        if (words[BG_PHASE] === BG_AGENT_MOVE) for (let p = 1; p <= BG_BAR; p++) for (let w = 0; w < 2; w++) {
-          if (!((words[BG_HIGH_LEGAL + w]! >>> p) & 1)) continue;
-          if (p === BG_BAR) truth.set(0, 0, -BAND / 2);
-          else truth.set(columnX(p), 0, (p > 12 ? -1 : 1) * (HZ + LIP / 2));
-          legal.set(truth.x + (w ? 0.3 : -0.3), 0.2, truth.z, 0.09, w ? 0xff5ec8 : 0xffd166);
-        }
-        for (let j = -2; j <= 2; j++) {
-          const p = cursor + j;
-          if (p < 1 || p > BG_POINTS) continue;
-          window.set(columnX(p), 0.2, (p > 12 ? -1 : 1) * (HZ + 0.15), 0.12, 0x9fe2f5);
-        }
-        column(cursor, truth);
-        const box = kit.curve('cursor', 5, TOKENS.uiCyan), hx = (cursor === BG_BAR ? BAR / 2 : PITCH / 2) + 0.12, hz = LENGTH / 2 + 0.12;
-        for (const [sx, sz] of [[-1, -1], [1, -1], [1, 1], [-1, 1], [-1, -1]] as const) box.point(truth.x + sx * hx, 0.2, truth.z + sz * hz);
-        const last = words[BG_LAST]!, arrow = kit.curve('last', 2, 0xffffff);
-        if (last !== BG_NONE) {
-          this.anchor(1, last & 255, truth);
-          arrow.point(truth.x, 0.2, truth.z);
-          this.anchor(1, last >>> 8, truth);
-          arrow.point(truth.x, 0.2, truth.z);
-        }
-        const dice = words[BG_DICE]!, doubles = bgDoubles(dice), state = (dice >>> 6) & 15, opponent = (dice >>> 10) & 1, count = doubles ? 4 : 2;
-        for (let i = 0; i < count; i++) {
-          const value = i === 0 || doubles ? dice & 7 : (dice >>> 3) & 7, used = doubles ? i < state : ((state >>> i) & 1) === 1;
-          const cx = (opponent ? -DICE_X : DICE_X) + (i - (count - 1) / 2) * 1.02;
-          for (let v = 0; v < value; v++) pips.set(cx - 0.25 + (v % 3) * 0.25, 0.2, (v < 3 ? -0.14 : 0.14), 0.07, used ? 0x7a95c4 : opponent ? 0xffd166 : TOKENS.uiCyan);
+        for (let side = 0; side < 2; side++) {
+          const path = side ? words[BG_REPLY]! : words[BG_PATH]!, roll = side ? reply : dice;
+          for (let i = 0; i < BG_STEPS; i++) {
+            const arrow = kit.curve(`${side ? 'reply' : 'proposal'}${i}`, 2, side ? 0xffffff : TOKENS.uiCyan);
+            if (i >= bgHops(path)) continue;
+            slot(side, bgFrom(path, i, side), 0, 1, truth);
+            arrow.point(truth.x, 0.2, truth.z);
+            slot(side, bgTo(path, roll, i, side), 0, 1, truth);
+            arrow.point(truth.x, 0.2, truth.z);
+          }
+          if (!roll) continue;
+          const high = roll & 7, low = (roll >>> 3) & 7, count = high === low ? 4 : 2;
+          for (let i = 0; i < count; i++) {
+            const value = i === 0 || high === low ? high : low, cx = (side ? -DICE_X : DICE_X) + (i - (count - 1) / 2) * 1.02;
+            for (let v = 0; v < value; v++) pips.set(cx - 0.25 + (v % 3) * 0.25, 0.2, (v < 3 ? -0.14 : 0.14), 0.07, side ? 0xffd166 : TOKENS.uiCyan);
+          }
         }
       },
     };
-  }
-
-  private anchor(side: number, at: number, out: THREE.Vector3): THREE.Vector3 {
-    if (at === 0) return slot(side, BG_BAR, 0, 1, out);
-    if (at === BG_BAR) return slot(side, BG_OFF, 0, 1, out);
-    return slot(side, at, 0, 1, out);
   }
 
   protected build(ctx: SceneContext, { light }: Stage2D): void {
@@ -328,30 +299,17 @@ class BackgammonScene extends Stage2DScene {
     checkers.frustumCulled = false;
     this.checkers = checkers;
 
-    this.diceAttr = new THREE.InstancedBufferAttribute(new Float32Array(16), 4).setUsage(THREE.DynamicDrawUsage);
-    const dice = instancedMesh(flat(DIE_SPRITE, DIE_SPRITE), this.diceMaterial(light), 4);
+    this.diceAttr = new THREE.InstancedBufferAttribute(new Float32Array(THROWS * 4), 4).setUsage(THREE.DynamicDrawUsage);
+    const dice = instancedMesh(flat(DIE_SPRITE, DIE_SPRITE), this.diceMaterial(light), THROWS);
     dice.renderOrder = 4;
     dice.frustumCulled = false;
     this.diceMesh = dice;
+    this.scene.add(checkers, dice);
+    for (const mesh of [checkers, dice]) this.disposables.push(mesh, mesh.geometry, mesh.material as THREE.Material);
 
-    this.frameAttr = new THREE.InstancedBufferAttribute(new Float32Array(WINDOW * 4), 4).setUsage(THREE.DynamicDrawUsage);
-    const frames = instancedMesh(flat(PITCH + 0.5, LENGTH + 0.5), this.frameMaterial(), WINDOW);
-    frames.renderOrder = 5;
-    frames.frustumCulled = false;
-    this.frameMesh = frames;
-    this.scene.add(checkers, dice, frames);
-    for (const mesh of [checkers, dice, frames]) this.disposables.push(mesh, mesh.geometry, mesh.material as THREE.Material);
-
-    for (let j = 0; j < WINDOW; j++) {
-      const tint = new THREE.Color();
-      const mesh = light.emitter(flat(0.14, LENGTH - 1), uniform(tint) as unknown as N<'vec3'>);
-      mesh.visible = false;
-      this.lamps.push({ mesh, tint });
-      this.scene.add(mesh);
-      this.disposables.push(mesh.geometry, mesh.material as THREE.Material);
-    }
     const diceTint = new THREE.Color();
     const diceLamp = light.emitter(flat(2.3, 0.1), uniform(diceTint) as unknown as N<'vec3'>);
+    diceLamp.position.set(DICE_X, 0, 0);
     this.diceLamp = { mesh: diceLamp, tint: diceTint };
     this.scene.add(diceLamp);
     this.disposables.push(diceLamp.geometry, diceLamp.material as THREE.Material);
@@ -385,9 +343,9 @@ class BackgammonScene extends Stage2DScene {
     const lengthwise = v.div(LENGTH).mul(-0.16).add(1.06);
     const inlay = smoothstep(0.045, 0.02, abs(dTri.add(0.06))).mul(0.22);
     const pointColor = tone.mul(lengthwise).mul(nap.mul(0.35).add(0.7)).mul(inlay.oneMinus()).add(rgb(BRASS).mul(inlay));
-    const window = info.x.mul(step(0, v));
+    const touched = info.x.mul(step(0, v));
     const recess = smoothstep(-0.32, 0, dField).mul(0.4);
-    const field = mix(felt, pointColor, tri).mul(window.mul(tri).mul(0.26).add(1)).mul(recess.oneMinus());
+    const field = mix(felt, pointColor, tri).mul(touched.mul(tri).mul(0.26).add(1)).mul(recess.oneMinus());
 
     const fieldCover = coverage(dField), trayCover = coverage(dTray);
     const bevel = smoothstep(-0.16, 0, dCase).mul(z.div(CASE_HZ).mul(-0.5).add(0.15));
@@ -404,11 +362,13 @@ class BackgammonScene extends Stage2DScene {
     const ink = glyphAt(atlas, point.sub(1), local).mul(rail);
     albedo = mix(albedo, rgb(0xe3c48a), ink.mul(0.85));
 
-    const legal = max(info.y, info.z);
-    const edge = exp(abs(dTri).mul(-38)).mul(window).mul(tri.add(0.35)).mul(fieldCover).mul(0.55);
+    const edge = exp(abs(dTri).mul(-38)).mul(touched).mul(tri.add(0.35)).mul(fieldCover).mul(0.55);
     const barInfo = texture(this.pointState, vec2((BG_BAR + 0.5) / (BG_BAR + 1), 0.5));
     const barRim = exp(abs(sdBox(p.sub(vec2(0, -(BAND + LENGTH) / 2)), vec2(BAR / 2 - 0.12, LENGTH / 2), 0.25)).mul(-26));
-    const glow = rgb(GOLD).mul(ink.mul(legal).mul(2.2).add(barRim.mul(max(barInfo.y, barInfo.z)).mul(0.9))).add(rgb(this.accent).mul(edge));
+    const rivalRim = exp(abs(sdBox(p.sub(vec2(0, (BAND + LENGTH) / 2)), vec2(BAR / 2 - 0.12, LENGTH / 2), 0.25)).mul(-26));
+    const landing = rgb(GOLD).mul(ink.mul(info.y).mul(2.2).add(barRim.mul(barInfo.y).mul(0.9)));
+    const answered = rgb(IVORY).mul(ink.mul(info.z).mul(1.1).add(rivalRim.mul(barInfo.z).mul(0.6)));
+    const glow = landing.add(answered).add(rgb(this.accent).mul(edge));
     const shadow = smoothstep(0.9, -0.2, sdBox(p.sub(vec2((CASE_LEFT + CASE_RIGHT) / 2 + 0.12, 0.22)), vec2((CASE_RIGHT - CASE_LEFT) / 2, CASE_HZ), 0.3)).mul(0.7);
     const result = composite(light.lit(albedo).add(glow), coverage(dCase), shadow);
     material.colorNode = result.color;
@@ -473,31 +433,22 @@ class BackgammonScene extends Stage2DScene {
     return material;
   }
 
-  private frameMaterial(): THREE.MeshBasicNodeMaterial {
-    const frame = instancedDynamicBufferAttribute(this.frameAttr!, 'vec4') as N<'vec4'>;
-    const material = new THREE.MeshBasicNodeMaterial({ transparent: true, depthTest: false, depthWrite: false, fog: false });
-    const t = uv().sub(0.5).mul(vec2(PITCH + 0.5, LENGTH + 0.5));
-    const d = sdBox(t, vec2(frame.z.mul(0.05).add(PITCH / 2), LENGTH / 2), 0.16);
-    const strength = frame.x;
-    const stroke = coverage(abs(d).sub(strength.mul(0.022).add(0.012)));
-    const halo = exp(abs(d).mul(-14)).mul(strength.mul(0.4).add(0.08));
-    material.colorNode = mix(rgb(this.accent).mul(1.5), rgb(0xffe2bd).mul(1.8), strength);
-    material.opacityNode = min(stroke.mul(strength.mul(0.55).add(0.45)).add(halo), 1).mul(frame.y);
-    return material;
-  }
-
   private arrowMaterial(): THREE.MeshBasicNodeMaterial {
     const material = new THREE.MeshBasicNodeMaterial({ transparent: true, depthTest: false, depthWrite: false, fog: false });
-    const p = positionWorld.xz, from = this.arrowFrom, to = this.arrowTo;
-    const span = to.sub(from), reach = max(length(span), 1e-3), dir = span.div(reach), side = vec2(dir.y.negate(), dir.x);
-    const along = dot(p.sub(from), dir);
-    const dash = step(0.4, fract(along.div(0.32).sub(this.clock.mul(1.4))));
-    const tip = to.sub(dir.mul(RADIUS + 0.08));
-    const shaft = coverage(sdSegment(p, from.add(dir.mul(0.28)), tip.sub(dir.mul(0.1)), 0.034)).mul(dash);
-    const head = coverage(min(sdSegment(p, tip, tip.sub(dir.mul(0.36)).add(side.mul(0.21)), 0.042), sdSegment(p, tip, tip.sub(dir.mul(0.36)).sub(side.mul(0.21)), 0.042)));
-    const ring = coverage(abs(length(p.sub(from)).sub(0.24)).sub(0.032));
-    material.colorNode = rgb(IVORY).mul(1.5);
-    material.opacityNode = max(max(shaft, head), ring).mul(this.arrowStrength);
+    const p = positionWorld.xz;
+    let agent: N<'float'> = float(0), rival: N<'float'> = float(0);
+    this.arrows.forEach(({ from, to, strength }, i) => {
+      const span = to.sub(from), reach = max(length(span), 1e-3), dir = span.div(reach), side = vec2(dir.y.negate(), dir.x);
+      const along = dot(p.sub(from), dir);
+      const dash = step(0.4, fract(along.div(0.32).sub(this.clock.mul(1.4))));
+      const tip = to.sub(dir.mul(RADIUS + 0.08));
+      const shaft = coverage(sdSegment(p, from.add(dir.mul(0.28)), tip.sub(dir.mul(0.1)), 0.034)).mul(dash);
+      const head = coverage(min(sdSegment(p, tip, tip.sub(dir.mul(0.36)).add(side.mul(0.21)), 0.042), sdSegment(p, tip, tip.sub(dir.mul(0.36)).sub(side.mul(0.21)), 0.042)));
+      if (i < BG_STEPS) agent = max(agent, max(shaft, head).mul(strength));
+      else rival = max(rival, max(max(shaft, head), coverage(abs(length(p.sub(from)).sub(0.24)).sub(0.032))).mul(strength));
+    });
+    material.colorNode = rgb(this.accent).mul(1.9).mul(agent).add(rgb(IVORY).mul(1.5).mul(rival)).div(max(agent.add(rival), 1e-4));
+    material.opacityNode = max(agent, rival);
     return material;
   }
 
@@ -527,13 +478,14 @@ class BackgammonScene extends Stage2DScene {
   }
 
   private advance(frame: FrameUpdate, step: number, pool: Stage2D['pool'], time: number): void {
-    const pose = frame.state.pose, now = frame.frameAt(step), words = now.words;
+    const pose = frame.state.pose;
     const sequential = !frame.scrubbed && this.step >= 0 && step > this.step, ended = lastEvent(frame.eventLog, 'done', step);
     const renewed = !sequential || (ended !== undefined && ended > this.step) || this.ledger.note === '';
     const counts = this.countsAt(frame, step, new Int8Array(2 * SIDE));
+    const game = pose[BG_GAME_SLOT]!, turn = pose[BG_TURN_SLOT]!, roll = `${game}:${turn}`, rolled = roll !== this.roll;
     if (sequential) {
       if (ended !== undefined && ended > this.step) this.finale(frame, ended, pool, time);
-      else if (!this.pending) this.sparks(counts, pool, time);
+      else if (!this.pending && rolled) this.sparks(counts, pool, time);
       if (this.pending) this.pending = counts;
       else this.apply(counts, false, time);
     } else {
@@ -542,55 +494,53 @@ class BackgammonScene extends Stage2DScene {
       this.settled = false;
       this.apply(counts, true, time);
     }
-
-    const dice = words[BG_DICE]!, game = pose[BG_GAME_SLOT]!, turn = pose[BG_TURN_SLOT]!, owner = pose[BG_OWNER_SLOT]!, doubles = bgDoubles(dice);
-    const high = pose[BG_HIGH_SLOT]!, low = pose[BG_LOW_SLOT]!, used = pose[BG_USED_SLOT]!;
-    const roll = `${game}:${turn}:${owner}`;
-    if (sequential && roll !== this.roll) this.rollAt = time;
+    if (rolled) {
+      this.rollAt = sequential ? time : -Infinity;
+      this.replyAt = sequential ? time : -Infinity;
+    }
     this.roll = roll;
-    this.dieOwner = owner;
+
     this.dice.length = 0;
-    const count = doubles ? 4 : 2;
-    for (let i = 0; i < count; i++) this.dice.push({
-      value: i === 0 || doubles ? high : low,
-      used: doubles ? (i < used ? 1 : 0) : (used >>> i) & 1,
-      x: (owner ? -DICE_X : DICE_X) + (i - (count - 1) / 2) * 1.02,
-      angle: (hash2f(game * 131 + turn, i, 0x5eed) - 0.5) * 0.7,
-    });
+    this.cast(pose[BG_HIGH_SLOT]!, pose[BG_LOW_SLOT]!, 0, game, turn);
+    this.cast(pose[BG_REPLY_HIGH_SLOT]!, pose[BG_REPLY_LOW_SLOT]!, 1, game, turn);
+    this.closing = pose[BG_PROPOSAL_SLOT]! + 1 >= pose[BG_PROPOSALS_SLOT]!;
 
-    this.phase = pose[BG_PHASE_SLOT]!;
-    this.cursor = pose[BG_CURSOR_SLOT]!;
-    const moving = this.phase === BG_AGENT_MOVE;
-    for (let p = 0; p <= BG_BAR; p++) for (let w = 0; w < 2; w++) this.legalTarget[2 * p + w] = moving && ((words[BG_HIGH_LEGAL + w]! >>> p) & 1) ? 1 : 0;
-
-    const from = pose[BG_FROM_SLOT]!, to = pose[BG_TO_SLOT]!, move = from < 0 ? -1 : from | (to << 8);
-    if (move >= 0) {
-      this.anchor(1, from, this.scratch);
-      if (from > 0) slot(1, from, counts[SIDE + from]!, counts[SIDE + from]! + 1, this.scratch);
-      this.arrowFrom.value.set(this.scratch.x, this.scratch.z);
-      const n = counts[SIDE + (to === BG_BAR ? BG_OFF : to)]!;
-      if (to === BG_BAR) slot(1, BG_OFF, Math.max(0, n - 1), n, this.scratch);
-      else slot(1, to, Math.max(0, n - 1), n, this.scratch);
-      this.arrowTo.value.set(this.scratch.x, this.scratch.z);
-      if (move !== this.lastMove) this.lastAt = sequential ? time : -Infinity;
-    }
-    this.lastMove = move;
-    this.arrowAim = move >= 0 ? 1 : 0;
-
-    const cursor = this.cursor, dieOf = [high, low];
-    for (let w = 0; w < 2; w++) {
-      const ghost = this.ghosts[w]!, legal = moving && (!doubles || w === 0) && ((words[BG_HIGH_LEGAL + w]! >>> cursor) & 1) === 1;
-      ghost.aim = legal ? 1 : 0;
-      if (!legal) continue;
-      const die = dieOf[w]!, dest = cursor > die ? cursor - die : BG_OFF, n = counts[dest]!;
-      slot(0, dest, n, n + 1, this.scratch);
-      ghost.x = this.scratch.x;
-      ghost.z = this.scratch.z;
-      ghost.tray = dest === BG_OFF ? 1 : 0;
+    this.pointTarget.fill(0);
+    for (let side = 0; side < 2; side++) for (let i = 0; i < BG_STEPS; i++) {
+      const from = pose[bgMoveSlot(side, i)]!, to = pose[bgMoveSlot(side, i) + 1]!, arrow = this.arrows[side * BG_STEPS + i]!;
+      arrow.aim = from < 0 ? 0 : 1;
+      if (!side) this.ghosts[i]!.aim = arrow.aim;
+      if (from < 0) continue;
+      let k = counts[side * SIDE + from]!;
+      for (let j = 0; j < i; j++) k += pose[bgMoveSlot(side, j)] === from ? 1 : 0;
+      slot(side, from, k, k + 1, this.scratch);
+      arrow.from.value.set(this.scratch.x, this.scratch.z);
+      if (!side) {
+        this.ghosts[i]!.x = this.scratch.x;
+        this.ghosts[i]!.z = this.scratch.z;
+      }
+      const n = counts[side * SIDE + to]!;
+      slot(side, to, Math.max(0, n - 1), n, this.scratch);
+      arrow.to.value.set(this.scratch.x, this.scratch.z);
+      if (from < BG_BAR && !side) this.pointTarget[3 * from] = 1;
+      if (to <= BG_POINTS) this.pointTarget[3 * to + side + 1] = 1;
+      if (to <= BG_POINTS && !side) this.pointTarget[3 * to] = 1;
+      if (from === BG_BAR) this.pointTarget[3 * BG_BAR + side + 1] = 1;
     }
 
-    this.ledgerFor(frame, step, counts, dice, ended, renewed);
+    this.ledgerFor(frame, step, counts, ended, renewed);
     this.step = step;
+  }
+
+  private cast(high: number, low: number, owner: number, game: number, turn: number): void {
+    if (!high) return;
+    const count = high === low ? 4 : 2;
+    for (let i = 0; i < count; i++) this.dice.push({
+      value: i === 0 || high === low ? high : low,
+      owner,
+      x: (owner ? -DICE_X : DICE_X) + (i - (count - 1) / 2) * 1.02,
+      angle: (hash2f(game * 131 + turn, i + BG_STEPS * owner, 0x5eed) - 0.5) * 0.7,
+    });
   }
 
   private finale(frame: FrameUpdate, ended: number, pool: Stage2D['pool'], time: number): void {
@@ -607,11 +557,12 @@ class BackgammonScene extends Stage2DScene {
     }
     if (before.step !== ended - 1) return;
     const final = this.countsAt(frame, ended - 1, new Int8Array(2 * SIDE));
-    let left = -1, aboard = 0;
-    for (let at = 1; at <= BG_BAR; at++) if (final[winner * SIDE + at]) { aboard += final[winner * SIDE + at]!; left = at; }
-    if (aboard !== 1) throw new Error(`Backgammon game ${frame.state.pose[BG_GAME_SLOT]} ended with ${aboard} checkers still aboard for the winner`);
-    final[winner * SIDE + left]!--;
-    final[winner * SIDE + BG_OFF]!++;
+    let aboard = 0;
+    for (let at = 1; at <= BG_BAR; at++) {
+      aboard += final[winner * SIDE + at]!;
+      final[winner * SIDE + at] = 0;
+    }
+    final[winner * SIDE + BG_OFF] = final[winner * SIDE + BG_OFF]! + aboard;
     this.apply(final, false, time);
     this.finaleUntil = time + FINALE_SECONDS;
     this.finaleStep = ended;
@@ -667,20 +618,15 @@ class BackgammonScene extends Stage2DScene {
     this.shown.set(counts);
   }
 
-  private ledgerFor(frame: FrameUpdate, step: number, counts: Int8Array, dice: number, ended: number | undefined, renewed: boolean): void {
-    const pose = frame.state.pose, doubles = bgDoubles(dice), high = pose[BG_HIGH_SLOT]!, low = pose[BG_LOW_SLOT]!, left = bgRemaining(dice);
+  private ledgerFor(frame: FrameUpdate, step: number, counts: Int8Array, ended: number | undefined, renewed: boolean): void {
+    const pose = frame.state.pose, index = pose[BG_PROPOSAL_SLOT]!, total = pose[BG_PROPOSALS_SLOT]!, replyHigh = pose[BG_REPLY_HIGH_SLOT]!;
     const member = pose[BG_MEMBER_SLOT]!, rival = this.league ? `league ${member + 1}` : this.rival;
-    const who = this.phase <= BG_AGENT_MOVE ? 'agent' : rival;
-    this.ledger.turn = `${who} · ${this.phase === BG_AGENT_THINK || this.phase === BG_OPPONENT_THINK ? 'thinking' : this.phase === BG_AGENT_MOVE ? 'to move' : 'playing'}`;
-    this.ledger.dice = `${doubles ? `double ${high}s` : `${high}·${low}`} · ${left} left`;
-    this.ledger.cursor = this.cursor === BG_BAR ? 'bar' : `point ${this.cursor}`;
-    const before = step > 0 ? frame.frameAt(step - 1) : null, now = frame.frameAt(step), action = Math.trunc(now.actions[0]!);
-    if (!before || before.step !== step - 1 || before.words[BG_PHASE] !== BG_AGENT_MOVE) this.ledger.action = 'waiting';
-    else if (action === BG_HIGH || action === BG_LOW) {
-      const prior = before.words[BG_DICE]!, state = (prior >>> 6) & 15, which = bgDoubles(prior) ? 0 : action === BG_HIGH ? state & 1 : (state & 2 ? 0 : 1);
-      const moved = before.words.subarray(0, 4).some((word, i) => word !== now.words[i]) || now.done !== 0;
-      this.ledger.action = `play ${(prior >>> (3 * which)) & 7}${moved ? '' : ' · refused'}`;
-    } else this.ledger.action = ACTIONS[action] ?? 'waiting';
+    this.ledger.proposal = `${formatCount(index + 1)} of ${formatCount(total)}${this.closing ? ' · next plays' : ''}`;
+    this.ledger.dice = rollText(pose[BG_HIGH_SLOT]!, pose[BG_LOW_SLOT]!);
+    this.ledger.reply = replyHigh ? `${rival} ${rollText(replyHigh, pose[BG_REPLY_LOW_SLOT]!)}${pose[bgMoveSlot(1, 0)]! < 0 ? ' · passed' : ''}` : '—';
+    const before = step > 0 ? frame.frameAt(step - 1) : null, now = frame.frameAt(step);
+    if (!before || before.step !== step - 1) this.ledger.action = 'waiting';
+    else this.ledger.action = Math.trunc(now.actions[0]!) === BG_NEXT && before.words[BG_PROPOSAL]! + 1 < before.words[BG_PROPOSALS]! ? 'next' : 'play';
     let mine = 0, theirs = 0;
     for (let at = 1; at <= BG_POINTS; at++) {
       mine += at * counts[at]!;
@@ -703,7 +649,7 @@ class BackgammonScene extends Stage2DScene {
   private draw(dt: number, time: number): void {
     const checkers = this.checkers, look = this.lookAttr, fx = this.fxAttr;
     if (!checkers || !look || !fx) return;
-    const snap = !this.settled, glide = 1 - Math.exp(-GLIDE * dt), fade = snap ? 1 : 1 - Math.exp(-FADE * dt), cursorGlide = snap ? 1 : 1 - Math.exp(-CURSOR_GLIDE * dt);
+    const snap = !this.settled, glide = 1 - Math.exp(-GLIDE * dt), fade = snap ? 1 : 1 - Math.exp(-FADE * dt);
     this.settled = true;
     for (const man of this.men) {
       man.x += (man.tx - man.x) * glide;
@@ -725,11 +671,12 @@ class BackgammonScene extends Stage2DScene {
       fx.setXYZW(i, 0, 1, age >= 0 && age < MOVED_SECONDS ? 0.55 * (1 - age / MOVED_SECONDS) ** 2 : 0, 0);
       i++;
     }
+    const finale = this.pending !== null;
     for (const ghost of this.ghosts) {
-      ghost.alpha += (ghost.aim - ghost.alpha) * fade;
+      ghost.alpha += ((finale ? 0 : ghost.aim) - ghost.alpha) * fade;
       this.matrix.compose(this.at.set(ghost.x, 0, ghost.z), this.quaternion.identity(), this.scale.setScalar(ghost.alpha > 0.01 ? 1 : 0));
       checkers.setMatrixAt(i, this.matrix);
-      look.setXYZW(i, 0, -1, ghost.tray, 0);
+      look.setXYZW(i, 0, -1, 0, 0);
       fx.setXYZW(i, 1, ghost.alpha * 0.8, 0, 0);
       i++;
     }
@@ -737,12 +684,10 @@ class BackgammonScene extends Stage2DScene {
     look.needsUpdate = true;
     fx.needsUpdate = true;
 
-    const finale = this.pending !== null;
     this.diceFade += ((finale ? 0 : 1) - this.diceFade) * fade;
     const dice = this.diceMesh!, diceAttr = this.diceAttr!, rolling = clamp01((time - this.rollAt) / ROLL_SECONDS), settle = (1 - rolling) ** 3;
-    const thinking = this.phase === BG_AGENT_THINK || this.phase === BG_OPPONENT_THINK;
-    const pulse = thinking ? 0.18 + 0.14 * Math.sin(time * 5.5) : 0.1;
-    for (let d = 0; d < 4; d++) {
+    const pulse = this.closing ? 0.28 + 0.14 * Math.sin(time * 5.5) : 0.1;
+    for (let d = 0; d < THROWS; d++) {
       const die = this.dice[d];
       if (!die || this.diceFade < 0.02) {
         this.matrix.makeScale(0, 0, 0);
@@ -750,48 +695,22 @@ class BackgammonScene extends Stage2DScene {
         continue;
       }
       this.quaternion.setFromAxisAngle(this.axis, die.angle + settle * (d % 2 ? -4 : 4));
-      this.matrix.compose(this.at.set(die.x + settle * (this.dieOwner ? 0.8 : -0.8), 0, settle * (d % 2 ? 0.3 : -0.3)), this.quaternion, this.scale.setScalar((1 + 0.3 * settle - 0.14 * die.used) * this.diceFade));
+      this.matrix.compose(this.at.set(die.x + settle * (die.owner ? 0.8 : -0.8), 0, settle * (d % 2 ? 0.3 : -0.3)), this.quaternion, this.scale.setScalar((1 + 0.3 * settle - 0.14 * die.owner) * this.diceFade));
       dice.setMatrixAt(d, this.matrix);
-      diceAttr.setXYZW(d, die.value, this.dieOwner, die.used, die.used ? 0 : pulse);
+      diceAttr.setXYZW(d, die.value, die.owner, die.owner, die.owner ? 0 : pulse);
     }
     dice.instanceMatrix.needsUpdate = true;
     diceAttr.needsUpdate = true;
-    const diceLamp = this.diceLamp!;
-    diceLamp.mesh.position.set(this.dieOwner ? -DICE_X : DICE_X, 0, 0);
-    diceLamp.tint.set(this.dieOwner ? IVORY : this.accent).multiplyScalar((thinking ? 1.2 + 0.8 * Math.sin(time * 5.5) : 1.6) * this.diceFade);
-
-    const frameMesh = this.frameMesh!, frameAttr = this.frameAttr!, cursor = this.cursor;
-    for (let j = 0; j < WINDOW; j++) {
-      const slotFrame = this.brackets[j]!, point = cursor + j - 2, centre = j === 2;
-      const valid = centre || (point >= 1 && point <= BG_POINTS);
-      if (valid) {
-        column(point, this.scratch);
-        if (slotFrame.alpha < 0.03) { slotFrame.x = this.scratch.x; slotFrame.z = this.scratch.z; }
-        slotFrame.x += (this.scratch.x - slotFrame.x) * cursorGlide;
-        slotFrame.z += (this.scratch.z - slotFrame.z) * cursorGlide;
-      }
-      slotFrame.alpha += ((valid ? 1 : 0) - slotFrame.alpha) * fade;
-      this.matrix.compose(this.at.set(slotFrame.x, 0, slotFrame.z), this.quaternion.identity(), this.scale.setScalar(slotFrame.alpha > 0.01 ? 1 : 0));
-      frameMesh.setMatrixAt(j, this.matrix);
-      frameAttr.setXYZW(j, centre ? 1 : 0.2, slotFrame.alpha * (centre ? 1 : 0.7), centre && point === BG_BAR ? 1 : 0, 0);
-      const lamp = this.lamps[j]!;
-      lamp.mesh.visible = slotFrame.alpha > 0.03;
-      lamp.mesh.position.set(slotFrame.x, 0, slotFrame.z);
-      lamp.tint.set(this.accent).multiplyScalar((centre ? 2.6 : 0.9) * slotFrame.alpha);
-    }
-    frameMesh.instanceMatrix.needsUpdate = true;
-    frameAttr.needsUpdate = true;
+    this.diceLamp!.tint.set(this.accent).multiplyScalar((this.closing ? 1.2 + 0.8 * Math.sin(time * 5.5) : 1.6) * this.diceFade);
 
     const values = this.pointState.image.data as Float32Array;
-    for (let p = 0; p <= BG_BAR; p++) {
-      const seen = p >= 1 && p <= BG_POINTS && Math.abs(p - cursor) <= 2 ? 1 : 0;
-      values[4 * p]! += (seen - values[4 * p]!) * fade;
-      values[4 * p + 1]! += (this.legalTarget[2 * p]! - values[4 * p + 1]!) * fade;
-      values[4 * p + 2]! += (this.legalTarget[2 * p + 1]! - values[4 * p + 2]!) * fade;
-    }
+    for (let p = 0; p <= BG_BAR; p++) for (let c = 0; c < 3; c++) values[4 * p + c]! += (this.pointTarget[3 * p + c]! - values[4 * p + c]!) * fade;
     this.pointState.needsUpdate = true;
-    const fresh = clamp01((time - this.lastAt) / FRESH_SECONDS);
-    this.arrowStrength.value += (this.arrowAim * (0.42 + 0.58 * (1 - fresh)) * this.diceFade - this.arrowStrength.value) * fade;
+    const fresh = clamp01((time - this.replyAt) / FRESH_SECONDS);
+    this.arrows.forEach((arrow, a) => {
+      const aim = arrow.aim * (a < BG_STEPS ? 0.9 : 0.42 + 0.58 * (1 - fresh)) * this.diceFade;
+      arrow.strength.value += (aim - arrow.strength.value) * fade;
+    });
   }
 }
 

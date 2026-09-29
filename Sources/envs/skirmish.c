@@ -34,7 +34,7 @@ static const float SKIRMISH_THETA[11] = { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.
 static const float SKIRMISH_THETA_LOW[11] = { -2.0f, -2.0f, -2.0f, -2.0f, -2.0f, -2.0f, -2.0f, -2.0f, 0.0f, 0.2f, 0.0f };
 static const float SKIRMISH_THETA_HIGH[11] = { 2.0f, 2.0f, 2.0f, 2.0f, 2.0f, 2.0f, 4.0f, 2.0f, 1.0f, 1.0f, 0.5f };
 
-enum { SK_FOE = 20, SK_SLOTS = 64, SK_NONE = 63, SK_THETA = 11, SK_DRAWS = 96, SK_PICK = 0x5049434Bu };
+enum { SK_FOE = 20, SK_SLOTS = 64, SK_NONE = 63, SK_THETA = 11, SK_DRAWS = 96, SK_PICK = 0x5049434Bu, SK_IMAGINE = 0x494D4147u };
 enum { SK_MIN_DAMAGE, SK_SLOWDOWN, SK_REGEN_DELAY, SK_REGEN_RATE, SK_FORM, SK_ARRIVE };
 enum { SK_REFLECT_NEAR, SK_REFLECT_FAR, SK_CENTRE, SK_RING_NEAR, SK_RING_FAR };
 enum { SK_ATTACK = 4, SK_CYCLE = 5 };
@@ -56,7 +56,7 @@ typedef struct { _Alignas(16) float winRate[LEAGUE_MEMBERS]; float theta[LEAGUE_
 
 typedef struct { skWorld scratch; uint32_t words[SK_WORDS], battle, since, call, mode; } skOracle;
 
-typedef struct { const skirmishKnobs *k; skWorld *w; uint32_t *words; const float *theta; uint32_t now, seed; } skCtx;
+typedef struct { const skirmishKnobs *k; skWorld *w; uint32_t *words; const float *theta; uint32_t now, seed, draw; } skCtx;
 
 static skWorld *sk_world(uint32_t *extra) { return (skWorld *)((uintptr_t)(extra + 4) & ~(uintptr_t)15u); }
 static const skWorld *sk_worldAt(const uint32_t *extra) { return (const skWorld *)((uintptr_t)(extra + 4) & ~(uintptr_t)15u); }
@@ -226,7 +226,7 @@ static inline __attribute__((always_inline)) uint32_t sk_pick(const skCtx *c, ui
     }
     if (!mask) return SK_NONE;
     if (mask & (mask - 1u)) {
-        uint32_t skip = (uint32_t)(u01(philox4x32(c->seed, ENV_RNG_STREAM, c->words[SK_BATTLE], c->now, u, SK_PICK).x) * (float)__builtin_popcount(mask));
+        uint32_t skip = (uint32_t)(u01(philox4x32(c->seed, ENV_RNG_STREAM, c->words[SK_BATTLE], c->now, u, c->draw).x) * (float)__builtin_popcount(mask));
         for (; skip; skip--) mask &= mask - 1u;
     }
     uint32_t v = base + (uint32_t)__builtin_ctz(mask);
@@ -252,7 +252,7 @@ static inline __attribute__((always_inline)) void sk_seek(const skCtx *c, uint32
 static inline __attribute__((always_inline)) void sk_bot(skCtx *c, uint32_t u) {
     skWorld *w = c->w;
     const skirmishKnobs *k = c->k;
-    uint32_t a = w->type[u], t = w->target[u], call = c->words[SK_CALL], squad = u < SK_FOE && w->hp[0] > 0.0f;
+    uint32_t a = w->type[u], t = w->target[u], call = c->words[SK_CALL], squad = u < SK_FOE;
     float step = sk_stride(c, u, k->tick), range2 = sk_reach(a), form = SKIRMISH_RULES[SK_FORM], d2;
     sk_regen(c, u);
     if (SKIRMISH_HEAL[a] > 0.0f) {
@@ -304,7 +304,7 @@ static uint32_t sk_choose(const skCtx *c, uint32_t u, float limit, float *reach)
     if (top == -INFINITY) return SK_NONE;
     for (uint32_t v = 0u; v < c->k->allies; v++)
         if (score[v] == top) pool[tied++] = v;
-    uint32_t pick = tied > 1u ? pool[(uint32_t)(u01(philox4x32(c->seed, ENV_RNG_STREAM, c->words[SK_BATTLE], c->now, u, SK_PICK).x) * (float)tied)] : pool[0];
+    uint32_t pick = tied > 1u ? pool[(uint32_t)(u01(philox4x32(c->seed, ENV_RNG_STREAM, c->words[SK_BATTLE], c->now, u, c->draw).x) * (float)tied)] : pool[0];
     *reach = sk_d2(w, u, pick);
     return pick;
 }
@@ -378,7 +378,6 @@ static uint32_t sk_action(const float *ctrl) {
 static inline __attribute__((always_inline)) void sk_agent(skCtx *c, uint32_t action) {
     skWorld *w = c->w;
     const skirmishKnobs *k = c->k;
-    if (!(w->hp[0] > 0.0f)) return;
     uint32_t a = w->type[0], t = c->words[SK_SELECT];
     float seconds = k->tick / (float)k->slices, step = sk_stride(c, 0u, seconds);
     if (c->words[SK_SLICE] == 0u) sk_regen(c, 0u);
@@ -407,9 +406,9 @@ static inline __attribute__((always_inline)) void sk_agent(skCtx *c, uint32_t ac
     sk_toward(w, 0u, w->x[t], w->y[t], step);
 }
 
-static inline __attribute__((always_inline)) void sk_tick(const skirmishKnobs *k, skWorld *w, uint32_t *words, const float *theta, uint32_t seed, uint32_t action) {
+static inline __attribute__((always_inline)) void sk_tick(const skirmishKnobs *k, skWorld *w, uint32_t *words, const float *theta, uint32_t seed, uint32_t draw, uint32_t action) {
     uint32_t slice = words[SK_SLICE];
-    skCtx c = { k, w, words, theta, words[SK_TICK] * k->slices + slice, seed };
+    skCtx c = { k, w, words, theta, words[SK_TICK] * k->slices + slice, seed, draw };
     sk_agent(&c, action);
     for (uint32_t u = slice; u < SK_FOE + k->enemies; u += k->slices) {
         if (u == 0u || !(w->hp[u] > 0.0f)) continue;
@@ -504,7 +503,7 @@ static void sk_leagueInit(skLeague *g, uint32_t seed) {
 }
 
 static __attribute__((noinline)) float sk_finish(const skirmishKnobs *k, skWorld *w, skLeague *g, uint32_t *words, uint32_t seed) {
-    uint32_t allies = words[SK_ALLIES], foes = words[SK_FOES], won = allies && !foes, lost = !allies && foes, drawn = !allies && !foes;
+    uint32_t alive = w->hp[0] > 0.0f, foes = words[SK_FOES], won = alive && !foes, lost = !alive && foes, drawn = !alive && !foes;
     words[won ? SK_WINS : lost ? SK_LOSSES : drawn ? SK_DRAWN : SK_TIMEOUTS]++;
     if (k->league) {
         leagueScore(g->winRate, words[SK_MEMBER], won ? 1.0f : drawn ? 0.5f : 0.0f);
@@ -560,10 +559,12 @@ static const float *sk_theta(const skirmishKnobs *k, uint32_t *extra, const uint
 
 static inline __attribute__((always_inline)) float sk_play(const skirmishKnobs *k, uint32_t seed, const float *ctrl, uint32_t *words, uint32_t *extra, float *obs, uint32_t *done) {
     skWorld *w = sk_world(extra);
+    const float *theta = sk_theta(k, extra, words);
+    uint32_t action = sk_action(ctrl);
     float reward = 0.0f;
-    sk_tick(k, w, words, sk_theta(k, extra, words), seed, sk_action(ctrl));
+    sk_tick(k, w, words, theta, seed, SK_PICK, action);
     *done = 0u;
-    if (!words[SK_ALLIES] || !words[SK_FOES] || words[SK_TICK] >= k->battleTicks) {
+    if (!(w->hp[0] > 0.0f) || !words[SK_FOES] || words[SK_TICK] >= k->battleTicks) {
         reward = sk_finish(k, w, sk_league(extra), words, seed);
         *done = 1u;
     }
@@ -607,7 +608,6 @@ static uint32_t sk_heading(float dx, float dy, uint32_t now) {
 static uint32_t sk_plan(const skirmishKnobs *k, const skWorld *w, const uint32_t *words, uint32_t call, uint32_t mode) {
     uint32_t now = words[SK_TICK] * k->slices + words[SK_SLICE], a = w->type[0], t = words[SK_CALL];
     float ax, ay, reach;
-    if (!(w->hp[0] > 0.0f)) return SK_ATTACK;
     sk_centre(w, 0u, k->allies, 0u, &ax, &ay);
     uint32_t home = sk_heading(ax - w->x[0], ay - w->y[0], now);
     if (mode == SK_GATHER) return home;
@@ -625,12 +625,12 @@ static float sk_rollout(const skirmishKnobs *k, skOracle *o, const skWorld *w, c
     float margin = 0.0f;
     memcpy(s, w, sizeof *s);
     memcpy(v, words, sizeof o->words);
-    for (uint32_t t = 0u; t < SK_HORIZON * k->slices && v[SK_ALLIES] && v[SK_FOES] && v[SK_TICK] < k->battleTicks; t++) {
+    for (uint32_t t = 0u; t < SK_HORIZON * k->slices && s->hp[0] > 0.0f && v[SK_FOES] && v[SK_TICK] < k->battleTicks; t++) {
         uint32_t lead = t < SK_PERIOD * k->slices;
-        sk_tick(k, s, v, theta, seed, sk_plan(k, s, v, lead ? call : SK_NONE, lead ? mode : SK_HOLD));
+        sk_tick(k, s, v, theta, seed, SK_IMAGINE, sk_plan(k, s, v, lead ? call : SK_NONE, lead ? mode : SK_HOLD));
     }
-    if (!v[SK_FOES]) return v[SK_ALLIES] ? 1000.0f : 0.0f;
-    if (!v[SK_ALLIES]) return -1000.0f;
+    if (!v[SK_FOES]) return s->hp[0] > 0.0f ? 1000.0f : 0.0f;
+    if (!(s->hp[0] > 0.0f)) return -1000.0f;
     for (uint32_t u = 0u; u < k->allies; u++) margin += s->hp[u] + s->shield[u];
     for (uint32_t u = SK_FOE; u < SK_FOE + k->enemies; u++) margin -= s->hp[u] + s->shield[u];
     return 0.01f * margin;
@@ -683,10 +683,10 @@ void skirmish_oracle(uint32_t instance, uint32_t seed, uint32_t step, const uint
     const skirmishKnobs *k = &SKIRMISH_KNOBS[instance];
     const skWorld *w = sk_worldAt(extra);
     skOracle *o = sk_oracleOf(extra);
-    if (w->hp[0] > 0.0f && (o->battle != words[SK_BATTLE] || ++o->since >= SK_PERIOD * k->slices)) {
+    if (o->battle != words[SK_BATTLE] || ++o->since >= SK_PERIOD * k->slices) {
         o->battle = words[SK_BATTLE];
         o->since = 0u;
-        sk_decide(k, o, w, words, sk_theta(k, extra, words), seed);
+        sk_decide(k, o, w, words, k->league ? SKIRMISH_THETA : 0, seed);
     }
     ctrl[0] = (float)sk_plan(k, w, words, o->call, o->mode);
 }

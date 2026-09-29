@@ -151,23 +151,23 @@ static uint32_t sokoban_match(uint32_t boxes, uint32_t cell) {
     return ~(((v & 0x7F7F7F7Fu) + 0x7F7F7F7Fu) | v | 0x7F7F7F7Fu);
 }
 
-static inline __attribute__((always_inline)) void sokoban_look(const sokobanKnobs *k, const uint8_t *grid, uint32_t player, uint32_t boxes, uint32_t placed, float *obs) {
-    static const uint8_t RING[16] = { 18, 19, 35, 51, 50, 49, 33, 17, 2, 36, 66, 32, 34, 34, 34, 34 };
-    const uint8_t *corner = grid + player - 34u;
-    uint8x16_t ring = vld1q_u8(RING), cells = vaddq_u8(vdupq_n_u8((uint8_t)(player - 34u)), ring);
-    uint8x16_t held = vorrq_u8(vorrq_u8(vceqq_u8(cells, vdupq_n_u8((uint8_t)boxes)), vceqq_u8(cells, vdupq_n_u8((uint8_t)(boxes >> 8)))),
-                               vorrq_u8(vceqq_u8(cells, vdupq_n_u8((uint8_t)(boxes >> 16))), vceqq_u8(cells, vdupq_n_u8((uint8_t)(boxes >> 24)))));
-    uint8x16_t code = vqtbx1q_u8(vqtbl4q_u8(vld1q_u8_x4(corner), ring), vld1q_u8(corner + 64), vsubq_u8(ring, vdupq_n_u8(64u)));
-    code = vaddq_u8(code, vandq_u8(held, vdupq_n_u8(2u)));
-    uint16x8_t low = vmovl_u8(vget_low_u8(code)), high = vmovl_high_u8(code);
-    vst1q_f32(obs, vcvtq_n_f32_u32(vmovl_u16(vget_low_u16(low)), 2));
-    vst1q_f32(obs + 4, vcvtq_n_f32_u32(vmovl_high_u16(low), 2));
-    vst1q_f32(obs + 8, vcvtq_n_f32_u32(vmovl_u16(vget_low_u16(high)), 2));
-    obs[12] = grid[player] == SOKOBAN_TARGET ? 1.0f : 0.0f;
-    obs[13] = (float)((player & 15u) - 2u) / (float)(k->side - 1u);
-    obs[14] = (float)((player >> 4) - 2u) / (float)(k->side - 1u);
-    obs[15] = (float)placed / (float)k->boxes;
-    obs[16] = 1.0f;
+static inline __attribute__((always_inline)) void sokoban_look(const sokobanKnobs *k, const uint8_t *grid, uint32_t player, uint32_t boxes, float *obs) {
+    static const uint8_t SPAN[8] = { 0, 1, 2, 3, 4, 5, 6, 7 };
+    static const int8_t CODES[8] = { 0, 1, 2, 3, -2, 0, 4, 5 };
+    uint32_t rows = k->side - 2u;
+    uint8x8_t span = vld1_u8(SPAN), codes = vreinterpret_u8_s8(vld1_s8(CODES)), two = vdup_n_u8(2u), six = vdup_n_u8(6u);
+    for (uint32_t r = 0u; r < rows; r++) {
+        uint32_t base = (r + 3u) * SOKOBAN_ROW + 3u;
+        uint8x8_t cells = vadd_u8(vdup_n_u8((uint8_t)base), span);
+        uint8x8_t held = vorr_u8(vorr_u8(vceq_u8(cells, vdup_n_u8((uint8_t)boxes)), vceq_u8(cells, vdup_n_u8((uint8_t)(boxes >> 8)))),
+                                 vorr_u8(vceq_u8(cells, vdup_n_u8((uint8_t)(boxes >> 16))), vceq_u8(cells, vdup_n_u8((uint8_t)(boxes >> 24)))));
+        uint8x8_t mark = vorr_u8(vand_u8(held, two), vand_u8(vceq_u8(cells, vdup_n_u8((uint8_t)player)), six));
+        int16x8_t value = vmovl_s8(vreinterpret_s8_u8(vtbl1_u8(codes, vadd_u8(vld1_u8(grid + base), mark))));
+        float row[8];
+        vst1q_f32(row, vcvtq_n_f32_s32(vmovl_s16(vget_low_s16(value)), 1));
+        vst1q_f32(row + 4, vcvtq_n_f32_s32(vmovl_high_s16(value), 1));
+        __builtin_memcpy(obs + rows * r, row, rows * sizeof(float));
+    }
 }
 
 static uint32_t sokoban_draw(const sokobanKnobs *k, uint32_t seed, uint32_t step) { return (uint32_t)((uint64_t)philox4x32(seed, ENV_RNG_STREAM, step, 8u, 0u, 0u).x * k->pool >> 32); }
@@ -179,7 +179,7 @@ static __attribute__((noinline)) float sokoban_next(uint32_t instance, uint32_t 
     uint32_t state[5] = { level[start], level[start + 1u], 0u, 0u, index };
     __builtin_memcpy(words, state, sizeof state);
     *done = 1u;
-    sokoban_look(k, (const uint8_t *)level, state[SOKOBAN_PLAYER], state[SOKOBAN_BOXES], 0u, obs);
+    sokoban_look(k, (const uint8_t *)level, state[SOKOBAN_PLAYER], state[SOKOBAN_BOXES], obs);
     return reward;
 }
 
@@ -203,7 +203,7 @@ static inline __attribute__((always_inline)) float sokoban_play(uint32_t instanc
     uint32_t state[5] = { player, boxes, placed, clock, words[SOKOBAN_LEVEL] };
     __builtin_memcpy(words, state, sizeof state);
     *done = 0u;
-    sokoban_look(k, grid, player, boxes, placed, obs);
+    sokoban_look(k, grid, player, boxes, obs);
     return reward;
 }
 
@@ -221,7 +221,7 @@ typedef struct { uint64_t boxes, moved; uint32_t key; uint8_t player, action, pu
 typedef struct { uint64_t boxes; uint32_t parent, next, slot; uint16_t cost; uint8_t player, push; } sokobanNode;
 
 typedef struct {
-    uint32_t *explored, bits, count, mask, used, choose[4][64];
+    uint32_t *explored, bits, count, mask, used, best, reached, choose[4][64];
     sokobanNode *nodes;
     uint64_t *index;
     sokobanFrame stack[SOKOBAN_TTL];
@@ -378,19 +378,19 @@ static uint32_t sokoban_find(const sokobanForge *f, uint32_t key, uint32_t *slot
 
 static void sokoban_file(sokobanForge *f, uint32_t key, uint32_t slot, uint32_t id) {
     if (f->index[slot] == 0u && 2u * ++f->used > f->mask) {
-        uint64_t *old = f->index;
+        uint64_t *outgoing = f->index;
         uint32_t size = f->mask + 1u;
         f->mask = 2u * size - 1u;
         f->index = calloc(2u * size, sizeof(uint64_t));
         if (!f->index) __builtin_trap();
         for (uint32_t i = 0u; i < size; i++)
-            if (old[i]) {
+            if (outgoing[i]) {
                 uint32_t at;
-                sokoban_find(f, (uint32_t)(old[i] >> 32) - 1u, &at);
-                f->index[at] = old[i];
-                f->nodes[(uint32_t)old[i]].slot = at;
+                sokoban_find(f, (uint32_t)(outgoing[i] >> 32) - 1u, &at);
+                f->index[at] = outgoing[i];
+                f->nodes[(uint32_t)outgoing[i]].slot = at;
             }
-        free(old);
+        free(outgoing);
         sokoban_find(f, key, &slot);
     }
     f->index[slot] = (uint64_t)(key + 1u) << 32 | id;
@@ -410,49 +410,62 @@ static void sokoban_reach(uint64_t open, uint32_t from, uint8_t *distance, uint6
 
 static int sokoban_blocked(const void *open, int x, int y) { return (uint32_t)x >= 8u || (uint32_t)y >= 8u || !(*(const uint64_t *)open >> (y * 8 + x) & 1u); }
 
-static uint32_t sokoban_assign(const uint8_t (*far)[256], uint64_t boxes, uint32_t count) {
-    uint32_t cells[4], best[16];
-    for (uint32_t i = 0u; i < count; i++, boxes &= boxes - 1u) cells[i] = sokoban_outer((uint32_t)__builtin_ctzll(boxes));
+static uint32_t sokoban_assign(const uint8_t (*far)[256], uint64_t boxes, uint32_t count, uint32_t need) {
+    uint32_t best[16], least = 0xFFFFu;
     for (uint32_t m = 1u; m < 16u; m++) best[m] = 0xFFFFu;
     best[0] = 0u;
-    for (uint32_t m = 0u; m + 1u < 1u << count; m++)
-        for (uint32_t t = 0u, i = (uint32_t)__builtin_popcount(m); t < count; t++)
-            if (!(m >> t & 1u) && best[m] + far[t][cells[i]] < best[m | 1u << t]) best[m | 1u << t] = best[m] + far[t][cells[i]];
-    return best[(1u << count) - 1u];
+    for (uint32_t i = 0u; i < count; i++, boxes &= boxes - 1u) {
+        uint32_t cell = sokoban_outer((uint32_t)__builtin_ctzll(boxes));
+        for (uint32_t m = 1u << count; m-- > 0u;) {
+            uint32_t held = (uint32_t)__builtin_popcount(m);
+            if (held > i || held + count < need + i) continue;
+            for (uint32_t t = 0u; t < count; t++)
+                if (!(m >> t & 1u) && best[m] + far[t][cell] < best[m | 1u << t]) best[m | 1u << t] = best[m] + far[t][cell];
+        }
+    }
+    for (uint32_t m = 0u; m < 1u << count; m++)
+        if ((uint32_t)__builtin_popcount(m) == need && best[m] < least) least = best[m];
+    return least;
 }
 
-static uint32_t sokoban_search(const sokobanKnobs *k, uint64_t ground, uint64_t goal, uint64_t live, const uint8_t (*far)[256], uint64_t boxes, uint32_t player, sokobanForge *f) {
+static uint32_t sokoban_search(const sokobanKnobs *k, uint64_t ground, uint64_t goal, uint64_t live, const uint8_t (*far)[256], uint64_t boxes, uint32_t player, uint32_t need, sokobanForge *f) {
     uint8_t distance[64];
-    uint32_t buckets[256], slot, guess = sokoban_assign(far, boxes, k->boxes);
-    f->count = 0u;
-    if (guess > k->maxSteps) return ~0u;
-    memset(buckets, 0xFF, sizeof buckets);
+    uint32_t buckets[256], slot, guess = sokoban_assign(far, boxes, k->boxes, need);
+    uint64_t room = need == k->boxes ? live : ground;
+    memset(f->index, 0, ((size_t)f->mask + 1u) * sizeof(uint64_t));
+    f->used = 0u;
     uint32_t key = sokoban_rank(f, boxes) | player << 20;
     f->nodes[0] = (sokobanNode){ .boxes = boxes, .parent = ~0u, .next = ~0u, .player = (uint8_t)player };
     sokoban_find(f, key, &slot);
     sokoban_file(f, key, slot, 0u);
-    buckets[guess] = 0u;
     f->count = 1u;
+    f->best = 0u;
+    f->reached = (uint32_t)__builtin_popcountll(boxes & goal);
+    if (guess > k->maxSteps) return ~0u;
+    memset(buckets, 0xFF, sizeof buckets);
+    buckets[guess] = 0u;
     for (uint32_t bound = guess; bound <= k->maxSteps; bound++)
         while (buckets[bound] != ~0u) {
             uint32_t id = buckets[bound];
             const sokobanNode *n = &f->nodes[id];
             buckets[bound] = n->next;
             if ((uint32_t)f->index[n->slot] != id) continue;
-            if (n->boxes == goal) return id;
+            if ((uint32_t)__builtin_popcountll(n->boxes & goal) >= need) return id;
             uint64_t open = ground & ~n->boxes, reach;
             sokoban_reach(open, n->player, distance, &reach);
             for (uint32_t d = 0u; d < 4u; d++)
-                for (uint64_t can = sokoban_pushable(n->boxes, reach, open & live, d); can; can &= can - 1u) {
+                for (uint64_t can = sokoban_pushable(n->boxes, reach, open & room, d); can; can &= can - 1u) {
                     uint32_t box = (uint32_t)__builtin_ctzll(can), to = box + (uint32_t)sokoban_offset(d, 8);
                     uint32_t cost = n->cost + distance[box - (uint32_t)sokoban_offset(d, 8)] + 1u;
                     uint64_t moved = n->boxes ^ (1ull << box | 1ull << to);
-                    uint32_t estimate = sokoban_assign(far, moved, k->boxes);
+                    uint32_t estimate = sokoban_assign(far, moved, k->boxes, need);
                     if (cost + estimate > k->maxSteps) continue;
                     uint32_t known = sokoban_find(f, key = sokoban_rank(f, moved) | box << 20, &slot);
                     if (known != ~0u && f->nodes[known].cost <= cost) continue;
                     if (f->count == SOKOBAN_BUDGET) return ~0u;
                     f->nodes[f->count] = (sokobanNode){ .boxes = moved, .parent = id, .next = buckets[cost + estimate], .cost = (uint16_t)cost, .player = (uint8_t)box, .push = (uint8_t)(box << 2 | d) };
+                    uint32_t placed = (uint32_t)__builtin_popcountll(moved & goal);
+                    if (placed > f->reached) { f->reached = placed; f->best = f->count; }
                     sokoban_file(f, key, slot, f->count);
                     buckets[cost + estimate] = f->count++;
                 }
@@ -490,35 +503,36 @@ static uint32_t sokoban_solve(const sokobanKnobs *k, const uint8_t *grid, uint32
             if (far[t][sokoban_outer(i)] != 255u) live |= 1ull << i;
     for (uint32_t j = 0u; j < k->boxes; j++) boxes |= 1ull << sokoban_inner(start[j]);
     f->mask = 4095u;
-    f->used = 0u;
-    f->index = calloc(f->mask + 1u, sizeof(uint64_t));
+    f->index = malloc((f->mask + 1u) * sizeof(uint64_t));
     if (!f->index) __builtin_trap();
-    uint32_t id = sokoban_search(k, ground, goal, live, (const uint8_t (*)[256])far, boxes, sokoban_inner(player), f);
-    if (id != ~0u) {
-        uint32_t chain[256], pushes = 0u, stand = sokoban_inner(player);
-        for (uint32_t at = id; f->nodes[at].parent != ~0u; at = f->nodes[at].parent) chain[pushes++] = at;
-        while (pushes--) {
-            const sokobanNode *p = &f->nodes[chain[pushes]];
-            uint32_t box = p->push >> 2, d = p->push & 3u;
-            uint8_t distance[256];
-            uint64_t open = ground & ~boxes;
-            uint32_t behind = box - (uint32_t)sokoban_offset(d, 8);
-            int x = (int)(stand & 7u), y = (int)(stand >> 3), toward;
-            gridDistance(sokoban_blocked, &open, (int)(behind & 7u), (int)(behind >> 3), distance);
-            if (distance[(x + 1) | (y + 1) << 4] == 255u) __builtin_trap();
-            for (; (toward = gridDescend(distance, x, y)) >= 0; length++) {
-                int dx, dy;
-                gridDelta((uint32_t)toward, &dx, &dy);
-                x += dx; y += dy;
-                moves[length / 16u] |= (uint32_t)toward << (2u * (length % 16u));
-            }
-            moves[length / 16u] |= d << (2u * (length % 16u));
-            length++;
-            boxes ^= 1ull << box | 1ull << (box + (uint32_t)sokoban_offset(d, 8));
-            stand = box;
-        }
-        if (length != f->nodes[id].cost) __builtin_trap();
+    uint32_t id = ~0u;
+    for (uint32_t need = k->boxes; id == ~0u; need--) {
+        id = sokoban_search(k, ground, goal, live, (const uint8_t (*)[256])far, boxes, sokoban_inner(player), need, f);
+        if (id == ~0u && f->reached + 1u >= need) id = f->best;
     }
+    uint32_t chain[256], pushes = 0u, stand = sokoban_inner(player);
+    for (uint32_t at = id; f->nodes[at].parent != ~0u; at = f->nodes[at].parent) chain[pushes++] = at;
+    while (pushes--) {
+        const sokobanNode *p = &f->nodes[chain[pushes]];
+        uint32_t box = p->push >> 2, d = p->push & 3u;
+        uint8_t distance[256];
+        uint64_t open = ground & ~boxes;
+        uint32_t behind = box - (uint32_t)sokoban_offset(d, 8);
+        int x = (int)(stand & 7u), y = (int)(stand >> 3), toward;
+        gridDistance(sokoban_blocked, &open, (int)(behind & 7u), (int)(behind >> 3), distance);
+        if (distance[(x + 1) | (y + 1) << 4] == 255u) __builtin_trap();
+        for (; (toward = gridDescend(distance, x, y)) >= 0; length++) {
+            int dx, dy;
+            gridDelta((uint32_t)toward, &dx, &dy);
+            x += dx; y += dy;
+            moves[length / 16u] |= (uint32_t)toward << (2u * (length % 16u));
+        }
+        moves[length / 16u] |= d << (2u * (length % 16u));
+        length++;
+        boxes ^= 1ull << box | 1ull << (box + (uint32_t)sokoban_offset(d, 8));
+        stand = box;
+    }
+    if (length != f->nodes[id].cost) __builtin_trap();
     free(f->index);
     return length;
 }
@@ -589,7 +603,7 @@ void sokoban_observe(uint32_t instance, uint32_t seed, const uint32_t *words, co
     const uint32_t *level = sokoban_level(instance, shared, words[SOKOBAN_LEVEL]);
     uint32_t start = sokoban_gridWords(k), player = words[SOKOBAN_PLAYER], boxes = words[SOKOBAN_BOXES];
     if (player == 0u) { player = level[start]; boxes = level[start + 1u]; }
-    sokoban_look(k, (const uint8_t *)level, player, boxes, words[SOKOBAN_PLACED], obs);
+    sokoban_look(k, (const uint8_t *)level, player, boxes, obs);
 }
 
 static inline __attribute__((always_inline)) void sokoban_solution(uint32_t instance, const uint32_t *words, float *ctrl, const float *shared) {

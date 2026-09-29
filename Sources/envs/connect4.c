@@ -1,7 +1,5 @@
 #include "../env.h"
 
-#define CONNECT4_NODES_PER_STEP 2u
-
 typedef struct { uint32_t opponent, nodesPerMove, jitter, oracleNodes; } connect4Knobs;
 
 static const connect4Knobs CONNECT4_KNOBS[4] = {
@@ -16,9 +14,10 @@ static const float CONNECT4_THETA_LOW[16] = { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f
 static const float CONNECT4_THETA_HIGH[16] = { 8.0f, 24.0f, 16.0f, 120.0f, 40.0f, 12.0f, 6.0f, 4.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 4.0f };
 
 enum { CONNECT4_RANDOM, CONNECT4_GREEDY, CONNECT4_SEARCH, CONNECT4_LEAGUE };
-enum { CONNECT4_LEFT, CONNECT4_RIGHT, CONNECT4_DROP };
-enum { CONNECT4_MINE = 0, CONNECT4_THEIRS = 2, CONNECT4_CURSOR = 4, CONNECT4_THINK, CONNECT4_GAME, CONNECT4_MEMBER, CONNECT4_LAST, CONNECT4_WORDS };
-enum { CONNECT4_COLUMNS = 7, CONNECT4_CELLS = 42, CONNECT4_FEATURES = 16, CONNECT4_CENTRE_COLUMN = 3 };
+enum { CONNECT4_PLAY, CONNECT4_NEXT };
+enum { CONNECT4_MINE = 0, CONNECT4_THEIRS = 2, CONNECT4_PROPOSALS = 4, CONNECT4_SHOWN, CONNECT4_GAME, CONNECT4_MEMBER, CONNECT4_LAST, CONNECT4_WORDS };
+enum { CONNECT4_COLUMNS = 7, CONNECT4_ROWS = 6, CONNECT4_CELLS = 42, CONNECT4_FEATURES = 16 };
+enum { CONNECT4_PICK, CONNECT4_PONDER, CONNECT4_SHUFFLE };
 enum { CONNECT4_WIN = 1 << 20, CONNECT4_DECIDED = CONNECT4_WIN - 64, CONNECT4_INFINITY = 1 << 22 };
 
 static const uint64_t CONNECT4_BOTTOM = 0x40810204081ull;
@@ -53,7 +52,6 @@ typedef struct {
 typedef struct {
     connect4Search search;
     float winRate[LEAGUE_MEMBERS], theta[LEAGUE_MEMBERS * CONNECT4_FEATURES];
-    float view[16];
 } connect4Lane;
 
 typedef struct {
@@ -62,7 +60,6 @@ typedef struct {
 } connect4Oracle;
 
 static connect4Lane *connect4_lane(uint32_t *extra) { return (connect4Lane *)(((uintptr_t)extra + 15u) & ~(uintptr_t)15u); }
-static const connect4Lane *connect4_peek(const uint32_t *extra) { return (const connect4Lane *)(((uintptr_t)extra + 15u) & ~(uintptr_t)15u); }
 static connect4Oracle *connect4_oracleOf(connect4Lane *l) { return (connect4Oracle *)(l + 1); }
 
 uint32_t connect4_extraWords(uint32_t instance, uint32_t steps) {
@@ -194,7 +191,7 @@ static void connect4_deepen(connect4Search *s) {
     connect4_iterate(s);
 }
 
-static uint32_t connect4_think(connect4Search *s, uint32_t quota) {
+static void connect4_think(connect4Search *s) {
     while (!s->done) {
         connect4Frame *f = &s->frame[s->sp];
         if (f->next >= (s->sp ? (uint32_t)CONNECT4_COLUMNS : s->moves) || f->alpha >= f->beta) {
@@ -214,12 +211,10 @@ static uint32_t connect4_think(connect4Search *s, uint32_t quota) {
             s->done = 1u;
             continue;
         }
-        if (!quota) return 0u;
         uint32_t column = s->sp ? CONNECT4_ORDER >> 4u * f->next & 15u : s->order[f->next];
         f->next++;
         uint64_t bit = connect4_drop(f->all, column);
         if (!bit || !(f->allowed >> column & 1u)) continue;
-        quota--;
         s->nodes++;
         uint64_t mover = f->own | bit, all = f->all | bit;
         int32_t value;
@@ -240,35 +235,78 @@ static uint32_t connect4_think(connect4Search *s, uint32_t quota) {
         } else value = -connect4_eval(f->all ^ f->own, mover, s->good, s->weight);
         connect4_score(s, f, value, column);
     }
-    return 1u;
 }
 
-static float connect4_sixth(uint32_t n) { return (float)n / 6.0f; }
+static uint32_t connect4_proposed(const uint32_t *words) { return words[CONNECT4_PROPOSALS] >> 4u * words[CONNECT4_SHOWN] & 15u; }
 
-static void connect4_obs(const connect4Lane *l, const uint32_t *words, float *obs) {
-    __builtin_memcpy(obs, l->view, 2u * CONNECT4_COLUMNS * sizeof(float));
-    obs[14] = connect4_sixth(words[CONNECT4_CURSOR]);
-    obs[15] = words[CONNECT4_THINK] ? 1.0f : 0.0f;
-    obs[16] = 1.0f;
+static uint32_t connect4_offered(const uint32_t *words) { return words[CONNECT4_PROPOSALS] >> 28; }
+
+static void connect4_obs(const uint32_t *words, float *obs) {
+    uint64_t theirs = connect4_board(words, CONNECT4_THEIRS), all = connect4_board(words, CONNECT4_MINE) | theirs;
+    uint64_t mine = (all ^ theirs) | connect4_drop(all, connect4_proposed(words));
+    for (uint32_t row = 0u; row < CONNECT4_ROWS; row++)
+        for (uint32_t column = 0u; column < CONNECT4_COLUMNS; column++) {
+            uint32_t bit = 7u * column + row;
+            obs[CONNECT4_COLUMNS * row + column] = (float)(mine >> bit & 1u) - (float)(theirs >> bit & 1u);
+        }
 }
 
-static void connect4_ponder(connect4Lane *l, const connect4Knobs *k, uint32_t seed, const uint32_t *words, uint64_t theirs, uint64_t all) {
-    u4 draw = philox4x32(seed, ENV_RNG_STREAM, words[CONNECT4_GAME], (uint32_t)__builtin_popcountll(all), 1u, 0u);
+static void connect4_offer(uint32_t *words, uint32_t seed) {
+    uint64_t all = connect4_board(words, CONNECT4_MINE) | connect4_board(words, CONNECT4_THEIRS);
+    uint64_t draw = philox4x32(seed, ENV_RNG_STREAM, words[CONNECT4_GAME], (uint32_t)__builtin_popcountll(all), CONNECT4_SHUFFLE, 0u).x;
+    uint32_t column[CONNECT4_COLUMNS], n = 0u;
+    for (uint64_t open = (all + CONNECT4_BOTTOM) & CONNECT4_BOARD; open; open &= open - 1u) column[n++] = connect4_column(open);
+    for (uint32_t i = n - 1u; i > 0u; i--) {
+        draw *= i + 1u;
+        uint32_t j = (uint32_t)(draw >> 32), held = column[i];
+        draw &= 0xFFFFFFFFull;
+        column[i] = column[j];
+        column[j] = held;
+    }
+    uint32_t packed = n << 28;
+    for (uint32_t i = 0u; i < n; i++) packed |= column[i] << 4u * i;
+    words[CONNECT4_PROPOSALS] = packed;
+    words[CONNECT4_SHOWN] = 0u;
+}
+
+static uint32_t connect4_place(uint32_t *words, uint32_t who, uint32_t column) {
+    uint32_t at = who ? CONNECT4_THEIRS : CONNECT4_MINE;
+    uint64_t all = connect4_board(words, CONNECT4_MINE) | connect4_board(words, CONNECT4_THEIRS);
+    uint64_t bit = connect4_drop(all, column), side = connect4_board(words, at) | bit;
+    connect4_put(words, at, side);
+    return connect4_fours(side) ? 1u + who : (all | bit) == CONNECT4_BOARD ? 3u : 0u;
+}
+
+static uint32_t connect4_bot(const connect4Knobs *k, uint32_t seed, const uint32_t *words) {
+    uint64_t mine = connect4_board(words, CONNECT4_MINE), theirs = connect4_board(words, CONNECT4_THEIRS), all = mine | theirs;
+    uint64_t open = (all + CONNECT4_BOTTOM) & CONNECT4_BOARD, pick = open;
+    if (k->opponent == CONNECT4_GREEDY) {
+        connect4Pair t = connect4_threats((connect4Pair){ theirs, mine }, all) & open;
+        pick = t.x ? t.x : t.y ? t.y : open;
+    }
+    uint32_t draw = philox4x32(seed, ENV_RNG_STREAM, words[CONNECT4_GAME], (uint32_t)__builtin_popcountll(all), CONNECT4_PICK, 0u).x;
+    for (uint32_t i = (uint32_t)(((uint64_t)draw * (uint64_t)__builtin_popcountll(pick)) >> 32); i > 0u; i--) pick &= pick - 1u;
+    return connect4_column(pick);
+}
+
+static uint32_t connect4_reply(connect4Lane *l, const connect4Knobs *k, uint32_t seed, const uint32_t *words) {
+    if (k->opponent < CONNECT4_SEARCH) return connect4_bot(k, seed, words);
+    uint64_t theirs = connect4_board(words, CONNECT4_THEIRS), all = connect4_board(words, CONNECT4_MINE) | theirs;
+    u4 draw = philox4x32(seed, ENV_RNG_STREAM, words[CONNECT4_GAME], (uint32_t)__builtin_popcountll(all), CONNECT4_PONDER, 0u);
     connect4_begin(&l->search, theirs, all, connect4_columns((all + CONNECT4_BOTTOM) & CONNECT4_BOARD), k->nodesPerMove, draw, k->jitter);
+    connect4_think(&l->search);
+    return l->search.choice;
 }
 
 static void connect4_start(connect4Lane *l, uint32_t *words, const connect4Knobs *k, uint32_t seed) {
-    uint32_t game = words[CONNECT4_GAME];
     connect4_put(words, CONNECT4_MINE, 0u);
     connect4_put(words, CONNECT4_THEIRS, 0u);
-    words[CONNECT4_CURSOR] = CONNECT4_CENTRE_COLUMN;
-    for (uint32_t i = 0u; i < 2u * CONNECT4_COLUMNS; i++) l->view[i] = 0.0f;
     if (k->opponent == CONNECT4_LEAGUE) {
-        words[CONNECT4_MEMBER] = leaguePick(l->winRate, philox4x32(seed, LEAGUE_RNG_STREAM, game, 0x5049434Bu, 0u, 0u).x);
+        words[CONNECT4_MEMBER] = leaguePick(l->winRate, philox4x32(seed, LEAGUE_RNG_STREAM, words[CONNECT4_GAME], 0x5049434Bu, 0u, 0u).x);
         connect4_weigh(l->search.weight, l->theta + CONNECT4_FEATURES * words[CONNECT4_MEMBER]);
     }
-    words[CONNECT4_THINK] = game & 1u;
-    if (words[CONNECT4_THINK] && k->opponent >= CONNECT4_SEARCH) connect4_ponder(l, k, seed, words, 0u, 0u);
+    if (words[CONNECT4_GAME] & 1u) connect4_place(words, 1u, connect4_reply(l, k, seed, words));
+    connect4_offer(words, seed);
 }
 
 static void connect4_league(connect4Lane *l, uint32_t seed) {
@@ -294,42 +332,27 @@ static __attribute__((noinline)) void connect4_finish(connect4Lane *l, uint32_t 
     connect4_start(l, words, k, seed);
 }
 
-static float connect4_play(connect4Lane *l, uint32_t *words, const connect4Knobs *k, uint32_t seed, uint32_t who, uint32_t column, uint32_t *done) {
-    uint64_t mine = connect4_board(words, CONNECT4_MINE), theirs = connect4_board(words, CONNECT4_THEIRS), all = mine | theirs;
-    uint64_t bit = connect4_drop(all, column), side = (who ? theirs : mine) | bit;
-    all |= bit;
-    connect4_put(words, who ? CONNECT4_THEIRS : CONNECT4_MINE, side);
-    l->view[column] = connect4_sixth((uint32_t)__builtin_ctzll(bit) - 7u * column + 1u);
-    l->view[CONNECT4_COLUMNS + column] = who ? -1.0f : 1.0f;
-    words[CONNECT4_LAST] = (column + 1u) | who << 3;
-    uint32_t result = connect4_fours(side) ? 1u + who : all == CONNECT4_BOARD ? 3u : 0u;
-    if (result) {
-        float reward = result == 1u ? 1.0f : result == 2u ? -1.0f : 0.0f;
-        words[CONNECT4_LAST] |= result << 4;
-        *done = 1u;
-        connect4_finish(l, words, k, seed, reward);
-        return reward;
+static float connect4_turn(connect4Lane *l, uint32_t *words, const connect4Knobs *k, uint32_t seed, uint32_t *done) {
+    uint32_t column = connect4_proposed(words), result = connect4_place(words, 0u, column), last = column + 1u;
+    if (!result) {
+        uint32_t reply = connect4_reply(l, k, seed, words);
+        result = connect4_place(words, 1u, reply);
+        last |= (reply + 1u) << 3;
     }
-    words[CONNECT4_THINK] = !who;
-    if (!who && k->opponent >= CONNECT4_SEARCH) connect4_ponder(l, k, seed, words, theirs, all);
-    return 0.0f;
-}
-
-static uint32_t connect4_bot(const connect4Knobs *k, uint32_t seed, const uint32_t *words) {
-    uint64_t mine = connect4_board(words, CONNECT4_MINE), theirs = connect4_board(words, CONNECT4_THEIRS), all = mine | theirs;
-    uint64_t open = (all + CONNECT4_BOTTOM) & CONNECT4_BOARD, pick = open;
-    if (k->opponent == CONNECT4_GREEDY) {
-        connect4Pair t = connect4_threats((connect4Pair){ theirs, mine }, all) & open;
-        pick = t.x ? t.x : t.y ? t.y : open;
+    words[CONNECT4_LAST] = last | result << 6;
+    if (!result) {
+        connect4_offer(words, seed);
+        return 0.0f;
     }
-    uint32_t draw = philox4x32(seed, ENV_RNG_STREAM, words[CONNECT4_GAME], (uint32_t)__builtin_popcountll(all), 0u, 0u).x;
-    for (uint32_t i = (uint32_t)(((uint64_t)draw * (uint64_t)__builtin_popcountll(pick)) >> 32); i > 0u; i--) pick &= pick - 1u;
-    return connect4_column(pick);
+    float reward = result == 1u ? 1.0f : result == 2u ? -1.0f : 0.0f;
+    *done = 1u;
+    connect4_finish(l, words, k, seed, reward);
+    return reward;
 }
 
 static uint32_t connect4_action(const float *ctrl) {
     float c = ctrl[0];
-    return c >= 0.0f && c < 3.0f ? (uint32_t)c : 0u;
+    return c >= 0.0f && c < 2.0f ? (uint32_t)c : CONNECT4_NEXT;
 }
 
 void connect4_reset(uint32_t instance, uint32_t seed, uint32_t *words, uint32_t *extra, uint32_t steps) {
@@ -349,28 +372,18 @@ void connect4_reset(uint32_t instance, uint32_t seed, uint32_t *words, uint32_t 
 
 float connect4_step(uint32_t instance, uint32_t seed, uint32_t step, const float *ctrl, uint32_t *words, uint32_t *extra, float *obs, uint32_t *done, const float *shared) {
     (void)step; (void)shared;
-    const connect4Knobs *k = &CONNECT4_KNOBS[instance];
-    connect4Lane *l = connect4_lane(extra);
+    uint32_t shown = words[CONNECT4_SHOWN];
     float reward = 0.0f;
     *done = 0u;
-    if (words[CONNECT4_THINK]) {
-        if (k->opponent < CONNECT4_SEARCH) reward = connect4_play(l, words, k, seed, 1u, connect4_bot(k, seed, words), done);
-        else if (connect4_think(&l->search, CONNECT4_NODES_PER_STEP)) reward = connect4_play(l, words, k, seed, 1u, l->search.choice, done);
-        else words[CONNECT4_THINK]++;
-    } else {
-        uint32_t action = connect4_action(ctrl), cursor = words[CONNECT4_CURSOR];
-        uint64_t all = connect4_board(words, CONNECT4_MINE) | connect4_board(words, CONNECT4_THEIRS);
-        if (action == CONNECT4_LEFT) words[CONNECT4_CURSOR] = cursor - (cursor > 0u);
-        else if (action == CONNECT4_RIGHT) words[CONNECT4_CURSOR] = cursor + (cursor + 1u < CONNECT4_COLUMNS);
-        else if (connect4_drop(all, cursor)) reward = connect4_play(l, words, k, seed, 0u, cursor, done);
-    }
-    connect4_obs(l, words, obs);
+    if (connect4_action(ctrl) == CONNECT4_NEXT && shown + 1u < connect4_offered(words)) words[CONNECT4_SHOWN] = shown + 1u;
+    else reward = connect4_turn(connect4_lane(extra), words, &CONNECT4_KNOBS[instance], seed, done);
+    connect4_obs(words, obs);
     return reward;
 }
 
 void connect4_observe(uint32_t instance, uint32_t seed, const uint32_t *words, const uint32_t *extra, uint32_t step, float *obs, const float *shared) {
-    (void)instance; (void)seed; (void)step; (void)shared;
-    connect4_obs(connect4_peek(extra), words, obs);
+    (void)instance; (void)seed; (void)extra; (void)step; (void)shared;
+    connect4_obs(words, obs);
 }
 
 static uint32_t connect4_decide(connect4Oracle *o, const connect4Knobs *k, uint64_t mine, uint64_t theirs) {
@@ -380,13 +393,12 @@ static uint32_t connect4_decide(connect4Oracle *o, const connect4Knobs *k, uint6
     if (win) return connect4_column(win);
     if (loss) return connect4_column(loss);
     connect4_begin(&o->search, mine, all, connect4_columns(safe ? safe : open), k->oracleNodes, (u4){ 0u, 0u, 0u, 0u }, 0u);
-    connect4_think(&o->search, k->oracleNodes);
+    connect4_think(&o->search);
     return o->search.choice;
 }
 
 void connect4_oracle(uint32_t instance, uint32_t seed, uint32_t step, const uint32_t *words, uint32_t *extra, const float *obs, float *ctrl, const float *shared) {
     (void)seed; (void)step; (void)obs; (void)shared;
-    if (words[CONNECT4_THINK]) { ctrl[0] = (float)CONNECT4_LEFT; return; }
     connect4Oracle *o = connect4_oracleOf(connect4_lane(extra));
     uint64_t mine = connect4_board(words, CONNECT4_MINE), theirs = connect4_board(words, CONNECT4_THEIRS);
     uint32_t key = words[CONNECT4_GAME] << 6 | (uint32_t)__builtin_popcountll(mine | theirs);
@@ -394,6 +406,5 @@ void connect4_oracle(uint32_t instance, uint32_t seed, uint32_t step, const uint
         o->column = connect4_decide(o, &CONNECT4_KNOBS[instance], mine, theirs);
         o->key = key;
     }
-    uint32_t cursor = words[CONNECT4_CURSOR];
-    ctrl[0] = (float)(cursor < o->column ? CONNECT4_RIGHT : cursor > o->column ? CONNECT4_LEFT : CONNECT4_DROP);
+    ctrl[0] = (float)(connect4_proposed(words) == o->column ? CONNECT4_PLAY : CONNECT4_NEXT);
 }

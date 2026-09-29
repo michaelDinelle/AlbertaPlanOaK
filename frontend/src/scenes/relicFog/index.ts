@@ -9,7 +9,7 @@ import { Stage2DScene, type Stage2D } from '@kit/stage2d';
 import { TOKENS } from '@kit/tokens';
 import type { FrameUpdate, LegendSpec, SceneContext, SceneFactory, ScenePost } from '@kit/types';
 import {
-  ASTEROID, CENTER, LEAGUE, MATCH_STEPS, MATCHES, MAX_ENERGY, NEBULA, RF_CURSOR_X, RF_CURSOR_Y, RW, SAP, SIDE, TARGET, TILES, UNITS, WAIT,
+  ASTEROID, CENTER, LEAGUE, MATCH_STEPS, MATCHES, MAX_ENERGY, NEBULA, ORDER, RF_CURSOR_X, RF_CURSOR_Y, RW, SAP, SIDE, TARGET, TILES, UNITS,
   driftOf, driftsBy, engaged, fired, focusOf, keyOf, live, makeWorld, pendingOf, readWorld, reborn, relicShape, scoredBy, shifted,
   type Order, type RelicShape, type World,
 } from '@sim/envs/relicfog';
@@ -27,6 +27,7 @@ const GOLD = TOKENS.celebrationGold;
 const KEY_NAMES = ['hold', '↑', '→', '↓', '←', 'sap'] as const;
 const RIVALS = ['scout bot', 'sapper bot', 'league'] as const;
 const GAP = 1.0;
+const PACE = 20;
 const GLIDE = 6;
 const BOLT_STEPS = 10;
 const IMPACT_STEPS = 13;
@@ -58,7 +59,7 @@ interface Spot { x: number; z: number; scale: number; shown: number }
 interface Crowd { count: number; x: number; z: number; scale: number }
 interface Layout { spots: Spot[][]; crowds: Map<number, Crowd>[] }
 interface Glow { x: number; z: number; team: number; level: number }
-interface Tick { at: number; world: World; before: World | null; fresh: boolean; cleared: boolean; drift: boolean; ticks: number }
+interface Tick { at: number; world: World; before: World | null; fresh: boolean; cleared: boolean; drift: number; ticks: number; span: number }
 
 class RelicFogScene extends Stage2DScene {
   readonly post: ScenePost = { bloom: 0.42, fog: { from: ['night', 'fog'] } };
@@ -102,7 +103,7 @@ class RelicFogScene extends Stage2DScene {
   private readonly scale = new THREE.Vector3();
   private readonly ledger = {
     game: 0, match: 0, step: 0, ours: 0, theirs: 0, ourWins: 0, theirWins: 0, fleet: 0, energy: 0, rivals: 0, member: 0,
-    mode: WAIT, cursor: -1, key: -1, fx: 0, fy: 0, clock: 0, reward: 0, pairs: 0, moveCost: 0, sapCost: 0, sapRange: 0, sensorRange: 0,
+    mode: ORDER, cursor: -1, key: -1, fx: 0, fy: 0, reward: 0, pairs: 0, moveCost: 0, sapCost: 0, sapRange: 0, sensorRange: 0,
   };
 
   override legend: LegendSpec = {
@@ -127,8 +128,7 @@ class RelicFogScene extends Stage2DScene {
   }
 
   private orderText(): string {
-    const { mode, cursor, key, fx, fy, clock } = this.ledger, pressed = key < 0 ? '' : ` · pressed ${KEY_NAMES[key]}`;
-    if (mode === WAIT) return `all orders given · key ${clock} of ${this.shape?.window ?? 0}${pressed}`;
+    const { mode, cursor, key, fx, fy } = this.ledger, pressed = key < 0 ? '' : ` · pressed ${KEY_NAMES[key]}`;
     if (mode === TARGET) return `aiming ship ${cursor + 1} at ${fx >= 0 ? '+' : '−'}${Math.abs(fx)}, ${fy >= 0 ? '+' : '−'}${Math.abs(fy)}${pressed}`;
     return `ordering ship ${cursor + 1}${pressed}`;
   }
@@ -155,7 +155,6 @@ class RelicFogScene extends Stage2DScene {
     const agent: GridCell = { x: 0, y: 0 };
     return {
       agentCell: (state) => {
-        if (state.pose[RF_CURSOR_X]! < 0) return null;
         agent.x = state.pose[RF_CURSOR_X]!;
         agent.y = state.pose[RF_CURSOR_Y]!;
         return agent;
@@ -261,15 +260,16 @@ class RelicFogScene extends Stage2DScene {
     const source = frame.frameAt(step);
     if (source.step !== step) return null;
     const at = step - source.words[RW.CLOCK]!, world = this.worldAt(frame, at, source)!;
-    const ticks = source.words[RW.STEP]!, fresh = ticks === 0, cleared = !fresh && source.words[RW.MATCH] === 1;
-    const before = at > 0 ? this.worldAt(frame, at - 1) : null;
-    let drift = false;
-    if (before && !fresh) {
+    const ticks = source.words[RW.STEP]!, fresh = ticks === 1, cleared = !fresh && source.words[RW.MATCH] === 1;
+    const previous = at > 0 ? frame.frameAt(at - 1) : null, before = at > 0 ? this.worldAt(frame, at - 1) : null;
+    const span = Math.max(1, world.units[0].filter((unit) => unit.alive && unit.energy >= world.params.moveCost).length);
+    let drift = 0;
+    if (before && !fresh && previous!.step === at - 1) {
       const [dx, dy] = driftOf(world);
-      drift = driftsBy(world, ticks) !== driftsBy(world, ticks - 1);
-      if (!shifted(before, world, drift ? dx : 0, drift ? dy : 0)) throw new Error(`RelicFog step ${at} ${drift ? 'should roll its nebulae and asteroids' : 'moves its nebulae and asteroids off the drift schedule'}`);
+      drift = driftsBy(world, ticks) - driftsBy(world, previous!.words[RW.STEP]!);
+      if (!shifted(before, world, drift * dx, drift * dy)) throw new Error(`RelicFog step ${at} should roll its nebulae and asteroids ${drift} times`);
     }
-    return { at, world, before, fresh, cleared, drift, ticks };
+    return { at, world, before, fresh, cleared, drift, ticks, span };
   }
 
   protected tick(frame: FrameUpdate, { pool, time }: Stage2D): void {
@@ -280,7 +280,7 @@ class RelicFogScene extends Stage2DScene {
     if (current.step !== step || !this.shape) return;
     const tick = this.tickOf(frame, step);
     if (!tick) return;
-    const age = Math.max(0, frame.position - tick.at);
+    const age = Math.max(0, frame.position - tick.at) * PACE / tick.span;
     this.flashes.length = 0;
     this.paint(tick);
     this.drift(tick, age);
@@ -343,7 +343,7 @@ class RelicFogScene extends Stage2DScene {
   }
 
   private drift(tick: Tick, age: number): void {
-    const slide = this.sector!.slide.value, [dx, dy] = driftOf(tick.world), rest = tick.drift ? 1 - smoothstep01(clamp01(age / GLIDE)) : 0;
+    const slide = this.sector!.slide.value, [dx, dy] = driftOf(tick.world), rest = tick.drift * (1 - smoothstep01(clamp01(age / GLIDE)));
     slide.set(dx * rest, dy * rest);
     this.shade?.position.set(-slide.x, 0, -slide.y);
   }
@@ -361,7 +361,7 @@ class RelicFogScene extends Stage2DScene {
     if (!world) return null;
     const previous = at > 0 ? frame.frameAt(at - 1) : null, known = previous !== null && previous.step === at - 1;
     const before = known ? this.worldAt(frame, at - 1) : null;
-    const sameGame = before !== null && turn.words[RW.STEP] !== 0, cleared = sameGame && previous!.words[RW.MATCH] === 0;
+    const sameGame = before !== null && turn.words[RW.STEP] !== 1, cleared = sameGame && turn.words[RW.MATCH] === 1;
     const prior = sameGame && depth > 0 ? this.headingsAt(frame, previous!, depth - 1) : null;
     const out = new Float32Array(2 * UNITS);
     for (let team = 0; team < 2; team++) for (let i = 0; i < UNITS; i++) {
@@ -576,10 +576,8 @@ class RelicFogScene extends Stage2DScene {
     return 0;
   }
 
-  private spotOf(source: EnvFrame, world: World, aim: boolean): THREE.Vector2 | null {
-    const mode = source.words[RW.MODE]!, cursor = source.words[RW.CURSOR]!;
-    if (mode === WAIT || cursor >= UNITS) return null;
-    const unit = world.units[0][cursor]!, focus = aim && mode === TARGET ? focusOf(source.words) : { dx: 0, dy: 0 };
+  private spotOf(source: EnvFrame, world: World, aim: boolean): THREE.Vector2 {
+    const unit = world.units[0][source.words[RW.CURSOR]!]!, focus = aim && source.words[RW.MODE] === TARGET ? focusOf(source.words) : { dx: 0, dy: 0 };
     this.centre(unit.x + focus.dx, unit.y + focus.dy, this.other);
     return new THREE.Vector2(this.other.x, this.other.z);
   }
@@ -590,16 +588,15 @@ class RelicFogScene extends Stage2DScene {
     const aheadWorld = ahead ? (ahead.words[RW.CLOCK] === 0 ? this.worldAt(frame, step + 1) : world) : null;
     const here = this.spotOf(current, world, false), there = ahead && aheadWorld ? this.spotOf(ahead, aheadWorld, false) : null;
     const mode = current.words[RW.MODE]!;
-    command.mode.value = mode === WAIT && ahead ? ahead.words[RW.MODE]! : mode;
-    command.shown.value = here ? (there ? 1 : 1 - k) : there ? k : 0;
-    const spot = here && there ? here.clone().lerp(there, k) : here ?? there;
-    if (spot) command.cursor.value.copy(spot);
-    if (mode === TARGET && here) {
+    command.mode.value = mode;
+    command.shown.value = there ? 1 : 1 - k;
+    command.cursor.value.copy(there ? here.clone().lerp(there, k) : here);
+    if (mode === TARGET) {
       const cursor = current.words[RW.CURSOR]!, unit = world.units[0][cursor]!, reach = world.params.sapRange;
       this.centre(Math.max(unit.x - reach, 0), Math.max(unit.y - reach, 0), this.at);
       this.centre(Math.min(unit.x + reach, SIDE - 1), Math.min(unit.y + reach, SIDE - 1), this.other);
       command.fence.value.set(this.at.x - 0.5, this.at.z - 0.5, this.other.x + 0.5, this.other.z + 0.5);
-      const aim = this.spotOf(current, world, true)!, later = ahead && ahead.words[RW.MODE] === TARGET && ahead.words[RW.CLOCK]! > current.words[RW.CLOCK]! ? this.spotOf(ahead, world, true)! : aim;
+      const aim = this.spotOf(current, world, true), later = ahead && ahead.words[RW.MODE] === TARGET && ahead.words[RW.CLOCK]! > current.words[RW.CLOCK]! ? this.spotOf(ahead, world, true) : aim;
       aim.lerp(later, k);
       command.aim.value.copy(aim);
       this.segment(this.beams!, here.x, here.y, aim.x, aim.y, LINK, 0, 1);
@@ -628,7 +625,7 @@ class RelicFogScene extends Stage2DScene {
 
   private rosterOf(world: World, words: Uint32Array): number {
     let roster = 0;
-    if (words[RW.MATCH] !== 0) world.units[0].forEach((unit, i) => { if (unit.alive && unit.energy >= 0) roster |= 1 << i; });
+    if (words[RW.MATCH] !== 0) world.units[0].forEach((unit, i) => { if (unit.alive && unit.energy >= world.params.moveCost) roster |= 1 << i; });
     return roster;
   }
 
@@ -646,11 +643,10 @@ class RelicFogScene extends Stage2DScene {
     deck.ourWins.value = words[RW.OUR_WINS]!;
     deck.theirWins.value = words[RW.THEIR_WINS]!;
     deck.clock.value = words[RW.MATCH]!;
-    deck.cursor.value = mode === WAIT ? -1 : words[RW.CURSOR]!;
+    deck.cursor.value = words[RW.CURSOR]!;
     deck.mode.value = mode;
     const key = step > 0 && !current.done ? keyOf(current) : -1;
     deck.key.value = key;
-    deck.wait.value = mode === WAIT ? Math.min(1, Math.max(1e-3, words[RW.CLOCK]! / this.shape!.window)) : 0;
     const since = this.clock - this.verdictAt;
     deck.verdict.value = since < VERDICT_SECONDS ? (this.verdictWon ? 1 : -1) * (1 - since / VERDICT_SECONDS) : 0;
     const ledger = this.ledger, params = world.params;
@@ -665,7 +661,6 @@ class RelicFogScene extends Stage2DScene {
     ledger.mode = mode;
     ledger.cursor = words[RW.CURSOR]!;
     ledger.key = key;
-    ledger.clock = words[RW.CLOCK]!;
     ledger.reward = current.reward;
     ledger.pairs = world.pairs;
     ledger.moveCost = params.moveCost;
@@ -716,7 +711,7 @@ class RelicFogScene extends Stage2DScene {
         this.verdictWon = event.type === 'goal';
         if (event.type === 'harm') pool.sigh(0.8, this.at.set(0, 2, 0), time);
         else {
-          const fleet = (tick.fresh ? tick.before : tick.world)?.units[0].filter((unit) => unit.alive && unit.energy >= 0).sort((a, b) => b.energy - a.energy) ?? [];
+          const fleet = (tick.fresh || tick.cleared ? tick.before : tick.world)?.units[0].filter((unit) => unit.alive && unit.energy >= 0).sort((a, b) => b.energy - a.energy) ?? [];
           for (const unit of fleet.slice(0, CHEERS)) pool.burst(this.centre(unit.x, unit.y, this.at).setY(38), GOLD, 0.5, time);
         }
       }
@@ -754,7 +749,7 @@ class RelicFogScene extends Stage2DScene {
     }
     const mode = current.words[RW.MODE]!, cursor = current.words[RW.CURSOR]!;
     const range = kit.curve('range', 5, ACCENT), aim = kit.curve('aim', 2, 0xffffff);
-    if (mode === TARGET && cursor < UNITS) {
+    if (mode === TARGET) {
       const unit = world.units[0][cursor]!, reach = world.params.sapRange, focus = focusOf(current.words);
       const x0 = Math.max(unit.x - reach, 0) - 0.5, x1 = Math.min(unit.x + reach, SIDE - 1) + 0.5, y0 = Math.max(unit.y - reach, 0) - 0.5, y1 = Math.min(unit.y + reach, SIDE - 1) + 0.5;
       for (const [x, y] of [[x0, y0], [x1, y0], [x1, y1], [x0, y1], [x0, y0]] as const) {

@@ -1,25 +1,25 @@
 #include "../env.h"
 
-typedef struct { uint32_t material, opponent, nodes, depth, quiescence, period, oracleNodes; } chessKnobs;
+typedef struct { uint32_t material, opponent, nodes, depth, quiescence, oracleNodes; } chessKnobs;
 
 static const chessKnobs CHESS_KNOBS[4] = {
-    { 1u, 0u, 0u, 0u, 0u, 1u, 0u },
-    { 2u, 0u, 0u, 0u, 0u, 1u, 0u },
-    { 0u, 1u, 0u, 0u, 0u, 1u, 80u },
-    { 0u, 2u, 512u, 2u, 4u, 2u, 4000u }
+    { 1u, 0u, 0u, 0u, 0u, 0u },
+    { 2u, 0u, 0u, 0u, 0u, 0u },
+    { 0u, 1u, 0u, 0u, 0u, 80u },
+    { 0u, 2u, 512u, 2u, 4u, 4000u }
 };
 
 enum { CHESS_FULL, CHESS_KQK, CHESS_KRK };
 enum { CHESS_TABLE, CHESS_RANDOM, CHESS_SEARCH };
-enum { CHESS_UP, CHESS_DOWN, CHESS_LEFT, CHESS_RIGHT, CHESS_SELECT, CHESS_CANCEL, CHESS_ACTIONS };
+enum { CHESS_PLAY, CHESS_NEXT, CHESS_ACTIONS };
 enum { CHESS_PAWN = 1, CHESS_KNIGHT, CHESS_BISHOP, CHESS_ROOK, CHESS_QUEEN, CHESS_KING };
 enum { CHESS_PLAIN, CHESS_DOUBLE, CHESS_PASSANT, CHESS_CASTLE };
 enum { CHESS_ONGOING, CHESS_CHECKMATE, CHESS_INSUFFICIENT, CHESS_STALEMATE, CHESS_FIFTY, CHESS_THREEFOLD };
-enum { CHESS_CURSOR = 8, CHESS_STATE, CHESS_GAME, CHESS_LAST, CHESS_THINK, CHESS_PLY, CHESS_WORDS };
-enum { CHESS_CAPACITY = 256, CHESS_HISTORY = 104, CHESS_FRAMES = 16, CHESS_OPENING = 2, CHESS_CEILING = 9, CHESS_QUIESCENCE = 6, CHESS_OBS = 18 };
+enum { CHESS_OFFER = 8, CHESS_STATE, CHESS_GAME, CHESS_LAST, CHESS_PROPOSAL, CHESS_PLY, CHESS_PLAYED, CHESS_WORDS };
+enum { CHESS_CAPACITY = 256, CHESS_HISTORY = 104, CHESS_FRAMES = 16, CHESS_OPENING = 2, CHESS_CEILING = 9, CHESS_QUIESCENCE = 6, CHESS_OBS = 64 };
 enum { CHESS_ENTRIES = 1 << 18, CHESS_LOST = 0x80, CHESS_HELD = 0x40, CHESS_RECORD = 9 };
-enum { CHESS_MATE = 100000, CHESS_INFINITY = 200000, CHESS_DRAWN = 1 << 23, CHESS_CONTEMPT = 50, CHESS_MARGIN = 200 };
-enum { CHESS_START = 1, CHESS_PICK, CHESS_TIE, CHESS_SHUFFLE };
+enum { CHESS_MATE = 100000, CHESS_INFINITY = 200000, CHESS_DRAWN = 1 << 23, CHESS_CORE = CHESS_DRAWN - 1, CHESS_CONTEMPT = 50, CHESS_MARGIN = 200 };
+enum { CHESS_START = 1, CHESS_PICK, CHESS_TIE, CHESS_SHUFFLE, CHESS_PROPOSE };
 
 static const uint32_t CHESS_UNGENERATED = 0xFFFFFFFFu;
 static const uint64_t CHESS_FILE = 0x0101010101010101ull;
@@ -96,6 +96,8 @@ static const int16_t CHESS_SQUARES[8][64] = {
 
 static const uint8_t CHESS_PROMOTE[4] = { CHESS_QUEEN, CHESS_ROOK, CHESS_BISHOP, CHESS_KNIGHT };
 
+static const float CHESS_SIXTHS[8] = { 0.0f, 1.0f / 6.0f, 2.0f / 6.0f, 3.0f / 6.0f, 4.0f / 6.0f, 5.0f / 6.0f, 1.0f, 0.0f };
+
 typedef struct {
     uint64_t bb[8];
     uint8_t board[64];
@@ -117,12 +119,12 @@ typedef struct {
 } chessSearch;
 
 typedef struct {
-    float obs[20];
-    float pad[104];
+    float obs[CHESS_OBS];
+    float base[CHESS_OBS];
     chessPos pos;
-    uint64_t movable, targets;
     uint32_t count, captures, check, seen, twice;
     uint32_t list[CHESS_CAPACITY];
+    uint32_t offer[CHESS_CAPACITY];
     uint32_t hash[CHESS_HISTORY];
     uint32_t record[CHESS_HISTORY][CHESS_RECORD];
     uint8_t repeated[CHESS_HISTORY];
@@ -475,74 +477,43 @@ static uint32_t chess_settle(chessLane *l, uint32_t *words, uint32_t agent, uint
 
 static uint32_t chess_agent(const chessKnobs *k, const uint32_t *words) { return k->material == CHESS_FULL ? words[CHESS_GAME] & 1u : 0u; }
 
-static uint32_t chess_cell(uint32_t square) { return (square >> 3) * 10u + (square & 7u) + 11u; }
-
 static float chess_code(uint32_t code, uint32_t agent) {
-    static const float sixths[8] = { 0.0f, 1.0f / 6.0f, 2.0f / 6.0f, 3.0f / 6.0f, 4.0f / 6.0f, 5.0f / 6.0f, 1.0f, 0.0f };
-    float value = sixths[code & 7u];
+    float value = CHESS_SIXTHS[code & 7u];
     return !code || (code >> 3) == agent ? value : -value;
 }
 
-static void chess_paint(chessLane *l, uint32_t agent) {
-    for (uint32_t i = 0u; i < 104u; i++) l->pad[i] = 0.0f;
-    for (uint32_t s = 0u; s < 64u; s++) l->pad[chess_cell(s ^ (agent ? 63u : 0u))] = chess_code(l->pos.board[s], agent);
+static void chess_propose(chessLane *l, uint32_t *words, uint32_t agent) {
+    uint32_t move = l->offer[words[CHESS_OFFER] & 255u] & CHESS_CORE, flip = agent ? 63u : 0u;
+    uint32_t from = move & 63u, to = move >> 6 & 63u, promo = move >> 18 & 7u, special = move >> 21 & 3u;
+    float *o = l->obs;
+    __builtin_memcpy(o, l->base, sizeof l->obs);
+    o[from ^ flip] = 0.0f;
+    o[to ^ flip] = CHESS_SIXTHS[promo ? promo : move >> 12 & 7u];
+    if (special == CHESS_PASSANT) o[to ^ 8u ^ flip] = 0.0f;
+    if (special == CHESS_CASTLE) {
+        o[(to > from ? to + 1u : to - 2u) ^ flip] = 0.0f;
+        o[(to > from ? to - 1u : to + 1u) ^ flip] = CHESS_SIXTHS[CHESS_ROOK];
+    }
+    words[CHESS_PROPOSAL] = move;
 }
 
-static void chess_touch(chessLane *l, uint32_t agent, uint64_t squares) {
-    for (; squares; squares &= squares - 1u) {
-        uint32_t s = chess_low(squares);
-        l->pad[chess_cell(s ^ (agent ? 63u : 0u))] = chess_code(l->pos.board[s], agent);
+static void chess_shuffle(uint32_t *list, uint32_t n, uint32_t seed, const uint32_t *words, uint32_t tag) {
+    u4 r = { 0u, 0u, 0u, 0u };
+    for (uint32_t i = n - 1u; i > 0u; i--) {
+        if (i == n - 1u || (i & 3u) == 3u) r = philox4x32(seed, ENV_RNG_STREAM, words[CHESS_GAME], words[CHESS_PLY], tag, i >> 2);
+        uint32_t draws[4] = { r.x, r.y, r.z, r.w }, j = (uint32_t)(((uint64_t)draws[i & 3u] * (i + 1u)) >> 32), m = list[i];
+        list[i] = list[j];
+        list[j] = m;
     }
 }
 
-static void chess_frame(chessLane *l, uint32_t cw, uint32_t agent) {
-    static const float sevenths[8] = { 0.0f, 1.0f / 7.0f, 2.0f / 7.0f, 3.0f / 7.0f, 4.0f / 7.0f, 5.0f / 7.0f, 6.0f / 7.0f, 1.0f };
-    float *o = l->obs;
-    uint32_t cursor = cw & 63u, file = cursor & 7u, rank = cursor >> 3, sel = cw >> 8 & 127u;
-    const float *row = l->pad + rank * 10u + file;
-    vst1q_f32(o, vld1q_f32(row + 20u));
-    vst1q_f32(o + 3, vld1q_f32(row + 10u));
-    vst1q_f32(o + 6, vld1q_f32(row));
-    o[9] = sevenths[file];
-    o[10] = sevenths[rank];
-    o[12] = (cw >> 16 & 127u) ? 1.0f : (float)(((sel ? l->targets : l->movable) >> (cursor ^ (agent ? 63u : 0u))) & 1u);
-}
-
-static void chess_status(chessLane *l, const uint32_t *words, uint32_t agent) {
-    float *o = l->obs;
-    uint32_t flip = agent ? 63u : 0u, cw = words[CHESS_CURSOR], sel = cw >> 8 & 127u, promo = cw >> 16 & 127u, cand = cw >> 24 & 3u;
-    uint32_t last = words[CHESS_LAST], from = last & 127u, to = last >> 8 & 127u;
-    o[11] = promo ? (float)CHESS_PROMOTE[cand] / 6.0f : sel ? (float)(l->pos.board[sel - 1u] & 7u) / 6.0f : 0.0f;
-    o[13] = from ? (float)((from - 1u) ^ flip) / 63.0f : -1.0f;
-    o[14] = to ? (float)((to - 1u) ^ flip) / 63.0f : -1.0f;
-    o[15] = (float)(last >> 16 & 1u);
-    o[16] = words[CHESS_THINK] ? 1.0f : 0.0f;
-    o[17] = to ? l->pad[chess_cell((to - 1u) ^ flip)] : 0.0f;
-}
-
-static void chess_view(chessLane *l, const uint32_t *words, uint32_t agent) {
-    chess_frame(l, words[CHESS_CURSOR], agent);
-    chess_status(l, words, agent);
-}
-
-static uint64_t chess_movable(const chessLane *l) {
-    uint64_t m = 0u;
-    for (uint32_t i = 0u; i < l->count; i++) m |= 1ull << (l->list[i] & 63u);
-    return m;
-}
-
-static uint64_t chess_targets(const chessLane *l, uint32_t from) {
-    uint64_t m = 0u;
-    for (uint32_t i = 0u; i < l->count; i++) m |= (uint64_t)((l->list[i] & 63u) == from) << (l->list[i] >> 6 & 63u);
-    return m;
-}
-
-static uint32_t chess_find(const chessLane *l, uint32_t from, uint32_t to, uint32_t promo) {
-    for (uint32_t i = 0u; i < l->count; i++) {
-        uint32_t m = l->list[i];
-        if ((m & 4095u) == (from | to << 6) && (!promo || (m >> 18 & 7u) == promo)) return m;
-    }
-    __builtin_trap();
+static void chess_offer(chessLane *l, uint32_t *words, uint32_t agent, uint32_t seed) {
+    uint32_t n = l->count, flip = agent ? 63u : 0u;
+    __builtin_memcpy(l->offer, l->list, n * sizeof(uint32_t));
+    chess_shuffle(l->offer, n, seed, words, CHESS_PROPOSE);
+    for (uint32_t s = 0u; s < 64u; s++) l->base[s ^ flip] = chess_code(l->pos.board[s], agent);
+    words[CHESS_OFFER] = n << 8;
+    chess_propose(l, words, agent);
 }
 
 static void chess_standard(chessPos *p) {
@@ -716,12 +687,10 @@ static void chess_iterate(chessSearch *s) {
     root->depth = ++s->horizon;
 }
 
-static uint32_t chess_think(chessSearch *s, uint32_t quota) {
+static void chess_think(chessSearch *s) {
     while (!s->done) {
         chessFrame *f = &s->frame[s->sp];
         if (f->count == CHESS_UNGENERATED) {
-            if (!quota) return 0u;
-            quota--;
             chess_expand(s, f);
             continue;
         }
@@ -740,8 +709,6 @@ static uint32_t chess_think(chessSearch *s, uint32_t quota) {
             continue;
         }
         uint32_t move = f->list[f->next];
-        if (!quota) return 0u;
-        quota--;
         f->next++;
         s->nodes++;
         chessFrame *c = f + 1;
@@ -755,111 +722,73 @@ static uint32_t chess_think(chessSearch *s, uint32_t quota) {
         c->move = move;
         s->sp++;
     }
-    return 1u;
 }
 
-static void chess_prepare(chessLane *l, const uint32_t *words, const chessKnobs *k, uint32_t seed) {
+static uint32_t chess_search(chessLane *l, const uint32_t *words, const chessKnobs *k, uint32_t seed) {
     chessSearch *s = &l->search;
     chessFrame *root = s->frame;
     uint32_t n = l->count;
     root->pos = l->pos;
     __builtin_memcpy(root->list, l->list, n * sizeof(uint32_t));
-    u4 r = { 0u, 0u, 0u, 0u };
-    for (uint32_t i = n - 1u; i > 0u; i--) {
-        if (i == n - 1u || (i & 3u) == 3u) r = philox4x32(seed, ENV_RNG_STREAM, words[CHESS_GAME], words[CHESS_PLY], CHESS_SHUFFLE, i >> 2);
-        uint32_t draws[4] = { r.x, r.y, r.z, r.w }, j = (uint32_t)(((uint64_t)draws[i & 3u] * (i + 1u)) >> 32), m = root->list[i];
-        root->list[i] = root->list[j];
-        root->list[j] = m;
-    }
+    chess_shuffle(root->list, n, seed, words, CHESS_SHUFFLE);
     chess_order(root->list, n);
     chess_start(s, n, k->nodes, k->depth, k->depth, k->quiescence, 0u);
+    chess_think(s);
+    return s->choice;
+}
+
+static uint32_t chess_reply(chessLane *l, const uint32_t *words, const chessKnobs *k, uint32_t seed, const float *shared) {
+    if (k->opponent == CHESS_TABLE) return chess_defend(l, words, seed, shared);
+    if (k->opponent == CHESS_RANDOM) return l->list[chess_draw(seed, words, CHESS_PICK, l->count)];
+    return chess_search(l, words, k, seed);
 }
 
 static void chess_begin(chessLane *l, uint32_t *words, const chessKnobs *k, uint32_t seed) {
     chessPos *p = &l->pos;
     if (k->material == CHESS_FULL) chess_standard(p);
     else chess_scatter(p, k->material == CHESS_KQK ? CHESS_QUEEN : CHESS_ROOK, seed, words[CHESS_GAME]);
-    uint32_t agent = chess_agent(k, words);
     words[CHESS_PLY] = 0u;
-    words[CHESS_CURSOR] &= 63u;
-    words[CHESS_THINK] = 0u;
-    chess_paint(l, agent);
-    chess_settle(l, words, agent, 1u);
-    words[CHESS_THINK] = p->side != agent;
-    l->movable = p->side == agent ? chess_movable(l) : 0u;
-    l->targets = 0u;
-    chess_view(l, words, agent);
+    words[CHESS_PLAYED] = 0u;
+    chess_settle(l, words, chess_agent(k, words), 1u);
 }
 
-static float chess_play(chessLane *l, uint32_t *words, const chessKnobs *k, uint32_t seed, uint32_t move, uint32_t *done) {
+static uint32_t chess_play(chessLane *l, uint32_t *words, uint32_t agent, uint32_t move, float *reward) {
     chessPos *p = &l->pos;
-    uint32_t mover = p->side, agent = chess_agent(k, words), castle = p->castle, to = move >> 6 & 63u;
-    uint64_t before = p->bb[0] | p->bb[7];
+    uint32_t mover = p->side, castle = p->castle;
     chess_make(p, move);
-    chess_touch(l, agent, (before ^ (p->bb[0] | p->bb[7])) | (1ull << to));
     words[CHESS_PLY]++;
-    words[CHESS_CURSOR] &= 63u;
-    if (mover != agent) words[CHESS_LAST] = (words[CHESS_LAST] & ~0x7F7Fu) | ((move & 63u) + 1u) | (to + 1u) << 8;
+    if (mover == agent) words[CHESS_PLAYED] = move & CHESS_CORE;
+    else words[CHESS_LAST] = (words[CHESS_LAST] & ~0x7F7Fu) | ((move & 63u) + 1u) | ((move >> 6 & 63u) + 1u) << 8;
     uint32_t outcome = chess_settle(l, words, agent, (move >> 12 & 7u) == CHESS_PAWN || (move >> 15 & 7u) || castle != p->castle);
     if (outcome) {
-        float reward = outcome == CHESS_CHECKMATE ? (mover == agent ? 1.0f : -1.0f) : 0.0f;
-        words[CHESS_LAST] = outcome << 20 | (reward > 0.0f ? 1u : reward < 0.0f ? 2u : 3u) << 24;
+        *reward = outcome == CHESS_CHECKMATE ? (mover == agent ? 1.0f : -1.0f) : 0.0f;
+        words[CHESS_LAST] = outcome << 20 | (*reward > 0.0f ? 1u : *reward < 0.0f ? 2u : 3u) << 24;
+    }
+    return outcome;
+}
+
+static float chess_turn(chessLane *l, uint32_t *words, const chessKnobs *k, uint32_t seed, const float *shared, uint32_t move, uint32_t *done) {
+    uint32_t agent = chess_agent(k, words);
+    float reward = 0.0f;
+    if (chess_play(l, words, agent, move, &reward) || chess_play(l, words, agent, chess_reply(l, words, k, seed, shared), &reward)) {
         words[CHESS_GAME]++;
         *done = 1u;
         chess_begin(l, words, k, seed);
-        return reward;
+        agent = chess_agent(k, words);
+        if (l->pos.side != agent && chess_play(l, words, agent, chess_reply(l, words, k, seed, shared), &reward)) __builtin_trap();
     }
-    words[CHESS_THINK] = p->side != agent;
-    l->movable = p->side == agent ? chess_movable(l) : 0u;
-    l->targets = 0u;
-    chess_view(l, words, agent);
-    return 0.0f;
+    chess_offer(l, words, agent, seed);
+    return reward;
 }
 
-static float chess_reply(chessLane *l, uint32_t *words, const chessKnobs *k, uint32_t seed, const float *shared, uint32_t *done) {
-    if (k->opponent == CHESS_TABLE) return chess_play(l, words, k, seed, chess_defend(l, words, seed, shared), done);
-    if (k->opponent == CHESS_RANDOM) return chess_play(l, words, k, seed, l->list[chess_draw(seed, words, CHESS_PICK, l->count)], done);
-    uint32_t t = words[CHESS_THINK];
-    if (t == 1u) chess_prepare(l, words, k, seed);
-    else if (chess_think(&l->search, 1u)) return chess_play(l, words, k, seed, l->search.choice, done);
-    words[CHESS_THINK] = t + 1u;
-    return 0.0f;
-}
-
-static float chess_act(chessLane *l, uint32_t *words, const chessKnobs *k, uint32_t seed, uint32_t action, uint32_t *done) {
-    uint32_t agent = chess_agent(k, words), cw = words[CHESS_CURSOR], cursor = cw & 63u, sel = cw >> 8 & 127u, promo = cw >> 16 & 127u, cand = cw >> 24 & 3u;
-    if (!promo && action < CHESS_SELECT) {
-        int dx, dy;
-        gridDelta(action, &dx, &dy);
-        int file = (int)(cursor & 7u) + dx, rank = (int)(cursor >> 3) - dy;
-        if (file < 0 || file > 7 || rank < 0 || rank > 7) return 0.0f;
-        cw = (cw & ~63u) | (uint32_t)(rank * 8 + file);
-        words[CHESS_CURSOR] = cw;
-        chess_frame(l, cw, agent);
+static float chess_act(chessLane *l, uint32_t *words, const chessKnobs *k, uint32_t seed, const float *shared, uint32_t action, uint32_t *done) {
+    uint32_t offer = words[CHESS_OFFER], index = offer & 255u;
+    if (action == CHESS_NEXT && index + 1u < offer >> 8) {
+        words[CHESS_OFFER] = offer + 1u;
+        chess_propose(l, words, chess_agent(k, words));
         return 0.0f;
     }
-    if (action == CHESS_CANCEL && !promo && !sel) return 0.0f;
-    if (promo) {
-        if (action == CHESS_SELECT) return chess_play(l, words, k, seed, chess_find(l, sel - 1u, promo - 1u, CHESS_PROMOTE[cand]), done);
-        if (action == CHESS_LEFT) cand = (cand + 3u) & 3u;
-        if (action == CHESS_RIGHT) cand = (cand + 1u) & 3u;
-        if (action == CHESS_CANCEL) promo = cand = 0u;
-    } else if (action == CHESS_CANCEL) sel = 0u;
-    else {
-        uint32_t here = cursor ^ (agent ? 63u : 0u);
-        if (sel && (l->targets >> here & 1u)) {
-            uint32_t move = chess_find(l, sel - 1u, here, 0u);
-            if (!(move >> 18 & 7u)) return chess_play(l, words, k, seed, move, done);
-            promo = here + 1u;
-            cand = 0u;
-        } else if ((l->movable >> here & 1u) && sel != here + 1u) {
-            sel = here + 1u;
-            l->targets = chess_targets(l, here);
-        } else return 0.0f;
-    }
-    words[CHESS_CURSOR] = cursor | sel << 8 | promo << 16 | cand << 24;
-    chess_view(l, words, agent);
-    return 0.0f;
+    return chess_turn(l, words, k, seed, shared, l->offer[index], done);
 }
 
 static uint32_t chess_action(const float *ctrl) {
@@ -869,22 +798,20 @@ static uint32_t chess_action(const float *ctrl) {
 
 void chess_reset(uint32_t instance, uint32_t seed, uint32_t *words, uint32_t *extra, uint32_t steps) {
     (void)steps;
+    const chessKnobs *k = &CHESS_KNOBS[instance];
     chessLane *l = chess_lane(extra);
     for (uint32_t i = 0u; i < CHESS_WORDS; i++) words[i] = 0u;
-    words[CHESS_CURSOR] = 4u;
     l->seen = l->twice = 0u;
     chess_oracleOf(l)->game = 0xFFFFFFFFu;
-    chess_begin(l, words, &CHESS_KNOBS[instance], seed);
+    chess_begin(l, words, k, seed);
+    if (l->pos.side != chess_agent(k, words)) __builtin_trap();
+    chess_offer(l, words, chess_agent(k, words), seed);
 }
 
 static inline __attribute__((always_inline)) float chess_run(uint32_t instance, uint32_t seed, const float *ctrl, uint32_t *words, uint32_t *extra, float *obs, uint32_t *done, const float *shared) {
-    const chessKnobs *k = &CHESS_KNOBS[instance];
     chessLane *l = chess_lane(extra);
-    uint32_t t = words[CHESS_THINK];
-    float reward = 0.0f;
     *done = 0u;
-    if (t && k->opponent == CHESS_SEARCH && (t - 1u) % k->period) words[CHESS_THINK] = t + 1u;
-    else reward = t ? chess_reply(l, words, k, seed, shared, done) : chess_act(l, words, k, seed, chess_action(ctrl), done);
+    float reward = chess_act(l, words, &CHESS_KNOBS[instance], seed, shared, chess_action(ctrl), done);
     __builtin_memcpy(obs, l->obs, CHESS_OBS * sizeof(float));
     return reward;
 }
@@ -932,41 +859,20 @@ static uint32_t chess_decide(chessLane *l, chessOracle *o, const chessKnobs *k, 
     chess_order(root->list, l->captures);
     chess_avoid(l, root->list, l->count);
     chess_start(s, l->count, k->oracleNodes, CHESS_OPENING, CHESS_CEILING, CHESS_QUIESCENCE, 1u);
-    chess_think(s, 0xFFFFFFFFu);
-    return s->choice & ~(uint32_t)CHESS_DRAWN;
-}
-
-static uint32_t chess_steer(const uint32_t *words, uint32_t move, uint32_t agent) {
-    uint32_t cw = words[CHESS_CURSOR], cursor = cw & 63u, sel = cw >> 8 & 127u, promo = cw >> 16 & 127u, cand = cw >> 24 & 3u;
-    uint32_t from = move & 63u, to = move >> 6 & 63u, piece = move >> 18 & 7u;
-    if (promo) {
-        if (promo != to + 1u || sel != from + 1u) return CHESS_CANCEL;
-        uint32_t want = 0u;
-        while (CHESS_PROMOTE[want] != piece) want++;
-        if (want == cand) return CHESS_SELECT;
-        return ((want - cand) & 3u) <= 2u ? CHESS_RIGHT : CHESS_LEFT;
-    }
-    uint32_t target = (sel == from + 1u ? to : from) ^ (agent ? 63u : 0u);
-    if (cursor == target) return CHESS_SELECT;
-    if ((target >> 3) != (cursor >> 3)) return (target >> 3) > (cursor >> 3) ? CHESS_UP : CHESS_DOWN;
-    return (target & 7u) > (cursor & 7u) ? CHESS_RIGHT : CHESS_LEFT;
+    chess_think(s);
+    return s->choice;
 }
 
 void chess_oracle(uint32_t instance, uint32_t seed, uint32_t step, const uint32_t *words, uint32_t *extra, const float *obs, float *ctrl, const float *shared) {
     (void)seed; (void)step; (void)obs;
-    if (words[CHESS_THINK]) {
-        ctrl[0] = (float)CHESS_CANCEL;
-        return;
-    }
-    const chessKnobs *k = &CHESS_KNOBS[instance];
     chessLane *l = chess_lane(extra);
     chessOracle *o = chess_oracleOf(l);
     if (o->game != words[CHESS_GAME] || o->ply != words[CHESS_PLY]) {
-        o->move = chess_decide(l, o, k, shared);
+        o->move = chess_decide(l, o, &CHESS_KNOBS[instance], shared) & CHESS_CORE;
         o->game = words[CHESS_GAME];
         o->ply = words[CHESS_PLY];
     }
-    ctrl[0] = (float)chess_steer(words, o->move, chess_agent(k, words));
+    ctrl[0] = (float)(words[CHESS_PROPOSAL] == o->move ? CHESS_PLAY : CHESS_NEXT);
 }
 
 static void chess_retrograde(uint8_t *wtm, uint32_t piece) {

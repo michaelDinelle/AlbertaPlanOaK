@@ -1,5 +1,5 @@
-import { constant, parameter, type EnvDescriptor } from '../../data/envs';
-import { NO_EVENTS, type EnvDecoder, type EnvFrame, type SimEvent } from '../types';
+import { constant, constantList, parameter, type EnvDescriptor } from '../../data/envs';
+import { NO_EVENTS, type EnvDecoder, type EnvFrame, type GridCell, type SimEvent } from '../types';
 
 export const GW = { CURSOR: 0, MODE: 1, PHASE: 2, TICK: 3, PENDING: 4, SEAT: 5, SWEEP: 6, GAME: 7, QUIET: 8, COUNT: 9 } as const;
 
@@ -7,7 +7,7 @@ export const PEAK = 1;
 export const CITY = 2;
 export const CAPITAL = 3;
 export const NOBODY = 8;
-export const OBSERVED = 18;
+const CODE = { FOG: 0, OBSTACLE: 1, PEAK: 2, CITY: 3, EDGE: 4, EMPTY_OWN: 5, EMPTY_FOE: 6 } as const;
 export const KEYS = 6;
 export const JUMP_KEY = 5;
 export const STEP_X = [0, 0, -1, 1] as const;
@@ -15,7 +15,7 @@ export const STEP_Y = [-1, 1, 0, 0] as const;
 
 const PACK = 32;
 const MOVE_BIT = 1 << 13;
-const FACE = 1 / 32;
+const TAIL = 10;
 
 export const GEN_CURSOR_X = 0;
 export const GEN_CURSOR_Y = 1;
@@ -27,6 +27,8 @@ export interface GeneralsShape {
   substeps: number;
   turn: number;
   round: number;
+  reach: number;
+  codes: number[];
 }
 
 export interface Order { cell: number; dir: number; split: boolean }
@@ -56,12 +58,14 @@ export function heeded(view: Uint32Array, side: number, seat: number, order: Ord
 
 export function generalsShape(env: EnvDescriptor): GeneralsShape {
   const side = parameter(env, 'side'), players = parameter(env, 'players'), cities = parameter(env, 'cities');
+  const reach = constant(env, 'GENERALS_REACH'), codes = constantList(env, 'GENERALS_CODES'), span = 2 * reach + 1;
   if (env.words !== GW.COUNT) throw new Error(`${env.envId} records ${env.words} state words where the decoder reads ${GW.COUNT}`);
   if (env.view !== side * side) throw new Error(`${env.envId} views ${env.view} cells on a ${side}-cell side`);
-  if (env.obs !== OBSERVED) throw new Error(`${env.envId} observes ${env.obs} values where the cursor window shows ${OBSERVED}`);
+  if (env.obs !== 2 * span * span + TAIL) throw new Error(`${env.envId} observes ${env.obs} values where two ${span}×${span} cursor planes show ${2 * span * span + TAIL}`);
+  if (codes.length !== CODE.EMPTY_FOE + 1) throw new Error(`${env.envId} names ${codes.length} patch codes where the decoder reads ${CODE.EMPTY_FOE + 1}`);
   if (env.actions !== KEYS) throw new Error(`${env.envId} offers ${env.actions} keys where the decoder reads ${KEYS}`);
   if (players < 2 || players > NOBODY) throw new Error(`${env.envId} seats ${players} players`);
-  return { side, players, cities, substeps: constant(env, 'GENERALS_SUBSTEPS'), turn: constant(env, 'GENERALS_TURN'), round: constant(env, 'GENERALS_ROUND') };
+  return { side, players, cities, substeps: constant(env, 'GENERALS_SUBSTEPS'), turn: constant(env, 'GENERALS_TURN'), round: constant(env, 'GENERALS_ROUND'), reach, codes };
 }
 
 export function sightOf(view: Uint32Array, side: number, seat: number, out: Uint8Array): Uint8Array {
@@ -76,14 +80,36 @@ export function sightOf(view: Uint32Array, side: number, seat: number, out: Uint
   return out;
 }
 
-export function checkWindow(frame: EnvFrame, side: number, sight: Uint8Array): void {
-  const cursor = frame.words[GW.CURSOR]!, x = cellX(cursor), y = cellY(cursor);
-  for (let i = 0; i < 5; i++) {
-    const u = i < 3 ? x : x + 2 * i - 7, v = i === 1 ? y - 1 : i === 2 ? y + 1 : y;
-    if (u < 0 || v < 0 || u >= side || v >= side) continue;
-    const code = frame.observations[2 * i]!, army = frame.observations[2 * i + 1]!, seen = sight[v * side + u] === 1;
-    const shown = armyOf(frame.view[v * side + u]!);
-    if (seen !== code >= 2 * FACE || army !== (seen ? shown : 0)) throw new Error(`Generals step ${frame.step} window cell (${u}, ${v}) reads code ${code} army ${army} though the board shows ${seen ? '' : 'un'}seen army ${shown}`);
+export function patchCell(cursor: number, reach: number, index: number, out: GridCell): GridCell {
+  const span = 2 * reach + 1;
+  out.x = cellX(cursor) + (index % span) - reach;
+  out.y = cellY(cursor) + Math.floor(index / span) - reach;
+  return out;
+}
+
+function seenAt(view: Uint32Array, shape: GeneralsShape, seat: number, sight: Uint8Array, { x, y }: GridCell): number {
+  const { side, codes } = shape;
+  if (x < 0 || y < 0 || x >= side || y >= side) return codes[CODE.EDGE]!;
+  const word = view[y * side + x]!, kind = terrainOf(word), owner = ownerOf(word);
+  if (sight[y * side + x] !== 1) return codes[kind === PEAK || kind === CITY ? CODE.OBSTACLE : CODE.FOG]!;
+  if (owner !== NOBODY) return armyOf(word) ? (owner === seat ? armyOf(word) : -armyOf(word)) : codes[owner === seat ? CODE.EMPTY_OWN : CODE.EMPTY_FOE]!;
+  return kind === PEAK ? codes[CODE.PEAK]! : kind === CITY ? codes[CODE.CITY]! : 0;
+}
+
+function builtAt(view: Uint32Array, side: number, sight: Uint8Array, { x, y }: GridCell): number {
+  if (x < 0 || y < 0 || x >= side || y >= side || sight[y * side + x] !== 1) return 0;
+  const word = view[y * side + x]!, kind = terrainOf(word);
+  if (kind === CITY && ownerOf(word) === NOBODY) return armyOf(word);
+  return kind === CITY ? 1 : kind === CAPITAL ? 2 : 0;
+}
+
+export function checkPatch(frame: EnvFrame, shape: GeneralsShape, sight: Uint8Array): void {
+  const cursor = frame.words[GW.CURSOR]!, seat = frame.words[GW.SEAT]!, span = 2 * shape.reach + 1, cell: GridCell = { x: 0, y: 0 };
+  for (let i = 0; i < span * span; i++) {
+    const shown = frame.observations[i]!, board = seenAt(frame.view, shape, seat, sight, patchCell(cursor, shape.reach, i, cell));
+    if (shown !== board) throw new Error(`Generals step ${frame.step} patch cell (${cell.x}, ${cell.y}) reads ${shown} though the board shows ${board}`);
+    const shownBuilt = frame.observations[span * span + i]!, boardBuilt = builtAt(frame.view, shape.side, sight, cell);
+    if (shownBuilt !== boardBuilt) throw new Error(`Generals step ${frame.step} structure cell (${cell.x}, ${cell.y}) reads ${shownBuilt} though the board shows ${boardBuilt}`);
   }
 }
 
@@ -100,12 +126,12 @@ export const generalsDecoder: EnvDecoder = {
     out[GEN_CURSOR_Y] = cellY(cursor);
   },
   geometry({ environment }, initial) {
-    const { side, players } = generalsShape(environment), words = initial.words, seat = words[GW.SEAT]!, cursor = words[GW.CURSOR]!;
+    const shape = generalsShape(environment), { side, players } = shape, words = initial.words, seat = words[GW.SEAT]!, cursor = words[GW.CURSOR]!;
     if (seat >= players) throw new Error(`${environment.envId} seats the agent at ${seat} of ${players}`);
     if (cellX(cursor) >= side || cellY(cursor) >= side) throw new Error(`${environment.envId} opens with its cursor off the board`);
     const home = initial.view[cellY(cursor) * side + cellX(cursor)]!;
     if (terrainOf(home) !== CAPITAL || ownerOf(home) !== seat) throw new Error(`${environment.envId} opens with its cursor away from its general`);
-    checkWindow(initial, side, sightOf(initial.view, side, seat, new Uint8Array(side * side)));
+    checkPatch(initial, shape, sightOf(initial.view, side, seat, new Uint8Array(side * side)));
     return { grid: { w: side, h: side, walls: new Uint8Array(side * side) } };
   },
   deriveEvents(_prev, next) {

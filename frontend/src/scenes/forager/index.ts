@@ -7,7 +7,7 @@ import { Stage2DScene, type Stage2D } from '@kit/stage2d';
 import { TOKENS } from '@kit/tokens';
 import type { FrameUpdate, LegendSpec, SceneContext, SceneFactory, ScenePost } from '@kit/types';
 import { countEvents } from '@sim/events';
-import { FORAGER_X, FORAGER_Y, FW, STEP_X, STEP_Y, deltaOf, foragerDecoder, foragerShape, itemAt, phaseOf, valueOf, type ForagerShape } from '@sim/envs/forager';
+import { FORAGER_X, FORAGER_Y, FW, STEP_X, STEP_Y, deltaOf, foragerDecoder, foragerShape, itemAt, kindOf, phaseOf, valueOf, type ForagerShape } from '@sim/envs/forager';
 import type { EnvFrame, GridCell } from '@sim/types';
 import { formatCount, formatSigned } from '../../format';
 import { AMBER, HALO, LANTERN, VIOLET, floorMaterial, type Floor } from './art';
@@ -201,10 +201,10 @@ class ForagerScene extends Stage2DScene {
     }
     const ax = A.words[FW.X]!, ay = A.words[FW.Y]!;
     for (let i = 0; i < span * span; i++) {
-      const value = A.observations[i]!;
-      if (value === 0) continue;
+      const kind = kindOf(shape, A.observations[i]!);
+      if (kind <= 0) continue;
       this.centre(ax + (i % span) - fov, ay + Math.floor(i / span) - fov, at);
-      diamond(`${value > 0 ? 'seen+' : 'seen-'}${i}`, at.x + 0.3, at.z - 0.3, 0.12, value > 0 ? TOKENS.celebrationGold : TOKENS.failureBlue);
+      diamond(`seen${kind}-${i}`, at.x + 0.3, at.z - 0.3, 0.12, kind === 1 ? AMBER : VIOLET);
     }
     const box = kit.curve('window', 5, TOKENS.uiCyan);
     for (const [cx, cy] of [[-1, -1], [1, -1], [1, 1], [-1, 1], [-1, -1]] as const) {

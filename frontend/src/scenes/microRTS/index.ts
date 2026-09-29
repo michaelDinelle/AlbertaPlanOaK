@@ -9,8 +9,8 @@ import { Stage2DScene, type Stage2D } from '@kit/stage2d';
 import { TOKENS } from '@kit/tokens';
 import type { FrameUpdate, LegendSpec, SceneContext, SceneFactory, ScenePost } from '@kit/types';
 import {
-  ATTACK, BARRACKS, BASE, DOCTRINE, HARVEST, HEAVY, IDLE, KILLED, LIGHT, LOST, MODE_KEY, MOVE, MRTS_CURSOR, MW, NEUTRAL, NOBODY, NONE, PRODUCE, PRODUCED, RANGED,
-  REJECTED, RESOURCE, RETURN, RETURNED, STEP_X, STEP_Y, WORKER, aimOf, etaOf, keyOf, makeOf, microShape, type MicroShape,
+  ATTACK, BARRACKS, BASE, DOCTRINE, HARVEST, HEAVY, IDLE, KILLED, LIGHT, LOST, MODE_KEY, MOVE, MRTS_CURSOR, MW, NEAREST_AT, NEUTRAL, NOBODY, NONE, OFF_MAP_GLYPH, ORE_GLYPH, PATCH_AT,
+  PRODUCE, PRODUCED, RANGED, REACH, REJECTED, RESOURCE, RETURN, RETURNED, SPAN, STEP_X, STEP_Y, SWEEP_AT, UNSEEN_GLYPH, WORKER, aimOf, etaOf, keyOf, makeOf, microShape, timeOf, type MicroShape,
 } from '@sim/envs/microrts';
 import type { EnvFrame, GridCell } from '@sim/types';
 import { formatCount, formatSigned } from '../../format';
@@ -309,7 +309,9 @@ class MicroRtsScene extends Stage2DScene {
     const turn = chronicle.at(step, fetch);
     if (!turn) return;
     const B = fetch(step + 1), u = B ? clamp01(frame.position - step) : 0;
-    const tau = turn.time + (step - turn.step + u) / turn.length;
+    const now = turn.time + (step - turn.step) / turn.length;
+    const next = B && B.words[MW.PHASE] === 0 && timeOf(B) > turn.time ? timeOf(B) : now + 1 / turn.length;
+    const tau = now + u * (next - now);
     if (frame.scrubbed || this.lastTurn < 0 || turn.step < this.lastTurn) pool.clear();
     else if (turn.step !== this.lastTurn) this.celebrate(turn, pool, time);
     if (frame.events.some((event) => event.type === 'done')) this.finish(frame, turn, fetch, pool, time);
@@ -317,7 +319,8 @@ class MicroRtsScene extends Stage2DScene {
 
     this.flashes.length = 0;
     const young = this.dawn(turn, fetch, tau);
-    this.compose(turn, tau, young);
+    const later = B && B.words[MW.PHASE] === 0 && timeOf(B) - turn.time > 1 ? chronicle.at(B.step, fetch) : null;
+    this.compose(turn, tau, young, later);
     this.echoes(turn, tau, fetch);
     this.steer(frame, fetch, A, B, u, turn, young);
     this.shade(turn, tau);
@@ -342,10 +345,10 @@ class MicroRtsScene extends Stage2DScene {
   }
 
   private farewell(last: Turn, reward: number, tau: number): void {
-    const fade = 1 - smoothstep01(tau / DUSK), timedOut = last.time + 1 >= this.shape!.maxCycles;
+    const fade = 1 - smoothstep01(tau / DUSK);
     for (const piece of last.pieces) {
       if (piece.kind === RESOURCE) continue;
-      const mine = piece.owner === last.side, fell = !timedOut && (reward > 0 ? !mine : reward < 0 ? mine : true);
+      const mine = piece.owner === last.side, fell = reward > 0 ? !mine : reward < 0 && mine;
       this.centre(piece.x, piece.y, this.at);
       if (fell && tau < DAWN) {
         this.put(this.sparks!, this.at.x, this.at.z, [IMPACT, tau / DAWN, this.teamOf(last, piece.owner), 0]);
@@ -363,11 +366,11 @@ class MicroRtsScene extends Stage2DScene {
     else this.put(this.halls!, x, z, [piece.kind, team, fade, busy], [piece.hp, type.hp, hit, -1]);
   }
 
-  private compose(turn: Turn, tau: number, young: number): void {
+  private compose(turn: Turn, tau: number, young: number, later: Turn | null): void {
     const shape = this.shape!, chronicle = this.chronicle!, prior = chronicle.cached(turn.prior);
     const since = tau - turn.time;
-    for (const piece of turn.pieces) {
-      const type = shape.types[piece.kind]!, team = this.teamOf(turn, piece.owner), p = this.progress(piece, tau);
+    for (const held of turn.pieces) {
+      const piece = later?.orders.find((order) => order.cell === held.cell) ?? held, type = shape.types[piece.kind]!, team = this.teamOf(turn, piece.owner), p = this.progress(piece, tau);
       const before = prior && piece.from >= 0 ? prior.pieces[piece.from]! : null;
       const struck = before && piece.kind !== RESOURCE && before.hp > piece.hp ? 1 - clamp01(since / 0.5) : 0;
       const mined = before && piece.kind === RESOURCE && before.carry > piece.carry ? 1 - clamp01(since / 0.4) : 0;
@@ -411,17 +414,18 @@ class MicroRtsScene extends Stage2DScene {
     const known = this.refused.get(later.step);
     if (known) return known;
     const cells = new Set<number>(), ordered = new Set<number>();
+    const single = later.time - earlier.time === 1;
     let complete = true;
-    for (let s = earlier.step + 1; s < later.step; s++) {
+    for (let s = earlier.step + 1; s <= later.step; s++) {
       const now = fetch(s), was = fetch(s - 1);
       if (!now || !was) { complete = false; continue; }
       const key = keyOf(now), picked = was.words[MW.SELECTED]!;
-      if (picked === NOBODY || key === 0 || key === MODE_KEY || now.words[MW.SELECTED] === picked) continue;
+      if (picked === NOBODY || key === 0 || key === MODE_KEY || (s < later.step && now.words[MW.SELECTED] === picked)) continue;
       ordered.add(was.words[MW.CURSOR]!);
     }
     for (const piece of later.pieces) {
       if (piece.owner !== later.side) continue;
-      if ((piece.act === NONE && piece.start === later.time - 1) || (ordered.has(piece.cell) && piece.act === IDLE)) cells.add(piece.cell);
+      if ((piece.act === NONE && piece.start === earlier.time) || (single && ordered.has(piece.cell) && piece.act === IDLE)) cells.add(piece.cell);
     }
     if (complete) {
       this.refused.set(later.step, cells);
@@ -445,8 +449,9 @@ class MicroRtsScene extends Stage2DScene {
         }
         this.put(this.decals!, this.at.x, this.at.z, [shape.types[piece.kind]!.mobile ? WRECK_UNIT : WRECK_HALL, age / WRECK, piece.cell * 1.618, this.teamOf(later, piece.owner)]);
       }
-      for (const piece of earlier.pieces) {
-        if (piece.act === IDLE || piece.act === NONE || piece.start + etaOf(piece, shape.types) !== landed) continue;
+      for (const piece of later.orders.length ? earlier.pieces.concat(later.orders) : earlier.pieces) {
+        const end = piece.start + etaOf(piece, shape.types);
+        if (piece.act === IDLE || piece.act === NONE || !(end > earlier.time && end <= landed)) continue;
         const aim = aimOf(piece), team = this.teamOf(earlier, piece.owner);
         this.centre(aim.x, aim.y, this.at);
         if (piece.act === ATTACK && age < IMPACT_LIFE) {
@@ -498,11 +503,12 @@ class MicroRtsScene extends Stage2DScene {
       const now = fetch(s), was = fetch(s - 1);
       if (!now || !was) continue;
       const key = keyOf(now), picked = was.words[MW.SELECTED]!, at = was.words[MW.CURSOR]!;
-      if (picked === NOBODY || key === MODE_KEY) continue;
-      if (now.words[MW.SELECTED] === picked) {
+      if (picked === NOBODY) continue;
+      if (key === MODE_KEY ? now.words[MW.MODE] === was.words[MW.MODE] : now.words[MW.SELECTED] === picked) {
         refused = Math.max(refused, 1 - (frame.position - s) / (PRESS_LIFE * this.controlHz));
         continue;
       }
+      if (key === MODE_KEY) continue;
       const piece = turn.pieces.find((candidate) => candidate.cell === at && candidate.owner === turn.side);
       if (!piece) continue;
       addressed.add(piece.cell);
@@ -677,7 +683,7 @@ class MicroRtsScene extends Stage2DScene {
       fog.set(this.at.x - 0.36, 0.04, this.at.z - 0.36, 0.05, 0x3a4a66);
     }
     const swept = turn.pieces[A.words[MW.SWEEP]!];
-    if (swept && A.observations[9] !== 0) {
+    if (swept && A.observations[SWEEP_AT] !== 0) {
       this.centre(swept.x, swept.y, this.at);
       sweep.set(this.at.x - 0.36, 0.06, this.at.z + 0.36, 0.07, TOKENS.uiCyan);
     }
@@ -697,18 +703,19 @@ class MicroRtsScene extends Stage2DScene {
       if (order.key === 0) orders.set(this.at.x + 0.3, 0.06, this.at.z - 0.3, 0.05, ACCENT);
       else orders.set(this.at.x + 0.55 * STEP_X[order.key - 1]!, 0.06, this.at.z + 0.55 * STEP_Y[order.key - 1]!, 0.08, ACCENT);
     }
-    const card = kit.marks('card', 4), foe = kit.curve('nearestFoe', 2, FOE), cursor = A.words[MW.CURSOR]!;
+    const card = kit.marks('card', SPAN * SPAN), foe = kit.curve('nearestFoe', 2, FOE), cursor = A.words[MW.CURSOR]!;
     if (A.words[MW.SELECTED] === NOBODY) return;
     const cx = cursor % width, cy = Math.floor(cursor / width);
-    for (let d = 0; d < 4; d++) {
-      const code = A.observations[3 + d]!;
-      if (code === -0.5) continue;
-      this.centre(cx + STEP_X[d]!, cy + STEP_Y[d]!, this.at);
-      card.set(this.at.x, 0.05, this.at.z, 0.06, code === 0.25 ? 0x3a4a66 : code === 0.5 ? MINT : code === 1 ? ACCENT : code === -1 ? FOE : 0xe6e9f0);
+    for (let i = 0; i < SPAN * SPAN; i++) {
+      const code = A.observations[PATCH_AT + i]!;
+      if (code === OFF_MAP_GLYPH) continue;
+      this.centre(cx + (i % SPAN) - REACH, cy + Math.floor(i / SPAN) - REACH, this.at);
+      card.set(this.at.x, 0.05, this.at.z, 0.06, code === UNSEEN_GLYPH ? 0x3a4a66 : code === ORE_GLYPH ? MINT : code > 0 ? ACCENT : code < 0 ? FOE : 0xe6e9f0);
     }
-    if (A.observations[7] === 0 && A.observations[8] === 0) return;
+    const dx = A.observations[NEAREST_AT]!, dy = A.observations[NEAREST_AT + 1]!;
+    if (dx === 0 && dy === 0) return;
     this.centre(cx, cy, this.at);
-    this.centre(cx + A.observations[7]! * 16, cy + A.observations[8]! * 16, this.other);
+    this.centre(cx + dx * 16, cy + dy * 16, this.other);
     foe.point(this.at.x, 0.08, this.at.z);
     foe.point(this.other.x, 0.08, this.other.z);
   }

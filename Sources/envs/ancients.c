@@ -35,6 +35,7 @@ enum {
     ANC_GAP = 256, ANC_CREEP_STEP = 64, ANC_R1 = 65536, ANC_R15 = 147456, ANC_R4 = 1048576, ANC_R5 = 1638400, ANC_R6 = 2359296,
     ANC_R7 = 3211264, ANC_R8 = 4194304, ANC_R10 = 6553600, ANC_R12 = 9437184, ANC_NEAR15 = 150544, ANC_NEAR5 = 1648656, ANC_HORIZON = 16, ANC_PERIOD = 8
 };
+enum { ANC_WORLD_DRAW, ANC_FORECAST_DRAW };
 enum { ANC_LANE, ANC_PUSH, ANC_DEFEND, ANC_FARM, ANC_FIGHT, ANC_RETREAT };
 enum { ANC_CARRY, ANC_NUKER, ANC_STUNNER, ANC_TANK, ANC_SUPPORT, ANC_BLINKER };
 enum { ANC_ANY, ANC_ONEHIT, ANC_EXACT };
@@ -147,14 +148,14 @@ typedef struct { _Alignas(16) float winRate[LEAGUE_MEMBERS]; float theta[LEAGUE_
 
 typedef struct { int32_t x, y; uint32_t chase; float ctrl[OAK_ENV_ACT_MAX]; } ancPlan;
 
-typedef struct { ancWorld world; ancPlan plan; uint32_t words[8], option, game, tick, primed, planGame, planOption; } ancOracle;
+typedef struct { ancWorld world; ancPlan plan; uint32_t words[8], option, game, tick, primed, planGame, planOption, planTick; } ancOracle;
 
 typedef struct {
     const ancientsKnobs *k;
     const uint8_t *jobs;
     ancWorld *w;
     const float *theta[2];
-    uint32_t tick, seed, game;
+    uint32_t tick, seed, game, draw;
 } ancCtx;
 
 static ancWorld *anc_world(uint32_t *extra) { return (ancWorld *)((uintptr_t)(extra + 4) & ~(uintptr_t)15u); }
@@ -169,6 +170,7 @@ static void anc_bind(ancCtx *c, const ancientsKnobs *k, uint32_t instance, ancWo
     c->tick = words[0];
     c->seed = seed;
     c->game = words[2];
+    c->draw = ANC_WORLD_DRAW;
     c->theta[0] = ANC_PRESETS[k->tier];
     c->theta[1] = k->league ? g->theta + w->member * ANC_THETA : ANC_PRESETS[k->tier];
 }
@@ -1165,23 +1167,24 @@ static void anc_march(ancFifo *F, uint32_t f, uint32_t blocked, int32_t limit) {
     anc_place(F, f, head);
 }
 
-static void anc_spawn(ancFifo *F, uint32_t f, uint32_t wave, float hp, uint32_t delay) {
-    for (uint32_t j = 0u; j < 4u && F->count < ANC_FIFO; j++) {
-        uint32_t k = F->count;
-        int32_t arc = -(int32_t)(delay * ANC_CREEP_STEP + j * ANC_GAP);
-        if (k > 0u && F->arc[k - 1u] - ANC_GAP < arc) arc = F->arc[k - 1u] - ANC_GAP;
-        F->arc[k] = arc;
-        anc_point(f, arc, &F->x[k], &F->y[k]);
-        if (arc >= 0) {
-            F->box[0] = F->x[k] < F->box[0] ? F->x[k] : F->box[0];
-            F->box[1] = F->y[k] < F->box[1] ? F->y[k] : F->box[1];
-            F->box[2] = F->x[k] > F->box[2] ? F->x[k] : F->box[2];
-            F->box[3] = F->y[k] > F->box[3] ? F->y[k] : F->box[3];
-        }
-        F->hp[k] = hp;
-        F->tag[k] = (F->nextId++ & 0xFFFFu) | wave << 16;
-        F->count = k + 1u;
+static void anc_enqueue(ancFifo *F, uint32_t f, int32_t arc, float hp, uint32_t tag) {
+    uint32_t k = F->count;
+    if (k > 0u && F->arc[k - 1u] - ANC_GAP < arc) arc = F->arc[k - 1u] - ANC_GAP;
+    F->arc[k] = arc;
+    anc_point(f, arc, &F->x[k], &F->y[k]);
+    if (arc >= 0) {
+        F->box[0] = F->x[k] < F->box[0] ? F->x[k] : F->box[0];
+        F->box[1] = F->y[k] < F->box[1] ? F->y[k] : F->box[1];
+        F->box[2] = F->x[k] > F->box[2] ? F->x[k] : F->box[2];
+        F->box[3] = F->y[k] > F->box[3] ? F->y[k] : F->box[3];
     }
+    F->hp[k] = hp;
+    F->tag[k] = tag;
+    F->count = k + 1u;
+}
+
+static void anc_spawn(ancFifo *F, uint32_t f, uint32_t wave, float hp, int32_t head) {
+    for (uint32_t j = 0u; j < 4u && F->count < ANC_FIFO; j++) anc_enqueue(F, f, head - (int32_t)(j * ANC_GAP), hp, (F->nextId++ & 0xFFFFu) | wave << 16);
 }
 
 static void anc_lane(ancCtx *c, uint32_t lane) {
@@ -1213,9 +1216,9 @@ static void anc_lane(ancCtx *c, uint32_t lane) {
     if (c->tick % k->waveTicks == 0u) {
         uint32_t wave = c->tick / k->waveTicks;
         float hp = anc_waveHp(k, wave);
-        u4 delay = philox4x32(c->seed, ENV_RNG_STREAM, c->game, wave, 1u + lane, 0u);
-        anc_spawn(A, lane, wave, hp, delay.x >> 28);
-        anc_spawn(B, ANC_LANES + lane, wave, hp, delay.y >> 28);
+        u4 delay = philox4x32(c->seed, ENV_RNG_STREAM, c->game, wave, 1u + lane, c->draw);
+        anc_spawn(A, lane, wave, hp, -(int32_t)((delay.x >> 28) * ANC_CREEP_STEP));
+        anc_spawn(B, ANC_LANES + lane, wave, hp, -(int32_t)((delay.y >> 28) * ANC_CREEP_STEP));
         if (lane == 0u) anc_event(w, EV_WAVE);
     }
 }
@@ -1330,31 +1333,35 @@ static uint32_t anc_seen(const ancEyes *v, int32_t x, int32_t y) {
     return (uint32_t)(hit.x | hit.y | hit.z | hit.w) & 1u;
 }
 
+static inline __attribute__((always_inline)) void anc_eyes(const ancientsKnobs *k, const ancWorld *w, uint32_t team, ancEyes *v) {
+    for (uint32_t i = 0u; i < ANC_SIDE; i++) {
+        const ancHero *e = &w->hero[team * ANC_SIDE + i];
+        v->x[i] = e->x;
+        v->y[i] = e->y;
+        v->r[i] = i < k->heroes && !e->dead ? ANC_R12 : -1;
+    }
+    for (uint32_t i = 0u; i < ANC_OWN; i++) {
+        uint32_t s = team * ANC_OWN + i;
+        v->x[ANC_SIDE + i] = ANCIENTS_STRUCTURE_X[s];
+        v->y[ANC_SIDE + i] = ANCIENTS_STRUCTURE_Y[s];
+        v->r[ANC_SIDE + i] = w->tower[s].hp > 0.0f ? ANC_R10 : -1;
+    }
+    for (uint32_t l = 0u; l < ANC_LANES; l++) {
+        const ancFifo *F = &w->fifo[team * ANC_LANES + l];
+        v->x[ANC_SIDE + ANC_OWN + l] = F->x[0];
+        v->y[ANC_SIDE + ANC_OWN + l] = F->y[0];
+        v->r[ANC_SIDE + ANC_OWN + l] = l < k->lanes && anc_onMap(F) ? ANC_R8 : -1;
+    }
+    v->x[15] = v->y[15] = 0;
+    v->r[15] = -1;
+}
+
 static void anc_vision(ancCtx *c) {
     ancWorld *w = c->w;
     const ancientsKnobs *k = c->k;
     uint32_t team = c->tick & 1u, foe = 1u - team;
     ancEyes v;
-    for (uint32_t i = 0u; i < ANC_SIDE; i++) {
-        const ancHero *e = &w->hero[team * ANC_SIDE + i];
-        v.x[i] = e->x;
-        v.y[i] = e->y;
-        v.r[i] = i < k->heroes && !e->dead ? ANC_R12 : -1;
-    }
-    for (uint32_t i = 0u; i < ANC_OWN; i++) {
-        uint32_t s = team * ANC_OWN + i;
-        v.x[ANC_SIDE + i] = ANCIENTS_STRUCTURE_X[s];
-        v.y[ANC_SIDE + i] = ANCIENTS_STRUCTURE_Y[s];
-        v.r[ANC_SIDE + i] = w->tower[s].hp > 0.0f ? ANC_R10 : -1;
-    }
-    for (uint32_t l = 0u; l < ANC_LANES; l++) {
-        const ancFifo *F = &w->fifo[team * ANC_LANES + l];
-        v.x[ANC_SIDE + ANC_OWN + l] = F->x[0];
-        v.y[ANC_SIDE + ANC_OWN + l] = F->y[0];
-        v.r[ANC_SIDE + ANC_OWN + l] = l < k->lanes && anc_onMap(F) ? ANC_R8 : -1;
-    }
-    v.x[15] = v.y[15] = 0;
-    v.r[15] = -1;
+    anc_eyes(k, w, team, &v);
     ancMemory *m = &w->memory[team];
     for (uint32_t i = 0u; i < k->heroes; i++) {
         const ancHero *e = &w->hero[foe * ANC_SIDE + i];
@@ -1683,6 +1690,14 @@ static inline __attribute__((always_inline)) void anc_observe(const ancientsKnob
     anc_sweep(k, w, tick, a, obs + 12);
     obs[16] = 0.1f * (float)w->eventShown;
     obs[17] = (float)(tick % k->waveTicks) / (float)k->waveTicks;
+    for (uint32_t i = 0u; i < k->heroes; i++) {
+        obs[18u + i] = (float)w->hero[i].arch / (float)ANC_BLINKER;
+        obs[18u + k->heroes + i] = (float)w->hero[ANC_SIDE + i].arch / (float)ANC_BLINKER;
+        obs[18u + 2u * k->heroes + i] = (float)w->hero[i].level * (1.0f / 16.0f);
+        obs[18u + 3u * k->heroes + i] = (float)w->hero[ANC_SIDE + i].level * (1.0f / 16.0f);
+    }
+    obs[18u + 4u * k->heroes] = (float)(a->gold - 450u * a->items) * (1.0f / 450.0f);
+    obs[19u + 4u * k->heroes] = (float)a->items;
 }
 
 static inline __attribute__((always_inline)) void anc_emit(const ancientsKnobs *k, ancWorld *w, const uint32_t *words, float *obs) {
@@ -1717,8 +1732,13 @@ static inline __attribute__((always_inline)) float anc_play(const ancientsKnobs 
     ancWorld *w = anc_world(extra);
     ancCtx c;
     float reward = 0.0f;
+    const float idle[OAK_ENV_ACT_MAX] = { 0.0f };
+    const float *input = ctrl;
     anc_bind(&c, k, instance, w, anc_league(extra), seed, words);
-    anc_advance(&c, words, ctrl);
+    do {
+        anc_advance(&c, words, input);
+        input = idle;
+    } while (!w->result && words[0] < k->tickCap && (w->hero[0].dead || words[0] < w->hero[0].stunUntil));
     *done = 0u;
     if (w->result || words[0] >= k->tickCap) {
         reward = anc_finish(&c, seed, words, extra);
@@ -1923,12 +1943,128 @@ static float anc_value(const ancCtx *c) {
     return value;
 }
 
+static uint32_t anc_slot(const ancCtx *c, uint32_t job) {
+    for (uint32_t s = 0u; s < c->k->substeps; s++)
+        if (c->jobs[s] == job) return s;
+    return c->k->substeps;
+}
+
+static void anc_forecast(const ancCtx *c, uint32_t f, uint32_t slice) {
+    ancFifo *F = &c->w->fifo[f];
+    uint32_t count = F->count, start = 0u, lane = f % ANC_LANES, pending = slice <= anc_slot(c, lane < 2u ? JOB_LANES : JOB_LANE);
+    for (uint32_t k = 0u; k < count; k++) {
+        uint32_t wave = F->tag[k] >> 16;
+        start = k && F->tag[k - 1u] >> 16 == wave ? start : k;
+        if (F->arc[k] >= 0) continue;
+        int32_t arc;
+        if (k == start) {
+            u4 draw = philox4x32(c->seed, ENV_RNG_STREAM, c->game, wave, 1u + lane, c->draw);
+            int32_t delay = (int32_t)((f < ANC_LANES ? draw.x : draw.y) >> 28), marched = (int32_t)(c->tick - wave * c->k->waveTicks) - (int32_t)pending;
+            arc = ANC_CREEP_STEP * (marched - delay);
+        } else arc = F->arc[k - 1u] - ANC_GAP;
+        F->count = k;
+        anc_enqueue(F, f, arc < 0 ? arc : -1, F->hp[k], F->tag[k]);
+    }
+}
+
+static void anc_recede(const ancEyes *v, int32_t *x, int32_t *y) {
+    int32_t x0 = *x, y0 = *y;
+    float dx = (float)(ANCIENTS_FOUNTAIN_X[1] - x0), dy = (float)(ANCIENTS_FOUNTAIN_Y[1] - y0), d = sqrtf(dx * dx + dy * dy);
+    uint32_t steps = (uint32_t)(d * (1.0f / 512.0f));
+    for (uint32_t s = 1u; s <= steps && anc_seen(v, *x, *y); s++) {
+        float t = 512.0f * (float)s / d;
+        *x = x0 + (int32_t)(dx * t);
+        *y = y0 + (int32_t)(dy * t);
+    }
+    if (anc_seen(v, *x, *y)) {
+        *x = ANCIENTS_FOUNTAIN_X[1];
+        *y = ANCIENTS_FOUNTAIN_Y[1];
+    }
+}
+
+static void anc_fog(ancCtx *c) {
+    ancWorld *w = c->w;
+    const ancientsKnobs *k = c->k;
+    const ancMemory *m = &w->memory[0];
+    ancMemory *them = &w->memory[1];
+    ancEyes v;
+    anc_eyes(k, w, 0u, &v);
+    for (uint32_t l = 0u; l < k->lanes; l++) {
+        uint32_t f = ANC_LANES + l, seen = 0u;
+        ancFifo *F = &w->fifo[f], was = *F;
+        them->farc[l] = anc_onMap(&w->fifo[l]) ? w->fifo[l].arc[0] : -1;
+        while (seen < was.count && was.arc[seen] >= 0 && anc_seen(&v, was.x[seen], was.y[seen])) seen++;
+        F->count = 0u;
+        F->box[0] = F->box[1] = 1 << 20;
+        F->box[2] = F->box[3] = -(1 << 20);
+        if (!seen) {
+            F->volleyAt = 0u;
+            if (m->farc[l] >= 0) anc_spawn(F, f, c->tick / k->waveTicks, 0.25f * m->fhp[l], m->farc[l]);
+        }
+        for (uint32_t i = 0u; i < was.count && F->count < ANC_FIFO; i++)
+            if (i < seen || was.arc[i] < 0) anc_enqueue(F, f, was.arc[i], was.hp[i], was.tag[i]);
+    }
+    for (uint32_t i = 0u; i < ANC_OWN; i++) {
+        uint32_t s = ANC_OWN + i;
+        if (!anc_seen(&v, ANCIENTS_STRUCTURE_X[s], ANCIENTS_STRUCTURE_Y[s])) w->tower[s].hp = m->shp[i];
+        them->shp[i] = w->tower[i].hp;
+        w->tower[i].idleUntil = 0u;
+    }
+    if (k->jungle)
+        for (uint32_t i = 0u; i < ANC_CAMPS; i++) {
+            ancCamp *q = &w->camp[i];
+            if (!anc_seen(&v, ANCIENTS_CAMP_X[i], ANCIENTS_CAMP_Y[i])) {
+                for (uint32_t j = 0u; j < 3u; j++) q->hp[j] = j < m->camp[i] ? 400.0f : 0.0f;
+                q->x = ANCIENTS_CAMP_X[i];
+                q->y = ANCIENTS_CAMP_Y[i];
+                q->aggro = ANC_NONE;
+                q->respawnAt = UINT32_MAX;
+            }
+            them->camp[i] = anc_alive(q);
+        }
+    for (uint32_t i = 0u; i < k->heroes; i++) {
+        ancHero *e = &w->hero[ANC_SIDE + i];
+        them->hx[i] = w->hero[i].x;
+        them->hy[i] = w->hero[i].y;
+        if (e->dead || anc_seen(&v, e->x, e->y)) continue;
+        int32_t x = m->hx[i], y = m->hy[i];
+        anc_recede(&v, &x, &y);
+        e->x = e->goalX = x;
+        e->y = e->goalY = y;
+        e->rx = e->ry = 0.0f;
+        e->hp = m->hhp[i] * e->maxHp;
+        e->mana = e->maxMana;
+        e->ready[0] = e->ready[1] = e->landAt = e->frenzyUntil = e->fortifyUntil = e->wardUntil = 0u;
+        e->strike = 0.0f;
+    }
+}
+
+static void anc_imagine(ancCtx *c, const ancientsKnobs *k, uint32_t instance, uint32_t seed, uint32_t *extra, const uint32_t *words) {
+    ancOracle *o = anc_oracleOf(extra);
+    memcpy(&o->world, anc_world(extra), sizeof o->world);
+    memcpy(o->words, words, 6u * sizeof(uint32_t));
+    anc_bind(c, k, instance, &o->world, anc_league(extra), seed, o->words);
+    c->draw = ANC_FORECAST_DRAW;
+    c->theta[1] = ANC_PRESETS[k->tier];
+    for (uint32_t l = 0u; l < k->lanes; l++) {
+        anc_forecast(c, l, words[1]);
+        anc_forecast(c, ANC_LANES + l, words[1]);
+    }
+    if (k->fog) anc_fog(c);
+    for (uint32_t h = ANC_SIDE; h < ANC_SIDE + k->heroes; h++) {
+        ancHero *e = &o->world.hero[h];
+        e->gold = 450u * e->items;
+        e->xp = 0.0f;
+        e->target = ANC_NONE;
+        e->retarget = 1u;
+        e->mode = anc_desire(c, h, c->theta[1]);
+    }
+}
+
 static float anc_rollout(const ancientsKnobs *k, uint32_t instance, uint32_t seed, uint32_t *extra, const uint32_t *words, uint32_t option) {
     ancOracle *o = anc_oracleOf(extra);
     ancCtx c;
-    memcpy(&o->world, anc_world(extra), sizeof o->world);
-    memcpy(o->words, words, 6u * sizeof(uint32_t));
-    anc_bind(&c, k, instance, &o->world, anc_league(extra), seed, o->words);
+    anc_imagine(&c, k, instance, seed, extra, words);
     ancPlan plan;
     for (uint32_t n = 0u; n < ANC_HORIZON * k->substeps; n++) {
         float ctrl[OAK_ENV_ACT_MAX];
@@ -1946,7 +2082,7 @@ void ancients_oracle(uint32_t instance, uint32_t seed, uint32_t step, const uint
     const ancientsKnobs *k = &ANCIENTS_KNOBS[instance];
     ancOracle *o = anc_oracleOf(extra);
     ancCtx c;
-    if (words[1] == 0u && words[0] % ANC_PERIOD == 0u && !(o->primed && o->game == words[2] && o->tick == words[0])) {
+    if (!(o->primed && o->game == words[2] && words[0] - o->tick < ANC_PERIOD)) {
         float best = -INFINITY;
         uint32_t choice = ANC_HOLD;
         for (uint32_t option = 0u; option < ANC_OPTIONS; option++) {
@@ -1958,12 +2094,15 @@ void ancients_oracle(uint32_t instance, uint32_t seed, uint32_t step, const uint
         o->tick = words[0];
         o->option = choice;
     }
-    anc_bind(&c, k, instance, anc_world(extra), anc_league(extra), seed, words);
-    if (o->planGame != words[2] || o->planOption != o->option || words[1] + 1u == k->substeps) {
+    uint32_t serve = words[0] + (words[1] + 1u == k->substeps);
+    if (o->planGame != words[2] || o->planOption != o->option || o->planTick != serve) {
         o->planGame = words[2];
         o->planOption = o->option;
+        o->planTick = serve;
+        anc_imagine(&c, k, instance, seed, extra, words);
         anc_plan(&c, o->option, &o->plan);
     }
+    anc_bind(&c, k, instance, anc_world(extra), anc_league(extra), seed, words);
     anc_follow(&c, &o->plan, ctrl);
 }
 

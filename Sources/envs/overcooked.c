@@ -40,7 +40,7 @@ enum { OVERCOOKED_CELLS = 80, OVERCOOKED_FULL = 3, OVERCOOKED_UNREACHABLE = 255 
 
 typedef struct {
     uint8_t tile[OVERCOOKED_CELLS], goal[OVERCOOKED_CELLS], route[OVERCOOKED_GOALS][OVERCOOKED_CELLS];
-    uint32_t pots;
+    uint32_t pots, counters;
 } overcookedMap;
 
 enum { OVERCOOKED_MAP_WORDS = (sizeof(overcookedMap) + sizeof(float) - 1u) / sizeof(float) };
@@ -78,6 +78,7 @@ static void overcooked_build(const overcookedKnobs *k, overcookedMap *m) {
             m->goal[x | y << 4] = (uint8_t)overcooked_goalOf(code, index);
         }
     m->pots = pots;
+    m->counters = counters;
     for (uint32_t g = 0u; g < OVERCOOKED_GOALS; g++) {
         uint8_t nearest[256], field[256];
         for (uint32_t i = 0u; i < 256u; i++) nearest[i] = OVERCOOKED_UNREACHABLE;
@@ -223,6 +224,9 @@ static inline __attribute__((always_inline)) void overcooked_obs(const overcooke
         obs[13 + 2 * p] = pot > OVERCOOKED_FULL ? (float)(pot - OVERCOOKED_FULL) * (1.0f / (float)k->cookTime) : 0.0f;
     }
     obs[16] = (float)(words[OVERCOOKED_CLOCK] & 0xFFFFu) * (1.0f / (float)k->horizon);
+    obs[17] = (float)(words[OVERCOOKED_PARTNER] >> 12 & 3u) * (1.0f / (float)k->commisPatience);
+    obs[18] = (float)(words[OVERCOOKED_CLOCK] >> 16);
+    for (uint32_t i = 0u; i < m->counters; i++) obs[19 + i] = overcooked_third(words[OVERCOOKED_COUNTERS + (i >> 4)] >> (i & 15u) * 2u & 3u);
 }
 
 static inline __attribute__((always_inline)) uint32_t overcooked_action(const float *ctrl) {
@@ -392,12 +396,17 @@ static uint32_t overcooked_steer(const overcookedKnobs *k, const overcookedMap *
     return OVERCOOKED_STAY;
 }
 
+static uint32_t overcooked_foresee(const overcookedKnobs *k, const overcookedMap *m, uint32_t other, uint32_t pots) {
+    if ((other >> 12 & 3u) >= k->commisPatience) return OVERCOOKED_STAY;
+    return overcooked_toward(m, other, overcooked_aim(k, m, other, pots));
+}
+
 void overcooked_oracle(uint32_t instance, uint32_t seed, uint32_t step, const uint32_t *words, uint32_t *extra, const float *obs, float *ctrl, const float *shared) {
-    (void)step; (void)extra; (void)obs;
+    (void)seed; (void)step; (void)extra; (void)obs;
     const overcookedKnobs *k = &OVERCOOKED_KNOBS[instance];
     const overcookedMap *m = overcooked_map(instance, shared);
-    uint32_t chance = 0u, self = words[OVERCOOKED_AGENT], other = words[OVERCOOKED_PARTNER], pots = words[OVERCOOKED_POTS];
-    uint32_t cell = self & 255u, partnerCell = other & 255u, partnerAct = overcooked_commis(k, m, seed, words, &chance), partnerNext = overcooked_next(m, other, partnerAct);
+    uint32_t self = words[OVERCOOKED_AGENT], other = words[OVERCOOKED_PARTNER], pots = words[OVERCOOKED_POTS];
+    uint32_t cell = self & 255u, partnerCell = other & 255u, partnerAct = overcooked_foresee(k, m, other, pots), partnerNext = overcooked_next(m, other, partnerAct);
     uint32_t soon = other;
     if (partnerAct == OVERCOOKED_INTERACT && (other >> 10 & 3u) == OVERCOOKED_EMPTY && m->goal[overcooked_ahead(partnerCell, other >> 8 & 3u)] == OVERCOOKED_TO_ONIONS) soon |= OVERCOOKED_ONION << 10;
     uint32_t goal = overcooked_plan(k, m, words, soon), held = self >> 10 & 3u;

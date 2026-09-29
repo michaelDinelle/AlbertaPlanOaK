@@ -25,7 +25,7 @@ typedef struct {
     _Atomic uint32_t next;
 } Run;
 
-static const char *POLICY_NAMES[POLICY_COUNT] = { "oak", "ppo", "random", "oracle" };
+static const char *POLICY_NAMES[POLICY_COUNT] = { "oak", "ppo", "random", "oracle", "constant", "stream", "oak-permuted", "oak-rescaled" };
 
 static volatile sig_atomic_t pausing;
 static struct timespec pausedAt;
@@ -143,6 +143,21 @@ static void reportLanes(const Run *run, long cores) {
         if (run->laneSeconds[i] > balanced) printf("  longer than balanced: %s seed %u, %.1f s\n", run->specs[i]->name, run->lanes[i].seed, run->laneSeconds[i]);
 }
 
+static double runWorkers(Run *run, long *cores) {
+    *cores = sysconf(_SC_NPROCESSORS_ONLN);
+    if (*cores < 1) *cores = 1;
+    pthread_t *threads = calloc((size_t)*cores, sizeof(pthread_t));
+    signal(SIGTSTP, onPause);
+    signal(SIGCONT, onResume);
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    for (long i = 0; i < *cores; i++) pthread_create(&threads[i], 0, worker, run);
+    for (long i = 0; i < *cores; i++) pthread_join(threads[i], 0);
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    free(threads);
+    return secondsBetween(&t0, &t1) - pausedSeconds;
+}
+
 static void timestamp(char *out, size_t size) {
     time_t now = time(0);
     struct tm utc;
@@ -194,7 +209,7 @@ static void scheduleLanes(Run *run, const EnvSpec *const *envs, uint32_t envCoun
 }
 
 static int record(int argc, char **argv, uint32_t firstSeed, uint32_t seeds, int rootArg) {
-    if (argc <= rootArg) die("usage: oak record oak|ppo|random|oracle <steps> <root> [env...] | oak try oak|ppo|random|oracle <steps> <first seed> <seeds> <root>");
+    if (argc <= rootArg) die("usage: oak record <policy> <steps> <root> [env...] | oak try <policy> <steps> <first seed> <seeds> <root>");
     Run run;
     memset(&run, 0, sizeof run);
     run.firstSeed = firstSeed;
@@ -227,26 +242,27 @@ static int record(int argc, char **argv, uint32_t firstSeed, uint32_t seeds, int
     snprintf(series, sizeof series, "%s/series", root);
     if (mkdir(root, 0755) != 0 || mkdir(series, 0755) != 0) die("cannot create recording directory");
     writeMeta(root, &run, started, 0, 0.0);
-    long cores = sysconf(_SC_NPROCESSORS_ONLN);
-    if (cores < 1) cores = 1;
-    pthread_t *threads = calloc((size_t)cores, sizeof(pthread_t));
-    signal(SIGTSTP, onPause);
-    signal(SIGCONT, onResume);
-    struct timespec t0, t1;
-    clock_gettime(CLOCK_MONOTONIC, &t0);
-    for (long i = 0; i < cores; i++) pthread_create(&threads[i], 0, worker, &run);
-    for (long i = 0; i < cores; i++) pthread_join(threads[i], 0);
-    clock_gettime(CLOCK_MONOTONIC, &t1);
-    double seconds = secondsBetween(&t0, &t1) - pausedSeconds;
+    long cores = 1;
+    double seconds = runWorkers(&run, &cores);
     uint32_t *ends = calloc(run.windows, sizeof(uint32_t));
     uint64_t *hash = calloc(run.laneCount, sizeof(uint64_t));
     uint32_t *health = calloc(run.laneCount, sizeof(uint32_t));
+    uint32_t *instruments = calloc((size_t)run.laneCount * 4u, sizeof(uint32_t));
     for (uint32_t w = 0u; w < run.windows; w++) ends[w] = (w + 1u) * OAK_WINDOW < run.steps ? (w + 1u) * OAK_WINDOW : run.steps;
-    for (uint32_t i = 0u; i < run.laneCount; i++) { hash[i] = run.lanes[i].tally.hash; health[i] = run.lanes[i].tally.health; }
+    for (uint32_t i = 0u; i < run.laneCount; i++) {
+        const LaneTally *t = &run.lanes[i].tally;
+        hash[i] = t->hash;
+        health[i] = t->health;
+        instruments[4u * i] = t->episodes;
+        instruments[4u * i + 1u] = t->positive;
+        instruments[4u * i + 2u] = t->negative;
+        instruments[4u * i + 3u] = t->firstPositive;
+    }
     writeFile(root, "ends.u32", ends, run.windows * sizeof(uint32_t));
     writeFile(root, "series/rewardSum.f32", run.rewardSum, (size_t)run.windows * run.laneCount * sizeof(float));
     writeFile(root, "hash.u64", hash, run.laneCount * sizeof(uint64_t));
     writeFile(root, "health.u32", health, run.laneCount * sizeof(uint32_t));
+    writeFile(root, "instruments.u32", instruments, (size_t)run.laneCount * 4u * sizeof(uint32_t));
     timestamp(finished, sizeof finished);
     double stepsPerSecond = (double)run.steps * (double)run.laneCount / seconds;
     writeMeta(root, &run, started, finished, stepsPerSecond);
@@ -378,10 +394,107 @@ static int replay(int argc, char **argv) {
     return lane.tally.hash == recorded ? 0 : 2;
 }
 
+static void checkRun(Run *run, uint32_t policy, uint32_t steps, const EnvSpec *const *envs, uint32_t envCount) {
+    memset(run, 0, sizeof *run);
+    run->policy = policy;
+    run->steps = steps;
+    run->seeds = 1u;
+    scheduleLanes(run, envs, envCount);
+    allocateRun(run);
+    long cores = 1;
+    runWorkers(run, &cores);
+}
+
+static int envcheck(int argc, char **argv) {
+    long steps = argc > 2 ? atol(argv[2]) : 200000L;
+    if (steps <= 0 || steps > 0xffffffffL) die("steps out of range");
+    env_checkTable();
+    const EnvSpec *envs[OAK_ENV_TABLE_MAX];
+    for (uint32_t i = 0u; i < OAK_ENV_TABLE_COUNT; i++) envs[i] = env_at(i);
+    static const uint32_t CHECKED[4] = { POLICY_RANDOM, POLICY_CONSTANT, POLICY_ORACLE, POLICY_ORACLE };
+    Run runs[4];
+    for (uint32_t p = 0u; p < 4u; p++) checkRun(&runs[p], CHECKED[p], (uint32_t)steps, envs, OAK_ENV_TABLE_COUNT);
+    for (uint32_t i = 0u; i < OAK_ENV_TABLE_COUNT; i++) {
+        printf("{\"env\":\"%s\",\"steps\":%ld", envs[i]->name, steps);
+        for (uint32_t p = 0u; p < 3u; p++) {
+            const LaneTally *t = &runs[p].lanes[i].tally;
+            printf(",\"%s\":{\"reward\":%.9g,\"episodes\":%u,\"positive\":%u,\"negative\":%u,\"firstPositive\":%u,\"healthy\":%u}", POLICY_NAMES[CHECKED[p]],
+                   (double)t->sum / (double)steps, t->episodes, t->positive, t->negative, t->firstPositive, t->health == OAK_HEALTH_ALIVE);
+        }
+        printf(",\"deterministic\":%u}\n", runs[2].lanes[i].tally.hash == runs[3].lanes[i].tally.hash);
+    }
+    return 0;
+}
+
+#define FUZZ_STEPS 4096u
+#define FUZZ_SCENARIOS 7u
+static const char *FUZZ_NAMES[FUZZ_SCENARIOS] = { "normal", "nonfinite", "huge", "denormal", "offset", "constant", "reward-huge" };
+
+static float fuzzValue(uint32_t scenario, uint32_t step, uint32_t index) {
+    u4 r = philox4x32(9173u, 0x2F22u, step, index, scenario, 0u);
+    float normal = normalFrom(r.x, r.y);
+    uint32_t pick = r.z % 40u;
+    switch (scenario) {
+        case 1u: return pick == 0u ? NAN : pick == 1u ? INFINITY : pick == 2u ? -INFINITY : normal;
+        case 2u: return normal * 1e20f;
+        case 3u: return wordFloat((r.x & 0x807FFFFFu) | 1u);
+        case 4u: return 1e6f + normal;
+        case 5u: return (index & 1u) ? 3.0f : -7.0f;
+        default: return normal;
+    }
+}
+
+static float fuzzReward(uint32_t scenario, uint32_t step) {
+    u4 r = philox4x32(9173u, 0x2F23u, step, scenario, 0u, 0u);
+    float normal = normalFrom(r.x, r.y);
+    if (scenario == 1u) return r.z % 64u == 0u ? NAN : normal;
+    if (scenario == 6u) return normal * 1e30f;
+    return normal;
+}
+
+static int fuzz(void) {
+    env_checkTable();
+    flushToZero();
+    uint32_t *state;
+    if (posix_memalign((void **)&state, 128u, (size_t)oak_stateWords() * sizeof(uint32_t)) != 0) die("out of memory");
+    uint32_t seen[OAK_ENV_TABLE_MAX][3], kinds = 0u;
+    for (uint32_t e = 0u; e < OAK_ENV_TABLE_COUNT; e++) {
+        const EnvSpec *env = env_at(e);
+        uint32_t known = 0u;
+        for (uint32_t k = 0u; k < kinds; k++) known |= seen[k][0] == env->obs && seen[k][1] == env->actions && seen[k][2] == env->box;
+        if (known) continue;
+        seen[kinds][0] = env->obs;
+        seen[kinds][1] = env->actions;
+        seen[kinds][2] = env->box;
+        kinds++;
+        for (uint32_t scenario = 0u; scenario < FUZZ_SCENARIOS; scenario++) {
+            _Alignas(16) float obs[OAK_ENV_OBS_MAX] = { 0.0f };
+            oak_init(state, 0u, env->id, 7919u, obs);
+            uint32_t invalid = 0u;
+            for (uint32_t step = 0u; step < FUZZ_STEPS; step++) {
+                for (uint32_t o = 0u; o < env->obs; o++) obs[o] = fuzzValue(scenario, step, o);
+                float ctrl[OAK_ENV_ACT_MAX] = { 0.0f };
+                oak_act(state, 0u, env->id, 7919u, step, obs, step ? fuzzReward(scenario, step) : 0.0f, 0u, ctrl);
+                if (env->box) {
+                    for (uint32_t d = 0u; d < env->actions; d++) invalid += !(fabsf(ctrl[d]) <= 1.0f);
+                } else {
+                    invalid += !(ctrl[0] >= 0.0f && ctrl[0] < (float)env->actions && ctrl[0] == floorf(ctrl[0]));
+                }
+            }
+            printf("{\"env\":\"%s\",\"obs\":%u,\"actions\":%u,\"box\":%u,\"scenario\":\"%s\",\"nonfinite\":%u,\"invalidControls\":%u}\n", env->name, env->obs,
+                   env->actions, env->box, FUZZ_NAMES[scenario], oak_nonfinite(state), invalid);
+        }
+    }
+    free(state);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     if (argc >= 2 && strcmp(argv[1], "record") == 0) return record(argc, argv, 0u, OAK_ENV_SEEDS, 4);
     if (argc == 7 && strcmp(argv[1], "try") == 0) return record(argc, argv, (uint32_t)atol(argv[4]), (uint32_t)atol(argv[5]), 6);
     if (argc >= 2 && strcmp(argv[1], "replay") == 0) return replay(argc, argv);
+    if (argc >= 2 && argc <= 3 && strcmp(argv[1], "envcheck") == 0) return envcheck(argc, argv);
+    if (argc == 2 && strcmp(argv[1], "fuzz") == 0) return fuzz();
     if (argc == 2 && strcmp(argv[1], "envs") == 0) {
         env_checkTable();
         fputc('[', stdout);
@@ -392,6 +505,6 @@ int main(int argc, char **argv) {
         puts("]");
         return 0;
     }
-    die("usage: oak record oak|ppo|random|oracle <steps> <root> [env...] | oak try oak|ppo|random|oracle <steps> <first seed> <seeds> <root> | oak replay <recording> <lane> | oak envs");
+    die("usage: oak record <policy> <steps> <root> [env...] | oak try <policy> <steps> <first seed> <seeds> <root> | oak replay <recording> <lane> | oak envs | oak envcheck [steps] | oak fuzz");
     return 1;
 }

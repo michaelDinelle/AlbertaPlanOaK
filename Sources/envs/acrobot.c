@@ -16,7 +16,7 @@ static const acrobotKnobs ACROBOT_KNOBS[3] = {
 
 typedef struct { float sinTheta2, cosTheta2, weight1, gravity2; } acrobotTerms;
 
-enum { ACROBOT_SLIP_TAG = sizeof(acrobotTerms) / sizeof(uint32_t), ACROBOT_SLIPS, ACROBOT_EXTRA = ACROBOT_SLIPS + ENV_BATCH };
+enum { ACROBOT_SLIP_TAG = sizeof(acrobotTerms) / sizeof(uint32_t), ACROBOT_SLIPS, ACROBOT_SEEN = ACROBOT_SLIPS + ENV_BATCH, ACROBOT_EXTRA = ACROBOT_SEEN + 2 };
 
 static inline float acrobot_finite(float x) { __builtin_assume(__builtin_isfinite(x)); return x; }
 
@@ -52,7 +52,7 @@ static inline __attribute__((always_inline)) void acrobot_dynamics(float omega1,
     float inertia1 = 3.5f + t.cosTheta2;
     float inertia2 = fmaf(0.5f, t.cosTheta2, 1.25f);
     float gravity1 = -0.5f * omega2 * omega2 * t.sinTheta2 - omega2 * omega1 * t.sinTheta2 + t.weight1 + t.gravity2;
-    float alpha2 = (tau + inertia2 / inertia1 * gravity1 - 0.5f * omega1 * omega1 * t.sinTheta2 - t.gravity2) / (inertia2 - inertia2 * inertia2 / inertia1);
+    float alpha2 = (tau + inertia2 / inertia1 * gravity1 - 0.5f * omega1 * omega1 * t.sinTheta2 - t.gravity2) / (1.25f - inertia2 * inertia2 / inertia1);
     float alpha1 = (inertia2 * alpha2 + gravity1) / -inertia1;
     derivative[0] = omega1; derivative[1] = omega2; derivative[2] = alpha1; derivative[3] = alpha2;
 }
@@ -83,6 +83,7 @@ void acrobot_reset(uint32_t instance, uint32_t seed, uint32_t *words, uint32_t *
     (void)instance; (void)seed; (void)steps;
     acrobot_remember(extra, acrobot_terms(wordFloat(words[0]), wordFloat(words[1])));
     batchReset(&extra[ACROBOT_SLIP_TAG]);
+    extra[ACROBOT_SEEN] = words[0]; extra[ACROBOT_SEEN + 1] = words[1];
 }
 
 float acrobot_step(uint32_t instance, uint32_t seed, uint32_t step, const float *ctrl, uint32_t *words, uint32_t *extra, float *obs, uint32_t *doneOut, const float *shared) {
@@ -139,11 +140,31 @@ static float acrobot_energy(float theta1, float theta2, float omega1, float omeg
     return kinetic - 14.7f * oak_cos(acrobot_finite(theta1)) - 4.9f * oak_cos(theta12);
 }
 
+static float acrobot_angle(float sine, float cosine) {
+    float ay = fabsf(sine), ax = fabsf(cosine);
+    float r = fminf(ax, ay) / fmaxf(ax, ay), r2 = r * r;
+    float a = r * (0.99997726f + r2 * (-0.33262347f + r2 * (0.19354346f + r2 * (-0.11643287f + r2 * (0.05265332f + r2 * -0.01172120f)))));
+    a = ay > ax ? OAK_PI / 2.0f - a : a;
+    a = cosine < 0.0f ? OAK_PI - a : a;
+    return sine < 0.0f ? -a : a;
+}
+
+static float acrobot_recalled(uint32_t *seen, float angle) {
+    float swept = acrobot_wrap(angle - wordFloat(*seen));
+    *seen = floatWord(angle);
+    return swept / ACROBOT_DT;
+}
+
 void acrobot_oracle(uint32_t instance, uint32_t seed, uint32_t step, const uint32_t *words, uint32_t *extra, const float *obs, float *ctrl, const float *shared) {
     (void)shared;
-    (void)instance;
-    (void)seed; (void)step; (void)extra; (void)obs;
-    float theta1 = wordFloat(words[0]), theta2 = wordFloat(words[1]), omega1 = wordFloat(words[2]), omega2 = wordFloat(words[3]);
+    (void)seed; (void)step;
+    float theta1, theta2, omega1, omega2;
+    if (ACROBOT_KNOBS[instance].positionOnly) {
+        theta1 = acrobot_angle(obs[1], obs[0]); theta2 = acrobot_angle(obs[3], obs[2]);
+        omega1 = acrobot_recalled(&extra[ACROBOT_SEEN], theta1); omega2 = acrobot_recalled(&extra[ACROBOT_SEEN + 1], theta2);
+    } else {
+        theta1 = wordFloat(words[0]); theta2 = wordFloat(words[1]); omega1 = wordFloat(words[2]); omega2 = wordFloat(words[3]);
+    }
     if (acrobot_energy(theta1, theta2, omega1, omega2) > ACROBOT_ENERGY_TOP) ctrl[0] = omega1 > 0.0f ? 0.0f : 2.0f;
     else ctrl[0] = omega2 < 0.0f ? 0.0f : 2.0f;
 }

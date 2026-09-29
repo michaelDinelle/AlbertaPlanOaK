@@ -12,6 +12,7 @@ typedef struct {
     uint64_t hash;
     uint32_t step, done, health;
     float reward, sum, compensation;
+    uint32_t episodes, positive, negative, firstPositive;
 } LaneTally;
 
 typedef struct {
@@ -51,6 +52,10 @@ static inline __attribute__((always_inline)) void lane_run(Lane *l, uint32_t lan
         float reward = env_step(env, seed, t.step + 1u, ctrl, l->words, extra, l->obs, &done, shared);
         t.done = done;
         t.reward = reward;
+        t.episodes += done;
+        t.positive += reward > 0.0f;
+        t.negative += reward < 0.0f;
+        t.firstPositive = (t.firstPositive || !(reward > 0.0f)) ? t.firstPositive : t.step + 1u;
         t.hash = (t.hash ^ (uint64_t)floatWord(reward)) * OAK_HASH_PRIME;
         if (isfinite(reward)) {
             float adjusted = reward - t.compensation;
@@ -69,6 +74,10 @@ static inline void lane_window(Lane *l, uint32_t lane, uint32_t *state, uint32_t
         case POLICY_OAK: lane_run(l, lane, state, extra, shared, POLICY_OAK, end, ctrl); return;
         case POLICY_PPO: lane_run(l, lane, state, extra, shared, POLICY_PPO, end, ctrl); return;
         case POLICY_RANDOM: lane_run(l, lane, state, extra, shared, POLICY_RANDOM, end, ctrl); return;
+        case POLICY_CONSTANT: lane_run(l, lane, state, extra, shared, POLICY_CONSTANT, end, ctrl); return;
+        case POLICY_STREAM: lane_run(l, lane, state, extra, shared, POLICY_STREAM, end, ctrl); return;
+        case POLICY_OAK_PERMUTED: lane_run(l, lane, state, extra, shared, POLICY_OAK_PERMUTED, end, ctrl); return;
+        case POLICY_OAK_RESCALED: lane_run(l, lane, state, extra, shared, POLICY_OAK_RESCALED, end, ctrl); return;
         default: lane_run(l, lane, state, extra, shared, POLICY_ORACLE, end, ctrl); return;
     }
 }

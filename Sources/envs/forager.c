@@ -11,11 +11,14 @@ static const foragerKnobs FORAGER_KNOBS[4] = {
     { 16u, 1u, 1u }
 };
 
+enum { FORAGER_REWARD, FORAGER_BITE, FORAGER_GOOD, FORAGER_RECALL };
 
 uint32_t forager_extraWords(uint32_t instance, uint32_t steps) {
     (void)steps;
-    return FORAGER_KNOBS[instance].side * FORAGER_KNOBS[instance].side + 1u + ENV_BATCH;
+    return 3u * FORAGER_KNOBS[instance].side * FORAGER_KNOBS[instance].side + 1u + ENV_BATCH + FORAGER_RECALL;
 }
+
+static inline uint32_t *forager_memory(const foragerKnobs *k, uint32_t *extra) { return extra + k->side * k->side + 1u + ENV_BATCH; }
 
 static void forager_spawn(const foragerKnobs *k, uint32_t seed, uint32_t index, uint32_t slot, uint32_t *map) {
     for (uint32_t probe = 0u;; probe++) {
@@ -29,6 +32,8 @@ static uint32_t forager_good(const foragerKnobs *k, uint32_t step) { return k->s
 
 static const float FORAGER_VALUES[2][3] = { { 0.0f, 1.0f, -1.0f }, { 0.0f, -1.0f, 1.0f } };
 
+static const float FORAGER_KINDS[3] = { 0.0f, 0.5f, 1.0f };
+
 static const float *forager_values(const foragerKnobs *k, uint32_t step) {
     return FORAGER_VALUES[forager_good(k, step) - 1u];
 }
@@ -40,12 +45,11 @@ static inline __attribute__((always_inline)) lane4 forager_draw(const foragerKno
     return clock;
 }
 
-static inline __attribute__((always_inline)) void forager_obs(const foragerKnobs *k, uint32_t step, uint32_t x0, uint32_t y0, const uint32_t *map, float *obs) {
-    const float *value = forager_values(k, step);
+static inline __attribute__((always_inline)) void forager_obs(const foragerKnobs *k, uint32_t x0, uint32_t y0, const uint32_t *map, float *obs) {
     uint32_t span = 2u * k->fov + 1u, i = 0u;
     for (uint32_t dy = 0u; dy < span; dy++) {
         const uint32_t *row = map + (y0 + k->side + dy - k->fov) % k->side * k->side;
-        for (uint32_t dx = 0u; dx < span; dx++) obs[i++] = value[row[(x0 + k->side + dx - k->fov) % k->side]];
+        for (uint32_t dx = 0u; dx < span; dx++) obs[i++] = FORAGER_KINDS[row[(x0 + k->side + dx - k->fov) % k->side]];
     }
     obs[i] = 1.0f;
 }
@@ -62,23 +66,22 @@ void forager_reset(uint32_t instance, uint32_t seed, uint32_t *words, uint32_t *
 
 void forager_observe(uint32_t instance, uint32_t seed, const uint32_t *words, const uint32_t *extra, uint32_t step, float *obs, const float *shared) {
     (void)shared;
-    (void)seed;
+    (void)seed; (void)step;
     switch (instance) {
-        case 0u: forager_obs(&FORAGER_KNOBS[0], step, words[0], words[1], extra, obs); return;
-        case 1u: forager_obs(&FORAGER_KNOBS[1], step, words[0], words[1], extra, obs); return;
-        case 2u: forager_obs(&FORAGER_KNOBS[2], step, words[0], words[1], extra, obs); return;
-        case 3u: forager_obs(&FORAGER_KNOBS[3], step, words[0], words[1], extra, obs); return;
+        case 0u: forager_obs(&FORAGER_KNOBS[0], words[0], words[1], extra, obs); return;
+        case 1u: forager_obs(&FORAGER_KNOBS[1], words[0], words[1], extra, obs); return;
+        case 2u: forager_obs(&FORAGER_KNOBS[2], words[0], words[1], extra, obs); return;
+        case 3u: forager_obs(&FORAGER_KNOBS[3], words[0], words[1], extra, obs); return;
         default: __builtin_trap();
     }
 }
 
 static float forager_reward(const foragerKnobs *k, uint32_t step, uint32_t item) { return forager_values(k, step)[item]; }
 
-static __attribute__((noinline)) float forager_grow(uint32_t instance, uint32_t seed, uint32_t step, uint32_t item, uint32_t *words, uint32_t *extra, float *obs) {
+static __attribute__((noinline)) void forager_grow(uint32_t instance, uint32_t seed, uint32_t step, uint32_t *words, uint32_t *extra, float *obs) {
     forager_spawn(&FORAGER_KNOBS[instance], seed, step, 0u, extra);
     words[2] += 1u;
     forager_observe(instance, seed, words, extra, step, obs, 0);
-    return forager_reward(&FORAGER_KNOBS[instance], step, item);
 }
 
 static inline __attribute__((always_inline)) float forager_move(uint32_t instance, uint32_t seed, uint32_t step, uint32_t clock, const float *ctrl, uint32_t *words, uint32_t *extra, float *obs, uint32_t *done) {
@@ -95,9 +98,11 @@ static inline __attribute__((always_inline)) float forager_move(uint32_t instanc
     count -= decays;
     words[0] = x; words[1] = y; words[2] = count;
     *done = 0u;
-    if (__builtin_unpredictable((count < cells / 16u) & clock)) return forager_grow(instance, seed, step, item, words, extra, obs);
-    forager_obs(k, step, x, y, map, obs);
-    return forager_reward(k, step, item);
+    float reward = forager_reward(k, step, item);
+    forager_memory(k, extra)[FORAGER_REWARD] = floatWord(reward);
+    if (__builtin_unpredictable((count < cells / 16u) & clock)) forager_grow(instance, seed, step, words, extra, obs);
+    else forager_obs(k, x, y, map, obs);
+    return reward;
 }
 
 static inline __attribute__((always_inline)) float forager_redraw(uint32_t instance, uint32_t seed, uint32_t step, const float *ctrl, uint32_t *words, uint32_t *extra, float *obs, uint32_t *done) {
@@ -133,14 +138,31 @@ float forager_step(uint32_t instance, uint32_t seed, uint32_t step, const float 
     }
 }
 
-static inline __attribute__((always_inline)) void forager_seek(const foragerKnobs *k, uint32_t step, const uint32_t *words, const uint32_t *map, float *ctrl) {
-    uint32_t good = forager_good(k, step + 1u), cells = k->side * k->side;
+static inline __attribute__((always_inline)) uint32_t forager_kind(float code) {
+    uint32_t kind = 0u;
+    for (uint32_t i = 1u; i < 3u; i++) kind = code == FORAGER_KINDS[i] ? i : kind;
+    return kind;
+}
+
+static inline __attribute__((always_inline)) void forager_look(const foragerKnobs *k, uint32_t step, const uint32_t *words, const float *obs, uint32_t *recall, uint32_t *seen) {
+    uint32_t span = 2u * k->fov + 1u, i = 0u;
+    for (uint32_t dy = 0u; dy < span; dy++) {
+        uint32_t row = (words[1] + k->side + dy - k->fov) % k->side * k->side;
+        for (uint32_t dx = 0u; dx < span; dx++, i++) {
+            uint32_t cell = row + (words[0] + k->side + dx - k->fov) % k->side;
+            recall[cell] = forager_kind(obs[i]);
+            seen[cell] = step + 1u;
+        }
+    }
+}
+
+static inline __attribute__((always_inline)) uint32_t forager_route(const foragerKnobs *k, uint32_t step, uint32_t start, uint32_t bad, const uint32_t *recall, const uint32_t *seen) {
+    uint32_t cells = k->side * k->side, head = 0u, tail = 0u, route = 0u, age = 0u, distance = 1u;
     uint8_t firstStep[64 * 64];
-    uint16_t queue[64 * 64];
+    uint16_t queue[64 * 64], hops[64 * 64];
     for (uint32_t i = 0u; i < cells; i++) firstStep[i] = 255u;
-    uint32_t start = words[1] * k->side + words[0];
     firstStep[start] = 254u;
-    uint32_t head = 0u, tail = 0u;
+    hops[start] = 0u;
     queue[tail++] = (uint16_t)start;
     while (head < tail) {
         uint32_t cell = queue[head++], cx = cell % k->side, cy = cell / k->side;
@@ -148,23 +170,37 @@ static inline __attribute__((always_inline)) void forager_seek(const foragerKnob
             int dx, dy;
             gridDelta(d, &dx, &dy);
             uint32_t nx = (cx + k->side + (uint32_t)dx) % k->side, ny = (cy + k->side + (uint32_t)dy) % k->side, next = ny * k->side + nx;
-            if (firstStep[next] != 255u || (map[next] != 0u && map[next] != good)) continue;
+            if (firstStep[next] != 255u || recall[next] == bad) continue;
             firstStep[next] = firstStep[cell] == 254u ? (uint8_t)d : firstStep[cell];
-            if (map[next] == good) { ctrl[0] = (float)firstStep[next]; return; }
+            hops[next] = (uint16_t)(hops[cell] + 1u);
+            if (recall[next] != 0u) return firstStep[next];
+            uint32_t stale = step + 1u - seen[next];
+            if ((uint64_t)stale * distance > (uint64_t)age * hops[next]) { route = firstStep[next]; age = stale; distance = hops[next]; }
             queue[tail++] = (uint16_t)next;
         }
     }
-    ctrl[0] = 0.0f;
+    return route;
+}
+
+static inline __attribute__((always_inline)) void forager_seek(const foragerKnobs *k, uint32_t step, const uint32_t *words, uint32_t *extra, const float *obs, float *ctrl) {
+    uint32_t *memory = forager_memory(k, extra), *recall = memory + FORAGER_RECALL, *seen = recall + k->side * k->side, bite = memory[FORAGER_BITE];
+    if (bite != 0u) memory[FORAGER_GOOD] = wordFloat(memory[FORAGER_REWARD]) > 0.0f ? bite : 3u - bite;
+    forager_look(k, step, words, obs, recall, seen);
+    uint32_t good = memory[FORAGER_GOOD], route = forager_route(k, step, words[1] * k->side + words[0], good != 0u ? 3u - good : 3u, recall, seen);
+    int dx, dy;
+    gridDelta(route, &dx, &dy);
+    memory[FORAGER_BITE] = recall[(words[1] + k->side + (uint32_t)dy) % k->side * k->side + (words[0] + k->side + (uint32_t)dx) % k->side];
+    ctrl[0] = (float)route;
 }
 
 void forager_oracle(uint32_t instance, uint32_t seed, uint32_t step, const uint32_t *words, uint32_t *extra, const float *obs, float *ctrl, const float *shared) {
     (void)shared;
-    (void)seed; (void)obs;
+    (void)seed;
     switch (instance) {
-        case 0u: forager_seek(&FORAGER_KNOBS[0], step, words, extra, ctrl); return;
-        case 1u: forager_seek(&FORAGER_KNOBS[1], step, words, extra, ctrl); return;
-        case 2u: forager_seek(&FORAGER_KNOBS[2], step, words, extra, ctrl); return;
-        case 3u: forager_seek(&FORAGER_KNOBS[3], step, words, extra, ctrl); return;
+        case 0u: forager_seek(&FORAGER_KNOBS[0], step, words, extra, obs, ctrl); return;
+        case 1u: forager_seek(&FORAGER_KNOBS[1], step, words, extra, obs, ctrl); return;
+        case 2u: forager_seek(&FORAGER_KNOBS[2], step, words, extra, obs, ctrl); return;
+        case 3u: forager_seek(&FORAGER_KNOBS[3], step, words, extra, obs, ctrl); return;
         default: __builtin_trap();
     }
 }

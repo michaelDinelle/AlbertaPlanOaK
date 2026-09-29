@@ -218,6 +218,7 @@ export class Tracker {
       while (j < na) this.creepDies(before, fifo, j++, time);
     }
 
+    const skipped = this.tickTime(next) - this.tickTime(prev) > 1;
     for (let slot = 0; slot < this.heroes; slot++) {
       const side = slot < layout.heroes ? 0 : 1, was = heroFlags(before, slot), now = heroFlags(view, slot), color = teams[side];
       this.heroPoint(before, slot, a);
@@ -238,7 +239,19 @@ export class Tracker {
         this.snapped[slot] = true;
       }
       if (now & FLAG_DEAD) continue;
-      if (Math.hypot(b.x - a.x, b.z - a.z) > 1.2) {
+      const moved = Math.hypot(b.x - a.x, b.z - a.z) > 1.2;
+      if (skipped && moved) {
+        if (slot === 0) {
+          this.effect(FX_BURST, a.x, a.z, a.x, a.z, color, 2.6, time, 0.8);
+          this.effect(FX_FLASH, a.x, a.z, a.x, a.z, color, 2.2, time, 0.5);
+          this.effect(FX_WAVE, b.x, b.z, b.x, b.z, color, 3.2, time, 0.9);
+          this.lastAgentDeath = { x: a.x, z: a.z, step: next.step };
+        }
+        this.snapped[slot] = true;
+        this.attackFrom[slot] = NaN;
+        continue;
+      }
+      if (moved) {
         this.streak(STREAK_BOLT, a.x, a.z, b.x, b.z, SPELL[heroArch(view, slot)]!, 0.5, time, 0.45);
         this.effect(FX_FLASH, a.x, a.z, a.x, a.z, SPELL[heroArch(view, slot)]!, 1.6, time, 0.4);
         this.snapped[slot] = true;

@@ -9,18 +9,19 @@
 #define POMMERMAN_SHUT_IN 4u
 #define POMMERMAN_BREATHING 2u
 #define POMMERMAN_HORIZON 14u
+#define POMMERMAN_SIGHT 3u
 
 typedef struct {
-    uint32_t side, seats, phases, rigid, wood, items, team, fog, league, tickLimit, collapseStart, collapseEvery, collapseRings, maxBlast;
+    uint32_t side, seats, rigid, wood, items, team, fog, league, tickLimit, collapseStart, collapseEvery, collapseRings, maxBlast;
     float flee, strike, loot, chase, dig, wander, woodBomb, enemyBomb;
 } pommermanKnobs;
 
 static const pommermanKnobs POMMERMAN_KNOBS[5] = {
-    { 8u, 2u, 2u, 16u, 16u, 10u, 0u, 0u, 0u, 800u, 0u, 0u, 0u, 10u, 6.0f, 5.0f, 3.0f, 10.0f, 8.0f, 0.25f, 0.75f, 1.0f },
-    { 11u, 4u, 5u, 36u, 36u, 20u, 0u, 0u, 0u, 800u, 0u, 0u, 0u, 10u, 6.0f, 5.0f, 3.0f, 10.0f, 8.0f, 0.25f, 0.75f, 1.0f },
-    { 11u, 4u, 5u, 36u, 36u, 20u, 1u, 4u, 0u, 800u, 0u, 0u, 0u, 4u, 6.0f, 5.0f, 3.0f, 10.0f, 8.0f, 0.25f, 0.75f, 1.0f },
-    { 11u, 4u, 5u, 36u, 36u, 20u, 0u, 0u, 0u, 800u, 500u, 75u, 4u, 10u, 6.0f, 5.0f, 3.0f, 10.0f, 8.0f, 0.25f, 0.75f, 1.0f },
-    { 11u, 4u, 5u, 36u, 36u, 20u, 0u, 0u, 1u, 800u, 0u, 0u, 0u, 10u, 6.0f, 5.0f, 3.0f, 10.0f, 8.0f, 0.25f, 0.75f, 1.0f }
+    { 8u, 2u, 16u, 16u, 10u, 0u, 0u, 0u, 800u, 0u, 0u, 0u, 10u, 6.0f, 5.0f, 3.0f, 10.0f, 8.0f, 0.25f, 0.75f, 1.0f },
+    { 11u, 4u, 36u, 36u, 20u, 0u, 0u, 0u, 800u, 0u, 0u, 0u, 10u, 6.0f, 5.0f, 3.0f, 10.0f, 8.0f, 0.25f, 0.75f, 1.0f },
+    { 11u, 4u, 36u, 36u, 20u, 1u, 4u, 0u, 800u, 0u, 0u, 0u, 4u, 6.0f, 5.0f, 3.0f, 10.0f, 8.0f, 0.25f, 0.75f, 1.0f },
+    { 11u, 4u, 36u, 36u, 20u, 0u, 0u, 0u, 800u, 500u, 75u, 4u, 10u, 6.0f, 5.0f, 3.0f, 10.0f, 8.0f, 0.25f, 0.75f, 1.0f },
+    { 11u, 4u, 36u, 36u, 20u, 0u, 0u, 1u, 800u, 0u, 0u, 0u, 10u, 6.0f, 5.0f, 3.0f, 10.0f, 8.0f, 0.25f, 0.75f, 1.0f }
 };
 
 static const float POMMERMAN_THETA_LOW[8] = { 2.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
@@ -29,8 +30,9 @@ static const float POMMERMAN_THETA_HIGH[8] = { 10.0f, 9.0f, 6.0f, 12.0f, 10.0f, 
 enum { POM_STOP, POM_UP, POM_DOWN, POM_LEFT, POM_RIGHT, POM_BOMB, POM_ACTIONS };
 enum { POM_EXTRA, POM_RANGE, POM_KICK, POM_KINDS };
 enum { POM_SEATS = 4, POM_BOMBS = 32, POM_THETA = 8, POM_NONE = 255, POM_PAIRS = 64, POM_LAYERS = 16 };
-enum { PW_TICK, PW_GAME, PW_SEAT, PW_CYCLE, PW_PHASE, PW_ALIVE, PW_RESULT, PW_CELL, PW_AMMO = PW_CELL + POM_SEATS, PW_BLAST = PW_AMMO + POM_SEATS, PW_KICK = PW_BLAST + POM_SEATS, PW_ACT = PW_KICK + POM_SEATS, PW_WORDS = PW_ACT + POM_SEATS };
+enum { PW_TICK, PW_GAME, PW_SEAT, PW_ALIVE, PW_RESULT, PW_CELL, PW_AMMO = PW_CELL + POM_SEATS, PW_BLAST = PW_AMMO + POM_SEATS, PW_KICK = PW_BLAST + POM_SEATS, PW_ACT = PW_KICK + POM_SEATS, PW_WORDS = PW_ACT + POM_SEATS };
 enum { POM_WON = 1u, POM_LOST, POM_TIED };
+enum { POM_SPAN = 2u * POMMERMAN_SIGHT + 1u, POM_GRID = POM_SPAN * POM_SPAN, POM_OTHERS = POM_GRID + 4 };
 enum { POM_DRAW_BOTS, POM_DRAW_BOARD, POM_DRAW_ITEMS, POM_DRAW_SEAT };
 
 typedef unsigned __int128 pomBits;
@@ -58,11 +60,10 @@ typedef struct {
 } pomBoard;
 
 typedef struct {
-    pomBoard board, sim;
+    pomBoard board, belief, sim;
     pomBits laneWood;
-    uint32_t pairs, lean, plan[POM_SEATS], draw[3][POM_SEATS];
-    float face[14];
-    uint8_t pair[POM_PAIRS], seen[POM_SEATS], pad[8];
+    uint32_t pairs, lean;
+    uint8_t pair[POM_PAIRS];
     pomLeague league;
     pomForecast plain, probe;
 } pomWorld;
@@ -306,10 +307,8 @@ static void pom_begin(const pommermanKnobs *k, const pomGeo *g, pomWorld *w, uin
         words[PW_BLAST + s] = s < k->seats ? POMMERMAN_START_BLAST : 0u;
         words[PW_KICK + s] = 0u;
         words[PW_ACT + s] = POM_STOP;
-        w->seen[s] = (uint8_t)cell;
         w->board.death[s] = 0xFFFFFFFFu;
     }
-    words[PW_PHASE] = 0u;
     if (k->league) pom_leagueSeat(k, w, seed, game, me);
 }
 
@@ -781,123 +780,60 @@ static inline __attribute__((always_inline)) pomSight pom_sight(const pommermanK
     return sight;
 }
 
-static inline __attribute__((always_inline)) void pom_think(const pommermanKnobs *k, const pomGeo *g, pomWorld *w, const uint32_t *words, uint32_t seed, uint32_t phase) {
-    uint32_t me = words[PW_SEAT], alive = words[PW_ALIVE], slices = k->phases > 1u ? k->phases - 1u : 1u, bot = 0u, mine = 0u;
-    if (phase == 0u) {
-        u44 draw = philox4(seed, ENV_RNG_STREAM, (lane4)words[PW_GAME], (lane4)words[PW_TICK], (lane4){ 0u, 1u, 2u, 3u }, (lane4)POM_DRAW_BOTS);
-        for (uint32_t s = 0u; s < POM_SEATS; s++) {
-            w->draw[0][s] = draw.x[s];
-            w->draw[1][s] = draw.y[s];
-            w->draw[2][s] = draw.z[s];
-            w->plan[s] = POM_STOP;
-        }
-    }
-    if (slices + 1u == k->seats) {
-        uint32_t s = phase + (phase >= me);
-        mine = phase < slices ? alive & 1u << s : 0u;
-    } else
-        for (uint32_t s = 0u; s < k->seats; s++) {
-            if (s == me) continue;
-            mine |= (uint32_t)(bot++ % slices == phase && (alive >> s & 1u)) << s;
-        }
-    if (!mine) return;
+static inline __attribute__((always_inline)) void pom_bots(const pommermanKnobs *k, const pomGeo *g, const pomWorld *w, const uint32_t *words, uint32_t seed, uint32_t *act) {
+    uint32_t me = words[PW_SEAT], alive = words[PW_ALIVE];
+    for (uint32_t s = 0u; s < POM_SEATS; s++) act[s] = POM_STOP;
+    u44 draw = philox4(seed, ENV_RNG_STREAM, (lane4)words[PW_GAME], (lane4)words[PW_TICK], (lane4){ 0u, 1u, 2u, 3u }, (lane4)POM_DRAW_BOTS);
     pomSight all = pom_common(g, &w->board);
     const float knob[POM_THETA] = { k->flee, k->strike, k->loot, k->chase, k->dig, k->wander, k->woodBomb, k->enemyBomb };
     const pomStyle fixed = pom_style(knob);
     for (uint32_t s = 0u; s < k->seats; s++) {
-        if (!(mine >> s & 1u)) continue;
+        if (s == me || !(alive >> s & 1u)) continue;
         pomSight sight = pom_sight(k, g, &w->board, words, &all, s);
         const pomStyle *st = k->league ? &w->league.style[w->league.member[s]] : &fixed;
-        w->plan[s] = pom_sapper(g, &sight, words[PW_CELL + s], words[PW_AMMO + s], words[PW_BLAST + s], st, w->lean & 1u, w->draw[0][s], w->draw[1][s], w->draw[2][s]);
+        act[s] = pom_sapper(g, &sight, words[PW_CELL + s], words[PW_AMMO + s], words[PW_BLAST + s], st, w->lean & 1u, draw.x[s], draw.y[s], draw.z[s]);
     }
 }
 
-static inline __attribute__((always_inline)) float pom_code(const pommermanKnobs *k, const pomBoard *w, const uint32_t *words, uint32_t cell, pomBits flames) {
+static inline float pom_look(const pomBoard *w, pomBits rivals, pomBits friends, uint32_t side, int x, int y) {
+    uint32_t inside = x >= 0 && y >= 0 && x < (int)side && y < (int)side, cell = inside ? (uint32_t)y * side + (uint32_t)x : 0u;
     pomBits bit = pom_bit(cell);
-    if (w->rigid & bit) return -0.8f;
-    if (w->wood & bit) return -0.4f;
-    if (w->bomb & bit) return -0.6f;
-    if (flames & bit) return -0.2f;
-    if (w->item[POM_EXTRA] & bit) return 0.4f;
-    if (w->item[POM_RANGE] & bit) return 0.6f;
-    if (w->item[POM_KICK] & bit) return 0.8f;
-    uint32_t me = words[PW_SEAT];
-    for (uint32_t s = 0u; s < k->seats; s++)
-        if (s != me && (words[PW_ALIVE] >> s & 1u) && words[PW_CELL + s] == cell) return pom_rival(k, me, s) ? 1.0f : 0.2f;
+    if (!inside || (w->rigid & bit)) return 0.8f;
+    if (w->wood & bit) return 0.6f;
+    if (w->bomb & bit) return -0.55f + 0.2f * (float)(w->bombs[w->bombAt[cell] - 1u].life - 1u) / (float)(POMMERMAN_BOMB_LIFE - 1u);
+    for (uint32_t t = POMMERMAN_FLAME_LIFE; t-- > 0u;)
+        if (w->flame[t] & bit) return -0.65f - 0.05f * (float)(t + 1u);
+    if (rivals & bit) return -1.0f;
+    if (friends & bit) return 1.0f;
+    if (w->item[POM_EXTRA] & bit) return 0.15f;
+    if (w->item[POM_RANGE] & bit) return 0.3f;
+    if (w->item[POM_KICK] & bit) return 0.45f;
     return 0.0f;
 }
 
-static inline __attribute__((always_inline)) void pom_face(const pommermanKnobs *k, const pomBoard *w, const uint32_t *words, const pomGeo *g, float *face) {
-    uint32_t me = words[PW_SEAT], alive = words[PW_ALIVE], side = k->side;
-    float inv = 1.0f / (float)side;
-    if (!(alive >> me & 1u)) {
-        for (uint32_t i = 0u; i < 14u; i++) face[i] = 0.0f;
-        for (uint32_t d = 0u; d < 4u; d++) face[3u * d + 1u] = -1.0f;
-        return;
+static void pom_observeWorld(const pommermanKnobs *k, const pomGeo *g, const pomBoard *w, const uint32_t *words, float *obs) {
+    uint32_t me = words[PW_SEAT], alive = words[PW_ALIVE], side = k->side, cell = words[PW_CELL + me];
+    int r = (int)(cell / side), c = (int)(cell % side), sight = (int)POMMERMAN_SIGHT;
+    pomBits view = k->fog ? pom_window(g, cell, k->fog) : g->board, rivals = 0, friends = 0;
+    float inv = 1.0f / (float)side, *other = obs + POM_OTHERS;
+    for (uint32_t j = 1u; j < k->seats; j++, other += 3) {
+        uint32_t s = (me + j) % k->seats, at = words[PW_CELL + s];
+        other[0] = other[1] = other[2] = 0.0f;
+        if (!(alive >> s & 1u) || !(view & pom_bit(at))) continue;
+        uint32_t rival = pom_rival(k, me, s);
+        if (rival) rivals |= pom_bit(at);
+        else friends |= pom_bit(at);
+        other[0] = rival ? -1.0f : 1.0f;
+        other[1] = (float)((int)(at % side) - c) * inv;
+        other[2] = (float)((int)(at / side) - r) * inv;
     }
-    uint32_t cell = words[PW_CELL + me], r = cell / side, c = cell % side;
-    pomBits view = k->fog ? pom_window(g, cell, k->fog) : g->board, flames = w->flame[0] | w->flame[1] | w->flame[2];
-    pomBits bodies = pom_bodies(k, words) & ~pom_bit(cell);
-    pomBits solid = w->rigid | w->wood | w->bomb | flames | w->item[0] | w->item[1] | w->item[2] | bodies;
-    float threat[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
-    for (uint32_t d = 0u; d < 4u; d++) {
-        int dx, dy;
-        gridDelta(d, &dx, &dy);
-        int x = (int)c, y = (int)r;
-        uint32_t n = 0u;
-        float code = 0.0f;
-        for (;;) {
-            n++;
-            x += dx;
-            y += dy;
-            if (x < 0 || y < 0 || x >= (int)side || y >= (int)side) { code = -1.0f; break; }
-            pomBits at = pom_bit((uint32_t)y * side + (uint32_t)x);
-            if (k->fog && !(view & at)) { code = -0.9f; break; }
-            if (solid & at) { code = pom_code(k, w, words, (uint32_t)y * side + (uint32_t)x, flames); break; }
-        }
-        face[3u * d] = (float)n * inv;
-        face[3u * d + 1u] = code;
-    }
-    pomBits here = pom_bit(cell);
-    for (uint32_t b = 0u; b < w->bombCount; b++) {
-        const pomBomb *bomb = &w->bombs[b];
-        if (!(w->reach[b] & here) || (k->fog && !(view & pom_bit(bomb->cell)))) continue;
-        float urgency = (float)(POMMERMAN_BOMB_LIFE + 1u - bomb->life) * (1.0f / (float)POMMERMAN_BOMB_LIFE);
-        if (bomb->cell == cell) {
-            for (uint32_t d = 0u; d < 4u; d++) threat[d] = fmaxf(threat[d], urgency);
-            continue;
-        }
-        uint32_t br = bomb->cell / side, bc = bomb->cell % side, d = br < r ? 0u : br > r ? 1u : bc < c ? 2u : 3u;
-        threat[d] = fmaxf(threat[d], urgency);
-    }
-    for (uint32_t d = 0u; d < 4u; d++) face[3u * d + 2u] = threat[d];
-    float reach = (float)(words[PW_BLAST + me] - 1u) * 0.25f;
-    face[12] = (float)words[PW_AMMO + me] * 0.25f;
-    face[13] = words[PW_KICK + me] ? -reach : reach;
-}
-
-static inline __attribute__((always_inline)) void pom_observeWorld(const pommermanKnobs *k, const pomGeo *g, const pomWorld *world, const uint32_t *words, const float *face, float *obs) {
-    uint32_t me = words[PW_SEAT], alive = words[PW_ALIVE], side = k->side, others = k->seats - 1u;
-    float inv = 1.0f / (float)side;
-    memcpy(obs, face, 14u * sizeof(float));
-    obs[14] = words[PW_PHASE] + 1u < k->phases ? 1.0f : 0.0f;
-    obs[15] = obs[16] = obs[17] = 0.0f;
-    uint32_t q = (me + 1u + words[PW_CYCLE] % others) % k->seats;
-    if (!(alive >> me & 1u) || !(alive >> q & 1u)) return;
-    uint32_t cell = words[PW_CELL + me], at = words[PW_CELL + q], rival = pom_rival(k, me, q);
-    uint32_t shown = !k->fog || (pom_window(g, cell, k->fog) & pom_bit(at)) != 0;
-    if (!shown) at = world->seen[q];
-    obs[15] = shown ? (rival ? 1.0f : 0.5f) : (rival ? -0.5f : -0.25f);
-    obs[16] = (float)((int)(at % side) - (int)(cell % side)) * inv;
-    obs[17] = (float)((int)(at / side) - (int)(cell / side)) * inv;
-}
-
-static void pom_remember(const pommermanKnobs *k, const pomGeo *g, pomWorld *w, const uint32_t *words) {
-    uint32_t me = words[PW_SEAT];
-    if (!(words[PW_ALIVE] >> me & 1u)) return;
-    pomBits view = k->fog ? pom_window(g, words[PW_CELL + me], k->fog) : g->board;
-    for (uint32_t s = 0u; s < k->seats; s++)
-        if ((words[PW_ALIVE] >> s & 1u) && (view & pom_bit(words[PW_CELL + s]))) w->seen[s] = (uint8_t)words[PW_CELL + s];
+    for (int y = r - sight; y <= r + sight; y++)
+        for (int x = c - sight; x <= c + sight; x++)
+            *obs++ = pom_look(w, rivals, friends, side, x, y);
+    obs[0] = (float)words[PW_AMMO + me] / (float)POMMERMAN_MAX_AMMO;
+    obs[1] = (float)words[PW_BLAST + me] / (float)k->maxBlast;
+    obs[2] = (float)words[PW_KICK + me];
+    obs[3] = (float)words[PW_TICK] / (float)k->tickLimit;
 }
 
 static void pom_leagueInit(const pommermanKnobs *k, pomLeague *l, uint32_t seed) {
@@ -935,31 +871,21 @@ static uint32_t pom_action(const float *ctrl) {
 static inline __attribute__((always_inline)) float pom_advance(const pommermanKnobs *k, uint32_t seed, const float *ctrl, uint32_t *words, uint32_t *extra, float *obs, uint32_t *done) {
     const pomGeo g = pom_geo(k->side);
     pomWorld *w = pom_world(extra);
-    uint32_t phase = words[PW_PHASE];
-    float reward = 0.0f;
-    *done = 0u;
-    pom_think(k, &g, w, words, seed, phase);
-    words[PW_CYCLE]++;
-    if (phase + 1u < k->phases) {
-        words[PW_PHASE] = phase + 1u;
-        pom_observeWorld(k, &g, w, words, w->face, obs);
-        return reward;
-    }
-    uint32_t act[POM_SEATS];
-    memcpy(act, w->plan, sizeof act);
-    act[words[PW_SEAT]] = pom_action(ctrl);
-    pom_tick(k, &g, &w->board, words, act);
-    uint32_t result = 0u;
-    reward = pom_judge(k, words, &result);
-    words[PW_PHASE] = 0u;
+    uint32_t act[POM_SEATS], result = 0u, me = words[PW_SEAT];
+    float reward;
+    do {
+        pom_bots(k, &g, w, words, seed, act);
+        act[me] = pom_action(ctrl);
+        pom_tick(k, &g, &w->board, words, act);
+        reward = pom_judge(k, words, &result);
+    } while (!result && !(words[PW_ALIVE] >> me & 1u));
     *done = result != 0u;
     if (result) {
         words[PW_RESULT] = result;
         if (k->league) pom_leagueEnd(k, w, words, seed);
         pom_begin(k, &g, w, words, seed, words[PW_GAME] + 1u);
-    } else if (k->fog) pom_remember(k, &g, w, words);
-    pom_face(k, &w->board, words, &g, w->face);
-    pom_observeWorld(k, &g, w, words, w->face, obs);
+    }
+    pom_observeWorld(k, &g, &w->board, words, obs);
     return reward;
 }
 
@@ -973,7 +899,6 @@ void pommerman_reset(uint32_t instance, uint32_t seed, uint32_t *words, uint32_t
     if (k->league) pom_leagueInit(k, &w->league, seed);
     pom_layout(k, w);
     pom_begin(k, &g, w, words, seed, 0u);
-    pom_face(k, &w->board, words, &g, w->face);
 }
 
 static __attribute__((noinline)) float pom_duel(uint32_t seed, const float *ctrl, uint32_t *words, uint32_t *extra, float *obs, uint32_t *done) { return pom_advance(&POMMERMAN_KNOBS[0], seed, ctrl, words, extra, obs, done); }
@@ -997,10 +922,7 @@ void pommerman_observe(uint32_t instance, uint32_t seed, const uint32_t *words, 
     (void)seed; (void)step; (void)shared;
     const pommermanKnobs *k = &POMMERMAN_KNOBS[instance];
     const pomGeo g = pom_geo(k->side);
-    const pomWorld *w = pom_read(extra);
-    float face[14];
-    pom_face(k, &w->board, words, &g, face);
-    pom_observeWorld(k, &g, w, words, face, obs);
+    pom_observeWorld(k, &g, &pom_read(extra)->board, words, obs);
 }
 
 typedef struct { uint32_t cell, blast; } pomArm;
@@ -1071,10 +993,44 @@ static void pom_arrive(const pomGeo *g, const pomForecast *f, uint32_t cell, con
     }
 }
 
+static void pom_believe(const pommermanKnobs *k, const pomGeo *g, pomWorld *w, const uint32_t *words, uint32_t *known) {
+    const pomBoard *truth = &w->board;
+    pomBoard *b = &w->belief;
+    uint32_t me = words[PW_SEAT], kept = 0u;
+    memcpy(known, words, PW_WORDS * sizeof *known);
+    *b = *truth;
+    for (uint32_t t = 0u; t < POM_KINDS; t++) b->hidden[t] = 0;
+    if (!k->fog) return;
+    pomBits view = pom_window(g, words[PW_CELL + me], k->fog);
+    for (uint32_t s = 0u; s < k->seats; s++) {
+        if (s == me) continue;
+        if (!(view & pom_bit(words[PW_CELL + s]))) known[PW_ALIVE] &= ~(1u << s);
+        if (!pom_rival(k, me, s)) continue;
+        known[PW_AMMO + s] = 1u;
+        known[PW_BLAST + s] = k->maxBlast;
+        known[PW_KICK + s] = 1u;
+    }
+    b->rigid &= view;
+    b->wood &= view;
+    for (uint32_t t = 0u; t < POMMERMAN_FLAME_LIFE; t++) b->flame[t] &= view;
+    for (uint32_t t = 0u; t < POM_KINDS; t++) b->item[t] &= view;
+    b->bomb &= view;
+    memset(b->bombAt, 0, sizeof b->bombAt);
+    for (uint32_t i = 0u; i < truth->bombCount; i++) {
+        uint32_t cell = truth->bombs[i].cell;
+        if (!(view & pom_bit(cell))) continue;
+        b->bombs[kept] = truth->bombs[i];
+        b->reach[kept] = pom_cross(g, cell, truth->bombs[i].blast - 1u, b->rigid, b->wood);
+        b->bombAt[cell] = (uint8_t)(kept + 1u);
+        kept++;
+    }
+    b->bombCount = kept;
+}
+
 static inline __attribute__((always_inline)) int32_t pom_score(const pommermanKnobs *k, const pomGeo *g, pomWorld *w, const uint32_t *words, uint32_t *act, uint32_t action) {
     uint32_t me = words[PW_SEAT], side = k->side, sim[PW_WORDS];
     memcpy(sim, words, sizeof sim);
-    w->sim = w->board;
+    w->sim = w->belief;
     act[me] = action;
     pom_tick(k, g, &w->sim, sim, act);
     uint32_t alive = sim[PW_ALIVE];
@@ -1106,7 +1062,7 @@ static inline __attribute__((always_inline)) int32_t pom_score(const pommermanKn
             score += trapped ? 10000000 : 0;
         } else score -= trapped ? 10000000 : 0;
     }
-    score += ((w->board.item[POM_EXTRA] | w->board.item[POM_RANGE] | w->board.item[POM_KICK]) & here) ? 1000000 : 0;
+    score += ((w->belief.item[POM_EXTRA] | w->belief.item[POM_RANGE] | w->belief.item[POM_KICK]) & here) ? 1000000 : 0;
     pomBits aim[POM_AIMS] = { b->item[0] | b->item[1] | b->item[2], 0, 0 };
     for (pomBits m = rivals; m; m &= m - 1u) {
         uint32_t at = pom_low(m);
@@ -1122,21 +1078,19 @@ static inline __attribute__((always_inline)) int32_t pom_score(const pommermanKn
     return score;
 }
 
-static inline __attribute__((always_inline)) uint32_t pom_decide(const pommermanKnobs *k, const pomGeo *g, pomWorld *w, const uint32_t *words, uint32_t seed) {
+static inline __attribute__((always_inline)) uint32_t pom_decide(const pommermanKnobs *k, const pomGeo *g, pomWorld *w, const uint32_t *words) {
     uint32_t me = words[PW_SEAT], side = k->side;
-    if (!(words[PW_ALIVE] >> me & 1u)) return POM_STOP;
-    if (words[PW_PHASE] + 1u < k->phases) return POM_STOP;
-    uint32_t act[POM_SEATS], cell = words[PW_CELL + me], choice = POM_STOP;
-    pom_think(k, g, w, words, seed, words[PW_PHASE]);
-    memcpy(act, w->plan, sizeof act);
+    uint32_t known[PW_WORDS], act[POM_SEATS] = { POM_STOP, POM_STOP, POM_STOP, POM_STOP }, cell = words[PW_CELL + me], choice = POM_STOP;
+    pom_believe(k, g, w, words, known);
+    const pomBoard *b = &w->belief;
     int32_t best = INT32_MIN;
     for (uint32_t a = POM_STOP; a < POM_ACTIONS; a++) {
-        if (a == POM_BOMB && (!words[PW_AMMO + me] || (w->board.bomb & pom_bit(cell)))) continue;
+        if (a == POM_BOMB && (!words[PW_AMMO + me] || (b->bomb & pom_bit(cell)))) continue;
         if (a >= POM_UP && a <= POM_RIGHT) {
             uint32_t t = pom_step(side, cell, a);
-            if (t == POM_NONE || ((w->board.rigid | w->board.wood) & pom_bit(t)) || ((w->board.bomb & pom_bit(t)) && !words[PW_KICK + me])) continue;
+            if (t == POM_NONE || ((b->rigid | b->wood) & pom_bit(t)) || ((b->bomb & pom_bit(t)) && !words[PW_KICK + me])) continue;
         }
-        int32_t score = pom_score(k, g, w, words, act, a);
+        int32_t score = pom_score(k, g, w, known, act, a);
         if (score > best) {
             best = score;
             choice = a;
@@ -1145,20 +1099,20 @@ static inline __attribute__((always_inline)) uint32_t pom_decide(const pommerman
     return choice;
 }
 
-static inline __attribute__((always_inline)) uint32_t pom_consult(const pommermanKnobs *k, pomWorld *w, const uint32_t *words, uint32_t seed) {
+static inline __attribute__((always_inline)) uint32_t pom_consult(const pommermanKnobs *k, pomWorld *w, const uint32_t *words) {
     const pomGeo g = pom_geo(k->side);
-    return pom_decide(k, &g, w, words, seed);
+    return pom_decide(k, &g, w, words);
 }
 
 void pommerman_oracle(uint32_t instance, uint32_t seed, uint32_t step, const uint32_t *words, uint32_t *extra, const float *obs, float *ctrl, const float *shared) {
-    (void)step; (void)obs; (void)shared;
+    (void)seed; (void)step; (void)obs; (void)shared;
     pomWorld *w = pom_world(extra);
     switch (instance) {
-        case 0u: ctrl[0] = (float)pom_consult(&POMMERMAN_KNOBS[0], w, words, seed); return;
-        case 1u: ctrl[0] = (float)pom_consult(&POMMERMAN_KNOBS[1], w, words, seed); return;
-        case 2u: ctrl[0] = (float)pom_consult(&POMMERMAN_KNOBS[2], w, words, seed); return;
-        case 3u: ctrl[0] = (float)pom_consult(&POMMERMAN_KNOBS[3], w, words, seed); return;
-        default: ctrl[0] = (float)pom_consult(&POMMERMAN_KNOBS[4], w, words, seed); return;
+        case 0u: ctrl[0] = (float)pom_consult(&POMMERMAN_KNOBS[0], w, words); return;
+        case 1u: ctrl[0] = (float)pom_consult(&POMMERMAN_KNOBS[1], w, words); return;
+        case 2u: ctrl[0] = (float)pom_consult(&POMMERMAN_KNOBS[2], w, words); return;
+        case 3u: ctrl[0] = (float)pom_consult(&POMMERMAN_KNOBS[3], w, words); return;
+        default: ctrl[0] = (float)pom_consult(&POMMERMAN_KNOBS[4], w, words); return;
     }
 }
 

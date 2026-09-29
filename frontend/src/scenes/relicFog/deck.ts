@@ -1,5 +1,5 @@
 import * as THREE from 'three/webgpu';
-import { Fn, abs, atan, clamp, dot, float, floor, fract, fwidth, max, min, mix, mod, normalize, positionWorld, select, sin, texture, uniform, uvec2, vec2, vec3, vec4 } from 'three/tsl';
+import { Fn, abs, clamp, dot, float, floor, fwidth, max, min, mix, mod, normalize, positionWorld, select, sin, texture, uniform, uvec2, vec2, vec3, vec4 } from 'three/tsl';
 import { rgb, sdBox, sdCircle, sdSegment } from '@kit/shapes2d';
 import { MATCHES, MATCH_STEPS, MAX_ENERGY, UNITS } from '@sim/envs/relicfog';
 import { hull, triangle } from './fleet';
@@ -28,7 +28,6 @@ export interface Deck {
   cursor: Level;
   mode: Level;
   key: Level;
-  wait: Level;
   verdict: Level;
   time: Level;
   dispose(): void;
@@ -52,7 +51,7 @@ export function deckMaterial(set: Glyphs, accent: number, foe: number, origin: T
   rows.needsUpdate = true;
   const table = texture(rows);
   const ours = uniform(0), theirs = uniform(0), ourWins = uniform(0), theirWins = uniform(0), clock = uniform(0);
-  const cursor = uniform(-1), mode = uniform(0), key = uniform(-1), wait = uniform(0), verdict = uniform(0), time = uniform(0);
+  const cursor = uniform(-1), mode = uniform(0), key = uniform(-1), verdict = uniform(0), time = uniform(0);
   const hue = rgb(accent), rival = rgb(foe);
 
   const p = vec2(positionWorld.x.sub(origin.x), positionWorld.z.sub(origin.y));
@@ -137,19 +136,15 @@ export function deckMaterial(set: Glyphs, accent: number, foe: number, origin: T
     keys.forEach(([x, y], k) => {
       const local = p.sub(vec2(x, y)), wide = k === 5 ? 0.95 : 0.44, shape = sdBox(local, vec2(wide, 0.44), 0.14);
       const hot = when(abs(key.sub(k)).lessThan(0.5)), armed = when(mode.greaterThan(1.5)).mul(k === 5 ? 1 : 0);
-      const lit = max(hot, armed.mul(0.55)), dim = wait.mul(0.55).oneMinus();
+      const lit = max(hot, armed.mul(0.55));
       outline(shape, 0.04);
       paint(shape, mix(rgb(0x20254a), hue.mul(0.85), lit));
       paint(sdBox(local.sub(vec2(0, -0.34)), vec2(wide - 0.1, 0.05), 0.04), rgb(0x0b0d1a), lit.oneMinus().mul(0.5));
-      const ink = mix(rgb(0xb6bde0).mul(dim), vec3(1.2, 1.15, 1.25), lit);
+      const ink = mix(rgb(0xb6bde0), vec3(1.2, 1.15, 1.25), lit);
       if (k === 0) paint(abs(sdCircle(local, 0.15)).sub(0.04), ink);
       else if (k < 5) paint(arrowShape(flip(local), arrows[k - 1]!, 0.5), ink);
       else paint(min(abs(sdCircle(local, 0.2)).sub(0.035), min(sdBox(local, vec2(0.34, 0.03)), sdBox(local, vec2(0.03, 0.34)))), ink);
     });
-    const ringAt = flip(p.sub(vec2(4.95, middle + 1.0))), turn = fract(float(1.25).sub(atan(ringAt.y, ringAt.x).div(2 * Math.PI)));
-    const dial = abs(ringAt.length().sub(0.26)).sub(0.045);
-    paint(dial, rgb(0x20254a), when(wait.greaterThan(0)));
-    paint(dial, rgb(0xd8dcff), when(wait.greaterThan(0).and(turn.lessThan(wait))));
     return vec4(color, clamp(alpha, 0, 1));
   })();
 
@@ -161,7 +156,7 @@ export function deckMaterial(set: Glyphs, accent: number, foe: number, origin: T
   mesh.renderOrder = 12;
   mesh.frustumCulled = false;
   return {
-    mesh, rows, ours, theirs, ourWins, theirWins, clock, cursor, mode, key, wait, verdict, time,
+    mesh, rows, ours, theirs, ourWins, theirWins, clock, cursor, mode, key, verdict, time,
     dispose() {
       rows.dispose();
       mesh.geometry.dispose();

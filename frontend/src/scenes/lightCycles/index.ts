@@ -12,13 +12,13 @@ import { TOKENS } from '@kit/tokens';
 import type { FrameUpdate, LegendSpec, SceneContext, SceneFactory, ScenePost } from '@kit/types';
 import { countEvents, lastEvent } from '@sim/events';
 import {
-  LC_AGENT, LC_AGENT_X, LC_AGENT_Y, LC_DRAWN, LC_EMPTY, LC_LOST, LC_RIVAL, LC_THINKING, LC_WON,
-  lcAction, lcFacing, lcGame, lcHead, lcOwner, lcResult, lcTarget, lcThink, lcTick,
+  LC_AGENT, LC_AGENT_X, LC_AGENT_Y, LC_DRAWN, LC_EMPTY, LC_LOST, LC_RIVAL, LC_WON,
+  lcAction, lcFacing, lcGame, lcHead, lcOwner, lcResult, lcTarget, lcTick,
 } from '@sim/envs/lightcycles';
 import type { EnvFrame, GridCell } from '@sim/types';
 import { parameter } from '../../data/envs';
 import { formatCount, formatSigned } from '../../format';
-import { arenaMaterial, CYCLE, cycleMaterial, DIAL, dialMaterial, flat, NOSE, PAD, RIM, SHARD, shardMaterial, Strips, WALL, wallMaterial, type Dial, type Level, type Palette } from './look';
+import { arenaMaterial, CYCLE, cycleMaterial, flat, NOSE, PAD, RIM, SHARD, shardMaterial, Strips, WALL, wallMaterial, type Level, type Palette } from './look';
 
 const RIVAL = 0xff7a2f;
 const GOLD = TOKENS.celebrationGold;
@@ -65,8 +65,6 @@ class LightCyclesScene extends Stage2DScene {
   private spans: THREE.InstancedBufferAttribute | null = null;
   private riders: Batch | null = null;
   private shards: Batch | null = null;
-  private dial: Dial | null = null;
-  private dialMesh: THREE.Mesh | null = null;
   private trails: [Strips, Strips] | null = null;
   private trailGlows: Glow[] = [];
   private cycleGlows: Glow[] = [];
@@ -87,15 +85,14 @@ class LightCyclesScene extends Stage2DScene {
   private readonly spot = new THREE.Vector3();
   private readonly tip = new THREE.Vector3();
   private readonly cell = new THREE.Vector3();
-  private readonly rivalAt = new THREE.Vector3();
-  private readonly ledger = { x: 0, y: 0, facing: 'east', think: 0, action: '—', clear: '—', reward: 0, result: 0, game: 0, tick: 0, step: 0 };
+  private readonly ledger = { x: 0, y: 0, facing: 'east', action: '—', clear: '—', reward: 0, result: 0, game: 0, tick: 0, step: 0 };
 
   private legendFor(): LegendSpec {
     return {
       title: 'LIGHT CYCLES',
       rows: [
         { key: 'agent', label: 'agent', tint: this.palette.agent, value: () => `column ${this.ledger.x + 1} · row ${this.ledger.y + 1} · ${this.ledger.facing}` },
-        { key: 'rival', label: 'rival', tint: RIVAL, value: () => (this.ledger.think > 0 ? `${this.bot} · thinking ${formatCount(this.ledger.think)}` : this.bot) },
+        { key: 'rival', label: 'rival', tint: RIVAL, value: () => this.bot },
         { key: 'action', label: 'action', tint: 0xdcf4ff, value: () => this.ledger.action },
         { key: 'clear', label: 'clear', tint: TOKENS.uiCyan, value: () => this.ledger.clear },
         { key: 'reward', label: 'reward', tint: GOLD, value: () => signed(this.ledger.reward) },
@@ -183,13 +180,6 @@ class LightCyclesScene extends Stage2DScene {
       this.centre(target.x, target.y, this.at);
       targets.set(this.at.x, 0.07, this.at.z, 0.16, owner === LC_AGENT ? TOKENS.uiCyan : RIVAL);
     }
-    const think = lcThink(words), gauge = kit.curve('think', 2, RIVAL);
-    if (think > 0) {
-      const rival = lcHead(words, LC_RIVAL);
-      this.centre(rival.x, rival.y, this.at);
-      gauge.point(this.at.x - 0.45, 0.07, this.at.z + 0.45);
-      gauge.point(this.at.x - 0.45 + 0.1 * think, 0.07, this.at.z + 0.45);
-    }
   }
 
   private centre(x: number, y: number, out: THREE.Vector3): THREE.Vector3 {
@@ -231,14 +221,6 @@ class LightCyclesScene extends Stage2DScene {
     this.walls = make(wallGeometry, 'aWall', wallMaterial(palette, this.time), runs, 2);
     this.shards = make(flat(SHARD, SHARD), 'aShard', shardMaterial(palette), 2 * SHARDS, 5);
     this.riders = make(flat(CYCLE, CYCLE), 'aRider', cycleMaterial(palette, light.lit), RIDERS, 4);
-
-    const dial = dialMaterial(RIVAL);
-    this.dial = dial;
-    this.dialMesh = new THREE.Mesh(flat(DIAL, DIAL), dial.material);
-    this.dialMesh.renderOrder = 6;
-    this.dialMesh.visible = false;
-    this.scene.add(this.dialMesh);
-    this.disposables.push(this.dialMesh.geometry, dial.material);
 
     const glow = (geometry: THREE.BufferGeometry, color: number): Glow => {
       const level = uniform(0), mesh = light.emitter(geometry, rgb(color).mul(level));
@@ -289,9 +271,8 @@ class LightCyclesScene extends Stage2DScene {
     walls.used = riders.used = shards.used = 0;
     for (const strips of trails) strips.begin();
 
-    const chain = this.chainOf(frame, t, now.words), tick = lcTick(now.words), think = lcThink(now.words);
-    const moving = ahead !== null && think === 0 ? ahead : null;
-    const crash = moving?.done ? this.crashAt(frame, t + 1) : null;
+    const chain = this.chainOf(frame, t, now.words), tick = lcTick(now.words);
+    const crash = ahead?.done ? this.crashAt(frame, t + 1) : null;
     const spawn = chain.start >= 0 ? clamp01((time - chain.start / hz) / SPAWN_LIFE) : 1;
     const recent = crash ?? this.recentCrash(frame, t, hz);
     let ghost = 0;
@@ -323,15 +304,14 @@ class LightCyclesScene extends Stage2DScene {
         tip = this.tip.set(this.spot.x + mover.dx * u, 0, this.spot.z + mover.dy * u);
         angle = turn(rest, angleOf(mover.dx, mover.dy), smoothstep01(a / 0.3));
         if (mover.crashed && a >= mover.stop) alpha = 0;
-      } else if (moving) {
-        const next = lcHead(moving.words, owner), dx = next.x - head.x, dy = next.y - head.y;
+      } else if (ahead) {
+        const next = lcHead(ahead.words, owner), dx = next.x - head.x, dy = next.y - head.y;
         if (Math.abs(dx) + Math.abs(dy) !== 1) throw new Error(`LightCycles step ${t + 1} moves a cycle from (${head.x}, ${head.y}) to (${next.x}, ${next.y})`);
         tip = this.tip.set(this.spot.x + dx * a, 0, this.spot.z + dy * a);
         angle = turn(rest, angleOf(dx, dy), smoothstep01(a / 0.3));
       }
       this.lay(chain, owner, tick, now.words, tip, 0, trails[k]!);
       const shown = tip ?? this.spot;
-      if (owner === LC_RIVAL) this.rivalAt.copy(shown);
       this.ride(shown, angle, owner, alpha, spawn, spawn < 1 ? (1 - spawn) ** 2 : 0);
       const lamp = this.cycleGlows[k]!;
       lamp.mesh.position.set(shown.x, 0, shown.z);
@@ -343,7 +323,6 @@ class LightCyclesScene extends Stage2DScene {
     this.ghostLevel.value = ghost;
     this.trailGlows.forEach((glow, i) => { glow.mesh.visible = trails[i]!.count > 0; });
 
-    this.think(think, ahead ? lcThink(ahead.words) : think, a);
     for (const batch of [walls, riders, shards]) {
       batch.mesh.count = batch.used;
       batch.mesh.visible = batch.used > 0;
@@ -353,21 +332,6 @@ class LightCyclesScene extends Stage2DScene {
     this.spans!.needsUpdate = true;
     for (const strips of trails) strips.commit();
     this.account(frame, now, t);
-  }
-
-  private think(think: number, next: number, a: number): void {
-    const dial = this.dial!, mesh = this.dialMesh!;
-    mesh.position.copy(this.rivalAt).setY(0);
-    if (think > 0) {
-      dial.progress.value = think + a;
-      dial.lock.value = next === 0 ? smoothstep01(a / 0.4) * (1 - smoothstep01((a - 0.4) / 0.6)) : 0;
-      dial.alpha.value = next === 0 ? 1 - smoothstep01((a - 0.55) / 0.45) : 1;
-    } else if (next > 0) {
-      dial.progress.value = a;
-      dial.lock.value = 0;
-      dial.alpha.value = smoothstep01((a - 0.3) / 0.7);
-    } else dial.alpha.value = 0;
-    mesh.visible = dial.alpha.value > 0.001;
   }
 
   private chainOf(frame: FrameUpdate, t: number, words: ArrayLike<number>): Chain {
@@ -597,15 +561,13 @@ class LightCyclesScene extends Stage2DScene {
     ledger.x = agent.x;
     ledger.y = agent.y;
     ledger.facing = compass(facing.x, facing.y);
-    ledger.think = lcThink(words);
     ledger.reward = now.reward;
     ledger.result = lcResult(words);
     ledger.game = lcGame(words);
     ledger.tick = lcTick(words);
     ledger.clear = `ahead ${Math.round(obs[0]! * this.reach)} · left ${Math.round(obs[1]! * this.reach)} · right ${Math.round(obs[2]! * this.reach)}`;
     const before = t > 0 ? frame.frameAt(t - 1) : null;
-    ledger.action = !before || before.step !== t - 1 ? '—' : lcThink(before.words) > 0 ? 'ignored · rival thinking' : TURNS[lcAction(now.actions)]!;
-    if (obs[LC_THINKING]! !== (ledger.think > 0 ? 1 : 0)) throw new Error(`LightCycles step ${t} observes thinking ${obs[LC_THINKING]} while the rival has thought ${ledger.think} steps`);
+    ledger.action = !before || before.step !== t - 1 ? '—' : TURNS[lcAction(now.actions)]!;
   }
 }
 

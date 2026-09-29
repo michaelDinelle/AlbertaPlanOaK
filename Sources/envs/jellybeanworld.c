@@ -156,6 +156,11 @@ typedef struct {
 } jbwBlock;
 
 typedef struct {
+    uint64_t solid[JBW_TORUS], jelly[JBW_TORUS], onion[JBW_TORUS];
+    float onions, jellies, jellyWorth;
+} jbwMemory;
+
+typedef struct {
     float4 scent, share[9];
     jbwBlock blocks[16];
     float near[16], energy[JBW_CODES];
@@ -163,7 +168,8 @@ typedef struct {
     int bx[16], by[16];
     int x, y;
     uint32_t step, live;
-    uint64_t solid[JBW_TORUS], jelly[JBW_TORUS], onion[JBW_TORUS];
+    float taste;
+    jbwMemory memory;
     uint8_t map[JBW_TORUS * JBW_TORUS];
 } jbwWindow;
 
@@ -201,15 +207,6 @@ static uint32_t jbw_age(uint32_t stamp, uint32_t step) { return step - (stamp - 
 static int jbw_live(uint32_t stamp, uint32_t step, uint32_t settle) { return stamp != 0u && jbw_age(stamp, step) <= settle; }
 static uint32_t jbw_recent(uint32_t stamp, uint32_t other, uint32_t step) { return other != 0u && (stamp == 0u || jbw_age(other, step) < jbw_age(stamp, step)) ? other : stamp; }
 
-static void jbw_mark(jbwWindow *w, int x, int y, uint32_t code) {
-    uint32_t row = (uint32_t)y & (JBW_TORUS - 1u);
-    uint64_t bit = 1ull << ((uint32_t)x & (JBW_TORUS - 1u));
-    w->map[jbw_cell(x, y)] = (uint8_t)code;
-    w->solid[row] = jbw_blocks(code & 7u) ? w->solid[row] | bit : w->solid[row] & ~bit;
-    w->jelly[row] = (code & 15u) == JBW_JELLY ? w->jelly[row] | bit : w->jelly[row] & ~bit;
-    w->onion[row] = (code & 15u) == JBW_ONION ? w->onion[row] | bit : w->onion[row] & ~bit;
-}
-
 static void jbw_load(jbwWindow *w, uint32_t seed, uint32_t step, const uint32_t *history, uint32_t historyMask, int bx, int by) {
     uint32_t t = jbw_torus(bx, by), latest = 0u;
     jbwBlock *b = &w->blocks[t];
@@ -220,16 +217,7 @@ static void jbw_load(jbwWindow *w, uint32_t seed, uint32_t step, const uint32_t 
     w->by[t] = by;
     for (int row = 0; row < 16; row++) {
         uint8_t *line = w->map + jbw_cell(bx * 16, by * 16 + row);
-        uint32_t r = (uint32_t)(by * 16 + row) & (JBW_TORUS - 1u), shift = (uint32_t)(bx * 16) & (JBW_TORUS - 1u);
-        uint64_t hits = 0u;
-        for (int col = 0; col < 16; col++) {
-            int hit = jbw_wallHit(wall, bx, by, bx * 16 + col, by * 16 + row);
-            line[col] = hit ? (uint8_t)JBW_WALL : (uint8_t)JBW_EMPTY;
-            hits |= (uint64_t)hit << col;
-        }
-        w->solid[r] = (w->solid[r] & ~(0xFFFFull << shift)) | hits << shift;
-        w->jelly[r] &= ~(0xFFFFull << shift);
-        w->onion[r] &= ~(0xFFFFull << shift);
+        for (int col = 0; col < 16; col++) line[col] = jbw_wallHit(wall, bx, by, bx * 16 + col, by * 16 + row) ? (uint8_t)JBW_WALL : (uint8_t)JBW_EMPTY;
     }
     for (uint32_t slot = 0u; slot < JBW_BLOCK_ITEMS; slot++) {
         int px, py;
@@ -249,7 +237,7 @@ static void jbw_load(jbwWindow *w, uint32_t seed, uint32_t step, const uint32_t 
         b->x[slot] = px;
         b->y[slot] = py;
         latest = jbw_recent(latest, b->stamp[slot], step);
-        if (kind != JBW_EMPTY) jbw_mark(w, px, py, kind | (b->stamp[slot] != 0u ? JBW_GONE : 0u) | slot << 4u);
+        if (kind != JBW_EMPTY) w->map[jbw_cell(px, py)] = (uint8_t)(kind | (b->stamp[slot] != 0u ? JBW_GONE : 0u) | slot << 4u);
     }
     w->latest[t] = latest;
 }
@@ -282,7 +270,7 @@ static void jbw_gone(jbwWindow *w, int x, int y, uint32_t stamp) {
     uint32_t t = jbw_torus(x >> 4, y >> 4), code = w->map[jbw_cell(x, y)];
     w->blocks[t].stamp[code >> 4u] = stamp;
     w->latest[t] = stamp;
-    jbw_mark(w, x, y, code | JBW_GONE);
+    w->map[jbw_cell(x, y)] = (uint8_t)(code | JBW_GONE);
 }
 
 static float4 jbw_sum(const jbwBlock *b, float v0, float v1, float v2, float v3) {
@@ -461,6 +449,11 @@ static __attribute__((noinline)) float jbw_ripened(uint32_t instance, uint32_t s
     return jbw_show(w, words, scent, obs);
 }
 
+static float jbw_polarity(uint32_t step) {
+    step += 100000u / 2u;
+    return (step / 100000u & 1u) == 0u ? 1.0f : -1.0f;
+}
+
 static __attribute__((noinline)) float jbw_arrive(uint32_t instance, uint32_t seed, uint32_t step, const float *ctrl, uint32_t *words, uint32_t *extra, float *obs, uint32_t *done, const float *shared) {
     jbwWindow *w = jbw_window(extra);
     uint32_t *history = extra + 4u + JBW_WINDOW_WORDS;
@@ -479,10 +472,11 @@ static __attribute__((noinline)) float jbw_arrive(uint32_t instance, uint32_t se
     jbw_move(w, seed, step, history, historyMask, px, py);
     float reward = 0.0f;
     if ((uint32_t)ctrl[0] == 0u && stamped) {
-        float sign = (step / 100000u & 1u) == 0u ? 1.0f : -1.0f;
+        float sign = jbw_polarity(step);
         if (item == JBW_JELLY) reward = sign;
         else if (item == JBW_ONION) reward = -sign;
     }
+    w->taste = reward;
     jbw_fresh(instance, seed, step, ctrl, words, extra, obs, done, shared);
     return reward;
 }
@@ -595,22 +589,58 @@ static int jbw_seek(const uint32_t *open, const uint32_t *goal) {
     }
 }
 
+static uint32_t jbw_sight(float energy) {
+    uint32_t item = JBW_EMPTY;
+    for (uint32_t kind = JBW_BANANA; kind <= JBW_TRUFFLE; kind++) item = energy == jbw_energy(kind) ? kind : item;
+    return item;
+}
+
+static void jbw_forget(jbwMemory *m, int x, int y) {
+    uint32_t row = (uint32_t)(y + JBW_TORUS / 2) & (JBW_TORUS - 1u);
+    uint64_t keep = ~(1ull << ((uint32_t)(x + JBW_TORUS / 2) & (JBW_TORUS - 1u)));
+    m->solid[row] = m->jelly[row] = m->onion[row] = 0u;
+    for (uint32_t r = 0u; r < JBW_TORUS; r++) {
+        m->solid[r] &= keep;
+        m->jelly[r] &= keep;
+        m->onion[r] &= keep;
+    }
+}
+
+static void jbw_remember(jbwMemory *m, int x, int y, uint32_t item) {
+    uint32_t row = (uint32_t)y & (JBW_TORUS - 1u);
+    uint64_t bit = 1ull << ((uint32_t)x & (JBW_TORUS - 1u));
+    m->solid[row] = jbw_blocks(item) ? m->solid[row] | bit : m->solid[row] & ~bit;
+    m->jelly[row] = item == JBW_JELLY ? m->jelly[row] | bit : m->jelly[row] & ~bit;
+    m->onion[row] = item == JBW_ONION ? m->onion[row] | bit : m->onion[row] & ~bit;
+}
+
+static void jbw_learn(jbwMemory *m, const float *obs, float taste) {
+    float worth = obs[14] != m->jellies ? taste : obs[13] != m->onions ? -taste : 0.0f;
+    m->jellyWorth = worth != 0.0f ? worth : m->jellyWorth;
+    m->onions = obs[13];
+    m->jellies = obs[14];
+}
+
 void jbw_oracle(uint32_t instance, uint32_t seed, uint32_t step, const uint32_t *words, uint32_t *extra, const float *obs, float *ctrl, const float *shared) {
     (void)shared;
     (void)instance;
-    (void)obs;
-    const jbwWindow *w = jbw_view(extra);
+    jbwWindow *w = jbw_window(extra);
+    jbwMemory *m = &w->memory;
     int x = (int)words[0], y = (int)words[1];
-    if (step != w->step || x != w->x || y != w->y) __builtin_trap();
     uint32_t heading = words[2] & 3u;
-    uint32_t good = (((step + 1u) / 100000u) & 1u) == 0u ? JBW_JELLY : JBW_ONION;
-    const uint64_t *want = good == JBW_JELLY ? w->jelly : w->onion, *avoid = good == JBW_JELLY ? w->onion : w->jelly;
+    jbw_forget(m, x, y);
+    for (uint32_t i = 0u; i < 8u; i++) {
+        const int *d = JBW_DIRECTIONS[(2u * heading + i) & 7u];
+        jbw_remember(m, x + d[0], y + d[1], jbw_sight(obs[i]));
+    }
+    jbw_learn(m, obs, w->taste);
+    const uint64_t *want = m->jellyWorth < 0.0f ? m->onion : m->jelly, *avoid = m->jellyWorth < 0.0f ? m->jelly : m->onion;
     enum { SIDE = 2 * JBW_ORACLE_REACH + 1 };
     uint32_t open[SIDE], goal[SIDE], any = 0u, shift = (uint32_t)(x - JBW_ORACLE_REACH) & (JBW_TORUS - 1u);
     for (int r = 0; r < SIDE; r++) {
         uint32_t row = (uint32_t)(y - JBW_ORACLE_REACH + r) & (JBW_TORUS - 1u);
         goal[r] = (uint32_t)jbw_rotate(want[row], shift) & ((1u << SIDE) - 1u);
-        open[r] = ~(uint32_t)jbw_rotate(w->solid[row] | want[row] | avoid[row], shift) & ((1u << SIDE) - 1u);
+        open[r] = ~(uint32_t)jbw_rotate(m->solid[row] | want[row] | avoid[row], shift) & ((1u << SIDE) - 1u);
         any |= goal[r];
     }
     int found = any != 0u ? jbw_seek(open, goal) : -1;
@@ -621,8 +651,8 @@ void jbw_oracle(uint32_t instance, uint32_t seed, uint32_t step, const uint32_t 
         uint32_t right = (heading + 1u) & 3u, left = (heading + 3u) & 3u;
         u4 wander = philox4x32(seed, ENV_RNG_STREAM, step, 0xa11u, 0u, 0u);
         if ((wander.x & 15u) == 0u) move = (wander.y & 1u) ? right : left;
-        else if (!jbw_blocks(w->map[jbw_cell(x + JBW_FORWARD[heading][0], y + JBW_FORWARD[heading][1])] & 7u)) move = heading;
-        else if (!jbw_blocks(w->map[jbw_cell(x + JBW_FORWARD[right][0], y + JBW_FORWARD[right][1])] & 7u)) move = right;
+        else if (open[JBW_ORACLE_REACH + JBW_FORWARD[heading][1]] >> (JBW_ORACLE_REACH + JBW_FORWARD[heading][0]) & 1u) move = heading;
+        else if (open[JBW_ORACLE_REACH + JBW_FORWARD[right][1]] >> (JBW_ORACLE_REACH + JBW_FORWARD[right][0]) & 1u) move = right;
         else move = left;
     }
     ctrl[0] = move == heading ? 0.0f : move == ((heading + 1u) & 3u) ? 2.0f : 1.0f;

@@ -59,7 +59,7 @@ typedef struct {
     uint8_t spare[3];
 } minatarBreakout;
 
-enum { BREAKOUT_WALL = 0x3FFFFFFF };
+enum { BREAKOUT_WALL = 0x3FFFFFFF, BREAKOUT_BRICKS = 30 };
 
 static void breakout_start(minatarBreakout *s, uint32_t right) {
     s->bricks = BREAKOUT_WALL;
@@ -79,15 +79,7 @@ static void breakout_obs(const minatarBreakout *s, float *obs) {
     obs[2] = (float)s->y * MINATAR_NINTH;
     obs[3] = (float)s->trailX * MINATAR_NINTH;
     obs[4] = (float)s->trailY * MINATAR_NINTH;
-    uint32_t b = s->bricks;
-    uint16x8_t lanes = { 1u, 2u, 4u, 8u, 16u, 32u, 64u, 128u }, one = vdupq_n_u16(1u);
-    uint16x8_t low = vandq_u16(vtstq_u16(vdupq_n_u16((uint16_t)b), lanes), one);
-    uint16x8_t mid = vandq_u16(vtstq_u16(vdupq_n_u16((uint16_t)(b >> 10)), lanes), vdupq_n_u16(2u));
-    uint16x8_t high = vandq_u16(vtstq_u16(vdupq_n_u16((uint16_t)(b >> 20)), lanes), vdupq_n_u16(4u));
-    uint16x8_t code = vorrq_u16(vorrq_u16(low, mid), high);
-    vst1q_f32(obs + 5, vmulq_n_f32(vcvtq_f32_u32(vmovl_u16(vget_low_u16(code))), 1.0f / 7.0f));
-    vst1q_f32(obs + 9, vmulq_n_f32(vcvtq_f32_u32(vmovl_high_u16(code)), 1.0f / 7.0f));
-    for (uint32_t x = 8u; x < 10u; x++) obs[5u + x] = (float)((b >> x & 1u) | (b >> (x + 9u) & 2u) | (b >> (x + 18u) & 4u)) * (1.0f / 7.0f);
+    for (uint32_t k = 0u; k < BREAKOUT_BRICKS; k++) obs[5u + k] = (float)(s->bricks >> k & 1u);
 }
 
 static float breakout_fly(minatarBreakout *s) {
@@ -176,17 +168,20 @@ static void invaders_obs(const minatarInvaders *s, float *obs) {
     obs[0] = (float)s->cannon * MINATAR_NINTH;
     obs[1] = (float)left * MINATAR_NINTH;
     obs[2] = (float)top * MINATAR_NINTH;
-    obs[3] = (float)s->right;
-    for (uint32_t r = 0u; r < 4u; r++) obs[4u + r] = top + r < 10u ? (float)(((uint32_t)(aliens >> (10u * (top + r))) & 0x3FFu) >> left & 0x3Fu) * (1.0f / 63.0f) : 0.0f;
+    obs[3] = s->right ? 1.0f : -1.0f;
+    for (uint32_t r = 0u; r < 4u; r++) {
+        uint32_t row = top + r < 10u ? (uint32_t)(aliens >> (10u * (top + r))) & 0x3FFu : 0u;
+        for (uint32_t c = 0u; c < 6u; c++) obs[4u + 6u * r + c] = (float)(row >> left >> c & 1u);
+    }
     for (uint32_t b = 0u; b < 2u; b++) {
         uint32_t at = shots ? invaders_lowest(shots) : 0u;
-        obs[8u + 2u * b] = shots ? (float)(at % 10u) * MINATAR_NINTH : -1.0f;
-        obs[9u + 2u * b] = shots ? (float)(at / 10u) * MINATAR_NINTH : -1.0f;
+        obs[28u + 2u * b] = shots ? (float)(at % 10u) * MINATAR_NINTH : -1.0f;
+        obs[29u + 2u * b] = shots ? (float)(at / 10u) * MINATAR_NINTH : -1.0f;
         shots &= shots - 1u;
     }
     uint32_t at = bombs ? invaders_lowest(bombs) : 0u;
-    obs[12] = bombs ? (float)(at % 10u) * MINATAR_NINTH : -1.0f;
-    obs[13] = bombs ? (float)(at / 10u) * MINATAR_NINTH : -1.0f;
+    obs[32] = bombs ? (float)(at % 10u) * MINATAR_NINTH : -1.0f;
+    obs[33] = bombs ? (float)(at / 10u) * MINATAR_NINTH : -1.0f;
 }
 
 static uint32_t invaders_nearest(uint32_t columns, uint32_t x) {
@@ -322,13 +317,12 @@ static void asterix_start(minatarAsterix *s) {
 static void asterix_obs(const minatarAsterix *s, float *obs) {
     obs[0] = (float)s->x * MINATAR_NINTH;
     obs[1] = (float)s->y * MINATAR_NINTH;
-    uint16x8_t row = vmovl_u8(vld1_u8(s->row));
-    for (uint32_t half = 0u; half < 2u; half++) {
-        uint32x4_t e = half ? vmovl_high_u16(row) : vmovl_u16(vget_low_u16(row));
-        float32x4_t kind = vbslq_f32(vtstq_u32(e, vdupq_n_u32(ASTERIX_GOLD)), vdupq_n_f32(1.0f), vdupq_n_f32(0.5f));
-        kind = vbslq_f32(vtstq_u32(e, vdupq_n_u32(ASTERIX_EAST)), kind, vnegq_f32(kind));
-        float32x4x2_t pair = { { vmulq_n_f32(vcvtq_f32_u32(vandq_u32(e, vdupq_n_u32(15u))), MINATAR_NINTH), vreinterpretq_f32_u32(vandq_u32(vreinterpretq_u32_f32(kind), vtstq_u32(e, e))) } };
-        vst2q_f32(obs + 2u + 8u * half, pair);
+    for (uint32_t r = 0u; r < 8u; r++) {
+        uint32_t e = s->row[r];
+        float *slot = obs + 2u + 3u * r;
+        slot[0] = e ? (float)(e & 15u) * MINATAR_NINTH : -1.0f;
+        slot[1] = e ? (e & ASTERIX_EAST ? 1.0f : -1.0f) : 0.0f;
+        slot[2] = e ? (e & ASTERIX_GOLD ? 1.0f : -1.0f) : 0.0f;
     }
 }
 
@@ -393,7 +387,10 @@ typedef struct {
     uint8_t moveSpeed, ramps, last, fish, subs, divers, shots, bombs;
 } minatarSeaquest;
 
-enum { SEA_X = 0x0F, SEA_Y = 0xF0, SEA_EAST = 0x100, SEA_MOVED = 0x200, SEA_TIMER_SHIFT = 12, SEA_VOLLEY_SHIFT = 16, SEA_OXYGEN = 200 };
+enum { SEA_X = 0x0F, SEA_Y = 0xF0, SEA_EAST = 0x100, SEA_MOVED = 0x200, SEA_ARMED = 0x400, SEA_TIMER_SHIFT = 12, SEA_VOLLEY_SHIFT = 16, SEA_OXYGEN = 200 };
+enum { SEA_ENEMY_SLOTS = 8, SEA_BOMB_SLOTS = 3, SEA_SHOT_SLOTS = 2, SEA_DIVER_SLOTS = MINATAR_DIVER_CAP };
+
+typedef struct { uint32_t cell[SEA_ENEMY_SLOTS], filled, slots, x, y; } seaNearest;
 
 static uint32_t sea_x(uint32_t e) { return e & SEA_X; }
 static uint32_t sea_y(uint32_t e) { return (e & SEA_Y) >> 4; }
@@ -421,33 +418,46 @@ static void sea_start(minatarSeaquest *s) {
     s->fish = s->subs = s->divers = s->shots = s->bombs = 0u;
 }
 
+static uint32_t sea_reach(uint32_t e, uint32_t x, uint32_t y) {
+    uint32_t ex = sea_x(e), ey = sea_y(e);
+    return (ex > x ? ex - x : x - ex) + (ey > y ? ey - y : y - ey);
+}
+
+static void sea_rank(seaNearest *n, const uint32_t *list, uint32_t count, uint32_t mark) {
+    for (uint32_t i = 0u; i < count; i++) {
+        uint32_t e = list[i] | mark, reach = sea_reach(e, n->x, n->y), at = n->filled;
+        n->filled += n->filled < n->slots;
+        for (; at > 0u && sea_reach(n->cell[at - 1u], n->x, n->y) > reach; at--)
+            if (at < n->slots) n->cell[at] = n->cell[at - 1u];
+        if (at < n->slots) n->cell[at] = e;
+    }
+}
+
+static float *sea_put(const seaNearest *n, uint32_t fields, float *obs) {
+    for (uint32_t i = 0u; i < n->slots; i++, obs += fields) {
+        uint32_t e = n->cell[i], here = i < n->filled;
+        obs[0] = here ? (float)sea_x(e) * MINATAR_NINTH : -1.0f;
+        obs[1] = here ? (float)sea_y(e) * MINATAR_NINTH : -1.0f;
+        obs[2] = here ? (e & SEA_EAST ? 1.0f : -1.0f) : 0.0f;
+        if (fields > 3u) obs[3] = here && (e & SEA_ARMED) ? 1.0f : 0.0f;
+    }
+    return obs;
+}
+
 static void sea_obs(const minatarSeaquest *s, const uint32_t *extra, float *obs) {
-    uint32_t low[12] = { 0u }, mid[12] = { 0u }, high[12] = { 0u };
-    const uint32_t *fish = extra + MINATAR_FISH, *subs = extra + MINATAR_SUBS, *divers = extra + MINATAR_DIVERS, *shots = extra + MINATAR_SHOTS, *bombs = extra + MINATAR_BOMBS;
-    for (uint32_t i = 0u; i < s->fish; i++) low[sea_y(fish[i])] |= 1u << sea_x(fish[i]);
-    for (uint32_t i = 0u; i < s->subs; i++) low[sea_y(subs[i])] |= 1u << (sea_x(subs[i]) + 10u);
-    for (uint32_t i = 0u; i < s->divers; i++) mid[sea_y(divers[i])] |= 1u << sea_x(divers[i]);
-    for (uint32_t i = 0u; i < s->shots; i++) high[sea_y(shots[i])] |= 1u << sea_x(shots[i]);
-    for (uint32_t i = 0u; i < s->bombs; i++) high[sea_y(bombs[i])] |= 1u << (sea_x(bombs[i]) + 10u);
-    const uint32_t *lists[3] = { fish, subs, divers };
-    const uint8_t counts[3] = { s->fish, s->subs, s->divers };
-    for (uint32_t l = 0u; l < 3u; l++)
-        for (uint32_t i = 0u; i < counts[l]; i++) {
-            uint32_t e = lists[l][i], back = sea_x(e) + (e & SEA_EAST ? 15u : 1u) & 15u;
-            if (e & SEA_MOVED && back < 10u) mid[sea_y(e)] |= 1u << (back + 10u);
-        }
-    int32_t oxygen = s->oxygen > 0 ? s->oxygen : 0, rescued = s->rescued > 0 ? s->rescued : 0;
+    seaNearest enemies = { .slots = SEA_ENEMY_SLOTS, .x = s->x, .y = s->y }, bombs = { .slots = SEA_BOMB_SLOTS, .x = s->x, .y = s->y };
+    seaNearest shots = { .slots = SEA_SHOT_SLOTS, .x = s->x, .y = s->y }, divers = { .slots = SEA_DIVER_SLOTS, .x = s->x, .y = s->y };
+    sea_rank(&enemies, extra + MINATAR_FISH, s->fish, 0u);
+    sea_rank(&enemies, extra + MINATAR_SUBS, s->subs, SEA_ARMED);
+    sea_rank(&bombs, extra + MINATAR_BOMBS, s->bombs, 0u);
+    sea_rank(&shots, extra + MINATAR_SHOTS, s->shots, 0u);
+    sea_rank(&divers, extra + MINATAR_DIVERS, s->divers, 0u);
     obs[0] = (float)s->x * MINATAR_NINTH;
     obs[1] = (float)s->y * MINATAR_NINTH;
-    obs[2] = (float)s->right;
-    obs[3] = (float)(oxygen * 10 / SEA_OXYGEN) * 0.1f;
-    obs[4] = (float)rescued * (1.0f / 6.0f);
-    for (uint32_t y = 1u; y < 9u; y += 4u) {
-        float32x4x3_t rows = { { vmulq_n_f32(vcvtq_f32_u32(vld1q_u32(low + y)), 0x1p-20f), vmulq_n_f32(vcvtq_f32_u32(vld1q_u32(mid + y)), 0x1p-20f),
-                                 vmulq_n_f32(vcvtq_f32_u32(vld1q_u32(high + y)), 0x1p-20f) } };
-        vst3q_f32(obs + 3u * y + 2u, rows);
-    }
-    obs[29] = (float)high[0] * 0x1p-10f;
+    obs[2] = s->right ? 1.0f : -1.0f;
+    obs[3] = (float)s->oxygen * (1.0f / SEA_OXYGEN);
+    obs[4] = (float)s->rescued * (1.0f / 6.0f);
+    sea_put(&divers, 3u, sea_put(&shots, 3u, sea_put(&bombs, 3u, sea_put(&enemies, 4u, obs + 5))));
 }
 
 static float sea_shoot(minatarSeaquest *s, uint32_t *extra, uint32_t x, uint32_t y) {
@@ -701,17 +711,9 @@ void minatar_observe(uint32_t instance, uint32_t seed, const uint32_t *words, co
     minatar_obs(MINATAR_KNOBS[instance].game, words, extra, obs);
 }
 
-static u4 minatar_future(uint32_t seed, uint32_t step) { return philox4x32(seed, ENV_RNG_STREAM, step, 0u, 0u, 0u); }
+enum { MINATAR_ORACLE_COUNTER = 1 };
 
-static uint32_t minatar_stuck(const minatarKnobs *k, uint32_t seed, uint32_t first, uint32_t n) {
-    uint32_t mask = 0u, bound = u01Bound(k->sticky);
-    for (uint32_t i = 0u; i < n && i < 32u; i += 4u) {
-        u44 r = philox4(seed, ENV_RNG_STREAM, first + i + (lane4){ 0u, 1u, 2u, 3u }, (lane4)0u, (lane4)0u, (lane4)0u);
-        lane4 hit = (lane4)(r.x < bound) & 1u;
-        mask |= (hit.x | hit.y << 1 | hit.z << 2 | hit.w << 3) << i;
-    }
-    return n < 32u ? mask & ((1u << n) - 1u) : mask;
-}
+static uint32_t minatar_coin(uint32_t seed, uint32_t step) { return philox4x32(seed, ENV_RNG_STREAM, step, 0u, MINATAR_ORACLE_COUNTER, 0u).x & 1u; }
 
 static uint32_t breakout_score(minatarBreakout sim) {
     uint32_t hits = 0u, first = 64u;
@@ -723,32 +725,23 @@ static uint32_t breakout_score(minatarBreakout sim) {
     return (64u - hits) << 6 | first;
 }
 
-static uint32_t breakout_plan(uint32_t goal, uint32_t stuck, uint32_t horizon, uint32_t paddle, uint32_t last, uint32_t *choice) {
-    uint32_t m[3] = { goal, goal, goal };
-    for (uint32_t j = horizon; j >= 2u; j--) {
-        uint32_t still = m[0], left = (m[1] << 1 | (m[1] & 1u)) & 0x3FFu, right = m[2] >> 1 | (m[2] & 0x200u);
-        if (j <= 32u && stuck >> (j - 1u) & 1u) {
-            m[0] = still;
-            m[1] = left;
-            m[2] = right;
-        } else m[0] = m[1] = m[2] = still | left | right;
-    }
+static uint32_t breakout_plan(uint32_t goal, uint32_t horizon, uint32_t paddle, uint32_t *choice) {
+    uint32_t m = goal;
+    for (uint32_t j = horizon; j >= 2u; j--) m |= (m << 1 & 0x3FFu) | m >> 1;
     uint32_t order[3] = { goal >> paddle & 1u ? 0u : (goal & ((1u << paddle) - 1u) ? 1u : 2u), 0u, 0u };
     order[1] = order[0] == 0u ? 1u : 0u;
     order[2] = 3u - order[0] - order[1];
     for (uint32_t i = 0u; i < 3u; i++) {
-        uint32_t e = stuck & 1u ? last : order[i];
-        uint32_t p = e == 1u ? (paddle ? paddle - 1u : 0u) : e == 2u ? (paddle < 9u ? paddle + 1u : 9u) : paddle;
-        if (m[e] >> p & 1u) {
+        uint32_t e = order[i], p = e == 1u ? (paddle ? paddle - 1u : 0u) : e == 2u ? (paddle < 9u ? paddle + 1u : 9u) : paddle;
+        if (m >> p & 1u) {
             *choice = e;
             return 1u;
         }
-        if (stuck & 1u) break;
     }
     return 0u;
 }
 
-static uint32_t breakout_oracle(const minatarKnobs *k, const minatarBreakout *s, uint32_t seed, uint32_t step) {
+static uint32_t breakout_oracle(const minatarBreakout *s, uint32_t seed, uint32_t step) {
     static const uint8_t CODE[3] = { MINATAR_NOOP, MINATAR_LEFT, MINATAR_RIGHT };
     minatarBreakout sim = *s;
     uint32_t horizon = 0u;
@@ -756,9 +749,9 @@ static uint32_t breakout_oracle(const minatarKnobs *k, const minatarBreakout *s,
         breakout_fly(&sim);
         horizon++;
     }
-    uint32_t paddle = s->paddle, last = s->last == MINATAR_LEFT ? 1u : s->last == MINATAR_RIGHT ? 2u : 0u, choice;
+    uint32_t paddle = s->paddle, choice;
     if (sim.y != 9u) return s->x < paddle ? MINATAR_LEFT : s->x > paddle ? MINATAR_RIGHT : MINATAR_NOOP;
-    uint32_t from = sim.trailX, to = sim.x, stuck = minatar_stuck(k, seed, step + 1u, horizon);
+    uint32_t from = sim.trailX, to = sim.x;
     minatarBreakout keep = sim, turn = sim;
     keep.paddle = (uint8_t)from;
     turn.paddle = (uint8_t)to;
@@ -767,10 +760,10 @@ static uint32_t breakout_oracle(const minatarKnobs *k, const minatarBreakout *s,
     if (to != from) {
         breakout_bounce(&turn);
         uint32_t a = breakout_score(keep), b = breakout_score(turn);
-        prefer = a < b || (a == b && (minatar_future(seed, step).z & 1u)) ? from : to;
+        prefer = a < b || (a == b && minatar_coin(seed, step)) ? from : to;
     }
-    if (breakout_plan(1u << prefer, stuck, horizon, paddle, last, &choice)) return CODE[choice];
-    if (breakout_plan(1u << from | 1u << to, stuck, horizon, paddle, last, &choice)) return CODE[choice];
+    if (breakout_plan(1u << prefer, horizon, paddle, &choice)) return CODE[choice];
+    if (breakout_plan(1u << from | 1u << to, horizon, paddle, &choice)) return CODE[choice];
     return prefer < paddle ? MINATAR_LEFT : prefer > paddle ? MINATAR_RIGHT : MINATAR_NOOP;
 }
 
@@ -793,19 +786,16 @@ static uint32_t invaders_march(minatarGrid *aliens, minatarGrid *shots, uint8_t 
     return killed;
 }
 
-static uint32_t invaders_safe(const minatarInvaders *s, uint32_t action, uint32_t depth, uint32_t stuck) {
+static uint32_t invaders_safe(const minatarInvaders *s, uint32_t action, uint32_t depth) {
     minatarInvaders sim = *s;
     uint32_t done = 0u;
-    sim.last = (uint8_t)(stuck & 1u ? sim.last : action);
-    invaders_tick(&sim, sim.last, &done);
+    invaders_tick(&sim, action, &done);
     if (done) return 0u;
     if (depth == 0u) return 1u;
-    stuck >>= 1;
-    if (stuck & 1u) return invaders_safe(&sim, sim.last, depth - 1u, stuck);
-    return invaders_safe(&sim, MINATAR_NOOP, depth - 1u, stuck) || invaders_safe(&sim, MINATAR_LEFT, depth - 1u, stuck) || invaders_safe(&sim, MINATAR_RIGHT, depth - 1u, stuck);
+    return invaders_safe(&sim, MINATAR_NOOP, depth - 1u) || invaders_safe(&sim, MINATAR_LEFT, depth - 1u) || invaders_safe(&sim, MINATAR_RIGHT, depth - 1u);
 }
 
-static uint32_t invaders_oracle(const minatarKnobs *k, const minatarInvaders *s, uint32_t seed, uint32_t step) {
+static uint32_t invaders_oracle(const minatarInvaders *s) {
     enum { HORIZON = 14 };
     minatarGrid forecast[HORIZON + 1], aliens = invaders_load(s->aliens), shots = invaders_load(s->shots);
     uint8_t march = s->march, right = s->right;
@@ -830,11 +820,9 @@ static uint32_t invaders_oracle(const minatarKnobs *k, const minatarInvaders *s,
     }
     if (best == 99u) target = invaders_nearest(invaders_columns(invaders_load(s->aliens)), s->cannon);
     uint32_t want = target < s->cannon ? MINATAR_LEFT : target > s->cannon ? MINATAR_RIGHT : bestFire == 1u ? MINATAR_FIRE : MINATAR_NOOP;
-    uint32_t stuck = minatar_stuck(k, seed, step + 1u, 4u);
-    if (stuck & 1u) return s->last;
     const uint32_t options[5] = { want, MINATAR_NOOP, MINATAR_LEFT, MINATAR_RIGHT, MINATAR_FIRE };
     for (uint32_t i = 0u; i < 5u; i++)
-        if (invaders_safe(s, options[i], 3u, stuck)) return options[i];
+        if (invaders_safe(s, options[i], 3u)) return options[i];
     return want;
 }
 
@@ -850,8 +838,7 @@ static uint32_t freeway_safe(const minatarFreeway *s, uint32_t action, uint32_t 
     return 1u;
 }
 
-static uint32_t freeway_oracle(const minatarKnobs *k, const minatarFreeway *s, uint32_t seed, uint32_t step) {
-    if (minatar_stuck(k, seed, step + 1u, 1u)) return s->last;
+static uint32_t freeway_oracle(const minatarFreeway *s) {
     if (s->cool) return MINATAR_NOOP;
     if (freeway_safe(s, MINATAR_UP, 4u)) return MINATAR_UP;
     if (freeway_safe(s, MINATAR_NOOP, 4u)) return MINATAR_NOOP;
@@ -868,8 +855,12 @@ static void asterix_masks(const minatarAsterix *s, uint32_t *enemy, uint32_t *go
     }
 }
 
-static void asterix_ahead(minatarAsterix *w, u4 dice, uint32_t *enemy, uint32_t *gold) {
-    if (w->spawnTimer == 0u) asterix_spawn(w, dice);
+static void asterix_ahead(minatarAsterix *w, uint32_t *enemy, uint32_t *gold) {
+    if (w->spawnTimer == 0u) {
+        uint32_t edge = w->moveTimer == 0u ? 0x303u : 0x201u;
+        for (uint32_t r = 0u; r < 8u; r++) enemy[r] |= w->row[r] ? 0u : edge;
+        w->spawnTimer = w->spawnSpeed;
+    }
     asterix_masks(w, enemy, gold);
     if (w->moveTimer == 0u) {
         asterix_march(w);
@@ -885,23 +876,22 @@ static void asterix_moveTo(uint32_t action, uint32_t *x, uint32_t *y) {
     *y += action == MINATAR_DOWN && *y < 8u;
 }
 
-static uint32_t asterix_oracle(const minatarKnobs *k, const minatarAsterix *s, uint32_t seed, uint32_t step) {
+static uint32_t asterix_oracle(const minatarAsterix *s) {
     minatarAsterix w = *s;
     uint32_t enemy1[8] = { 0u }, gold1[8] = { 0u }, enemy2[8] = { 0u }, gold2[8] = { 0u };
-    asterix_ahead(&w, minatar_future(seed, step + 1u), enemy1, gold1);
+    asterix_ahead(&w, enemy1, gold1);
     minatarAsterix after = w;
-    asterix_ahead(&w, minatar_future(seed, step + 2u), enemy2, gold2);
-    uint32_t stuck = minatar_stuck(k, seed, step + 1u, 2u);
+    asterix_ahead(&w, enemy2, gold2);
     int best = -1000000;
     uint32_t choice = s->last;
     for (uint32_t a = 0u; a < 5u; a++) {
-        uint32_t act = stuck & 1u ? s->last : a, x = s->x, y = s->y;
-        asterix_moveTo(act, &x, &y);
+        uint32_t x = s->x, y = s->y;
+        asterix_moveTo(a, &x, &y);
         if (enemy1[y - 1u] >> x & 1u) continue;
         int score = gold1[y - 1u] >> x & 1u ? 1000 : 0, viable = 0;
         for (uint32_t b = 0u; b < 5u && !viable; b++) {
             uint32_t x2 = x, y2 = y;
-            asterix_moveTo(stuck & 2u ? act : b, &x2, &y2);
+            asterix_moveTo(b, &x2, &y2);
             viable = !(enemy2[y2 - 1u] >> x2 & 1u);
         }
         if (!viable) score -= 100000;
@@ -916,18 +906,20 @@ static uint32_t asterix_oracle(const minatarKnobs *k, const minatarAsterix *s, u
         score -= x == 0u || x == 9u ? 5 : 0;
         if (score > best) {
             best = score;
-            choice = act;
+            choice = a;
         }
-        if (stuck & 1u) break;
     }
     return choice;
 }
 
-static void sea_ghost(minatarSeaquest *s, uint32_t *extra, u4 dice) {
-    uint32_t done = 0u, x = s->x, y = s->y;
+static void sea_ghost(minatarSeaquest *s, uint32_t *extra, uint32_t *danger) {
+    uint32_t done = 0u, x = s->x, y = s->y, spawn = s->enemyTimer == 0u;
+    for (uint32_t r = 1u; r < 9u; r++) danger[r] |= spawn ? 0x201u : 0u;
+    s->enemyTimer = (uint8_t)(s->enemyTimer | spawn);
+    s->diverTimer = (uint8_t)(s->diverTimer | (s->diverTimer == 0u));
     s->x = 15u;
     s->y = 15u;
-    sea_tick(s, extra, MINATAR_NOOP, dice, &done);
+    sea_tick(s, extra, MINATAR_NOOP, (u4){ 0u, 0u, 0u, 0u }, &done);
     s->x = (uint8_t)x;
     s->y = (uint8_t)y;
 }
@@ -953,15 +945,15 @@ static uint32_t sea_moveTo(uint32_t action, uint32_t *x, uint32_t *y, uint32_t r
     return right;
 }
 
-static uint32_t sea_oracle(const minatarKnobs *k, const minatarSeaquest *s, uint32_t *extra, uint32_t seed, uint32_t step) {
+static uint32_t sea_oracle(const minatarSeaquest *s, uint32_t *extra) {
     uint32_t *scratch = extra + MINATAR_SEA, danger1[10] = { 0u }, danger2[10] = { 0u };
     minatarSeaquest w = *s;
     memcpy(scratch, extra, MINATAR_SEA * sizeof(uint32_t));
     sea_masks(&w, scratch, danger1);
-    sea_ghost(&w, scratch, minatar_future(seed, step + 1u));
+    sea_ghost(&w, scratch, danger1);
     sea_masks(&w, scratch, danger1);
     memcpy(danger2, danger1, sizeof danger2);
-    sea_ghost(&w, scratch, minatar_future(seed, step + 2u));
+    sea_ghost(&w, scratch, danger2);
     sea_masks(&w, scratch, danger2);
     const uint32_t *divers = extra + MINATAR_DIVERS;
     uint32_t tx = s->x, ty = s->y, up = s->rescued == 6 || (s->rescued != 0 && s->oxygen < 16 + 4 * (int32_t)s->y);
@@ -977,7 +969,7 @@ static uint32_t sea_oracle(const minatarKnobs *k, const minatarSeaquest *s, uint
             }
         }
     } else if (s->y == 0u || s->y > 6u) ty = 4u;
-    uint32_t stuck = minatar_stuck(k, seed, step + 1u, 2u), ahead = 0u;
+    uint32_t ahead = 0u;
     for (uint32_t i = 0u; i < s->fish + s->subs; i++) {
         uint32_t e = i < s->fish ? extra[MINATAR_FISH + i] : extra[MINATAR_SUBS + i - s->fish];
         if (sea_y(e) == s->y && (s->right ? sea_x(e) > s->x : sea_x(e) < s->x)) ahead = 1u;
@@ -985,7 +977,7 @@ static uint32_t sea_oracle(const minatarKnobs *k, const minatarSeaquest *s, uint
     int best = -1000000;
     uint32_t choice = s->last;
     for (uint32_t a = 0u; a < 6u; a++) {
-        uint32_t act = stuck & 1u ? s->last : a, x = s->x, y = s->y, right = s->right;
+        uint32_t act = a, x = s->x, y = s->y, right = s->right;
         right = act == MINATAR_FIRE ? right : sea_moveTo(act, &x, &y, right);
         int score = 0;
         if (danger1[y] >> x & 1u) score -= 1000000;
@@ -993,7 +985,7 @@ static uint32_t sea_oracle(const minatarKnobs *k, const minatarSeaquest *s, uint
         int viable = 0;
         for (uint32_t b = 0u; b < 5u && !viable; b++) {
             uint32_t x2 = x, y2 = y;
-            sea_moveTo(stuck & 2u ? (act == MINATAR_FIRE ? MINATAR_NOOP : act) : b, &x2, &y2, right);
+            sea_moveTo(b, &x2, &y2, right);
             viable = !(danger2[y2] >> x2 & 1u) && !(y2 == 0u && y > 0u && (s->rescued == 0 || s->oxygen == 1));
         }
         if (!viable) score -= 100000;
@@ -1004,7 +996,6 @@ static uint32_t sea_oracle(const minatarKnobs *k, const minatarSeaquest *s, uint
             best = score;
             choice = act;
         }
-        if (stuck & 1u) break;
     }
     return choice;
 }
@@ -1014,11 +1005,11 @@ void minatar_oracle(uint32_t instance, uint32_t seed, uint32_t step, const uint3
     const minatarKnobs *k = &MINATAR_KNOBS[instance];
     uint32_t action;
     switch (k->game) {
-        case MINATAR_BREAKOUT: action = breakout_oracle(k, (const minatarBreakout *)words, seed, step); break;
-        case MINATAR_INVADERS: action = invaders_oracle(k, (const minatarInvaders *)words, seed, step); break;
-        case MINATAR_FREEWAY: action = freeway_oracle(k, (const minatarFreeway *)words, seed, step); break;
-        case MINATAR_ASTERIX: action = asterix_oracle(k, (const minatarAsterix *)words, seed, step); break;
-        default: action = sea_oracle(k, (const minatarSeaquest *)words, extra, seed, step); break;
+        case MINATAR_BREAKOUT: action = breakout_oracle((const minatarBreakout *)words, seed, step); break;
+        case MINATAR_INVADERS: action = invaders_oracle((const minatarInvaders *)words); break;
+        case MINATAR_FREEWAY: action = freeway_oracle((const minatarFreeway *)words); break;
+        case MINATAR_ASTERIX: action = asterix_oracle((const minatarAsterix *)words); break;
+        default: action = sea_oracle((const minatarSeaquest *)words, extra); break;
     }
     for (uint32_t i = 0u; i < MINATAR_ACTION_COUNT[k->game]; i++)
         if (MINATAR_ACTION_MAP[k->game][i] == action) ctrl[0] = (float)i;

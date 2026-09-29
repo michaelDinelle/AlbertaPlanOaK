@@ -12,19 +12,19 @@ import { TOKENS } from '@kit/tokens';
 import type { FrameUpdate, LegendSpec, SceneContext, SceneFactory, ScenePost } from '@kit/types';
 import { countEvents, lastEvent } from '@sim/events';
 import {
-  REVERSI_AGENT, REVERSI_EMPTY, REVERSI_LEGAL, REVERSI_OPP, REVERSI_OWN, REVERSI_PASS, REVERSI_PLACE, REVERSI_RIVAL, REVERSI_X, REVERSI_Y,
-  reversiAction, reversiAgentWhite, reversiColumn, reversiCount, reversiCursor, reversiGame, reversiHas, reversiLast, reversiMember, reversiOwner, reversiRow, reversiSquare, reversiThink,
+  REVERSI_AGENT, REVERSI_EMPTY, REVERSI_LEGAL, REVERSI_NEXT, REVERSI_OPP, REVERSI_OWN, REVERSI_PASS, REVERSI_PLAY, REVERSI_RIVAL, REVERSI_X, REVERSI_Y,
+  reversiAction, reversiAgentWhite, reversiColumn, reversiCount, reversiFlips, reversiGame, reversiHas, reversiLast, reversiMember, reversiOwner, reversiProposal, reversiRow, reversiShown, reversiSquare,
 } from '@sim/envs/reversi';
 import type { EnvFrame, EventStream, GridCell } from '@sim/types';
-import { constant, parameter } from '../../data/envs';
+import { parameter } from '../../data/envs';
 import { formatCount, formatSigned } from '../../format';
 import {
-  BRACKET, Caption, FRAME, HINT, INLAY, LIP, PLAQUE_H, PLAQUE_W, SPRITE, WELL_Y, WINDOW,
-  bannerMaterial, boardMaterial, bracketMaterial, discMaterial, flat, glyph, hintMaterial, plaqueMaterial, roundedRing, tableMaterial, textMaterial, windowMaterial, type Level,
+  BRACKET, Caption, FRAME, HINT, INLAY, LIP, PLAQUE_H, PLAQUE_W, SPRITE, WELL_Y,
+  bannerMaterial, boardMaterial, bracketMaterial, discMaterial, flat, glyph, hintMaterial, plaqueMaterial, roundedRing, tableMaterial, textMaterial, type Level,
 } from './art';
 
 type N<T extends string> = THREE.Node<T>;
-type Kind = 'hold' | 'move' | 'bump' | 'deny' | 'think' | 'play' | 'reset';
+type Kind = 'hold' | 'next' | 'play' | 'reset';
 type Phase = readonly [number, number];
 
 const SQUARES = 64;
@@ -37,23 +37,20 @@ const SOLO: Phase = [0, 0.92];
 const FIRST: Phase = [0, 0.5];
 const SECOND: Phase = [0.5, 1];
 const RESULT_STEPS = 16;
-const IDLE = 0.32;
+const GHOST = 0.45;
+const PREVIEW = 0.35;
 const RIVAL = 0xf0a24a;
 const GOLD = TOKENS.celebrationGold;
-const BLOCKED = TOKENS.failureBlue;
 const NEUTRAL = 0xdfe7e2;
 const TITLE = 0xefe9dc;
 const MUTED = 0x9aa39e;
 const FILES = 'abcdefgh';
-const ALPHA_BETA = 2;
 const RIVALS = [
   { title: 'GREEDY', name: 'greedy · most flips' },
   { title: 'WEIGHTED', name: 'weighted squares' },
   { title: 'ALPHA-BETA', name: 'alpha-beta search' },
   { title: 'LEAGUE', name: 'league' },
 ] as const;
-const ARROWS = ['↑ up', '↓ down', '← left', 'right →'] as const;
-const DELTA = [[0, -1], [0, 1], [-1, 0], [1, 0]] as const;
 
 const lerp = (a: number, b: number, u: number) => a + (b - a) * u;
 const squareName = (square: number) => `${FILES[reversiColumn(square)]}${reversiRow(square) + 1}`;
@@ -84,11 +81,12 @@ interface Plan {
   afterWhite: boolean;
   member: number;
   afterMember: number;
-  cursor: number;
+  proposal: number;
   to: number;
-  think: number;
-  afterThink: number;
-  passing: boolean;
+  shown: number;
+  options: number;
+  preview: number[];
+  afterPreview: number[];
   action: number;
   legal: number[];
   afterLegal: number[];
@@ -96,6 +94,7 @@ interface Plan {
   afterLast: number;
   agent: number;
   rival: number;
+  rivals: number[];
   toAgent: number[];
   toRival: number[];
   taken: boolean;
@@ -109,7 +108,7 @@ interface Plan {
 interface Outcome { reward: number; game: number; level: number }
 interface Label { mesh: THREE.Mesh; caption: Caption; tint: THREE.Color }
 interface Lamp { mesh: THREE.Mesh; tint: THREE.Color }
-interface Seat { x: number; tint: THREE.Color; glow: Level; busy: Level; spin: Level; title: Label; sub: Label; count: Label; unit: Label; status: Label }
+interface Seat { x: number; tint: THREE.Color; glow: Level; title: Label; sub: Label; count: Label; unit: Label; status: Label }
 
 class ReversiScene extends Stage2DScene {
   readonly post: ScenePost = { bloom: 0.36, fog: { from: ['night', 'fog'] } };
@@ -121,8 +120,6 @@ class ReversiScene extends Stage2DScene {
   private grid: GridSize = { w: 8, h: 8 };
   private seatX = 0;
   private opponent = 0;
-  private searches = false;
-  private perNode = 1;
   private accent = 0x5fbf8f;
   private squares: number[] = [];
   private readonly disposables: { dispose(): void }[] = [];
@@ -132,15 +129,13 @@ class ReversiScene extends Stage2DScene {
   private discFx: THREE.InstancedBufferAttribute | null = null;
   private hints: THREE.InstancedMesh | null = null;
   private hintAlpha: THREE.InstancedBufferAttribute | null = null;
-  private window: THREE.Mesh | null = null;
   private bracket: THREE.Mesh | null = null;
   private banner: THREE.Mesh | null = null;
   private bannerTitle: Label | null = null;
   private bannerSub: Label | null = null;
-  private cursorLamp: Lamp | null = null;
+  private proposalLamp: Lamp | null = null;
   private flashes: Lamp[] = [];
   private seats: Seat[] = [];
-  private readonly windowStrength = uniform(1);
   private readonly bracketTint = new THREE.Color();
   private readonly bracketAlpha = uniform(1);
   private readonly bannerTint = new THREE.Color();
@@ -155,8 +150,7 @@ class ReversiScene extends Stage2DScene {
   private readonly matrix = new THREE.Matrix4();
   private readonly at = new THREE.Vector3();
   private readonly other = new THREE.Vector3();
-  private readonly color = new THREE.Color();
-  private readonly ledger = { turn: '—', rival: '—', cursor: '—', action: '—', discs: '—', reward: 0, share: 0.5, step: 0, game: 0 };
+  private readonly ledger = { proposal: '—', clock: '—', rival: '—', action: '—', discs: '—', reward: 0, share: 0.5, step: 0, game: 0 };
 
   protected extent(ctx: SceneContext): THREE.Box2 {
     const env = ctx.environment;
@@ -165,8 +159,6 @@ class ReversiScene extends Stage2DScene {
     this.grid = { w: this.span, h: this.span };
     this.opponent = parameter(env, 'opponent');
     if (RIVALS[this.opponent] === undefined) throw new Error(`${env.envId} seats opponent ${this.opponent}, which Reversi does not name`);
-    this.searches = this.opponent === ALPHA_BETA;
-    this.perNode = constant(env, 'REVERSI_STEPS_PER_NODE');
     this.accent = this.accentOf(ctx);
     this.seatX = this.half + FRAME + SEAT_GAP + PLAQUE_W / 2;
     this.squares = [];
@@ -188,9 +180,9 @@ class ReversiScene extends Stage2DScene {
     return {
       title: 'REVERSI',
       rows: [
-        { key: 'turn', label: 'turn', tint: this.accent, value: () => this.ledger.turn },
+        { key: 'proposal', label: 'proposal', tint: this.accent, value: () => this.ledger.proposal },
+        { key: 'clock', label: 'shown', tint: this.accent, value: () => this.ledger.clock },
         { key: 'rival', label: 'rival', tint: RIVAL, value: () => this.ledger.rival },
-        { key: 'cursor', label: 'cursor', tint: this.accent, value: () => this.ledger.cursor },
         { key: 'action', label: 'action', tint: 0xdcf4ff, value: () => this.ledger.action },
         { key: 'discs', label: 'discs', tint: TITLE, value: () => this.ledger.discs },
         { key: 'reward', label: 'reward', tint: GOLD, value: () => signed(this.ledger.reward) },
@@ -221,31 +213,28 @@ class ReversiScene extends Stage2DScene {
   }
 
   protected override overlayOptions(): GroundTruthOptions {
-    const cursor: GridCell = { x: 0, y: 0 };
+    const proposal: GridCell = { x: 0, y: 0 };
     return {
       agentCell: (state) => {
-        cursor.x = state.pose[REVERSI_X]!;
-        cursor.y = state.pose[REVERSI_Y]!;
-        return cursor;
+        proposal.x = state.pose[REVERSI_X]!;
+        proposal.y = state.pose[REVERSI_Y]!;
+        return proposal;
       },
       debug: (frame, kit) => {
-        const now = frame.frameAt(frame.state.step), words = now.words, obs = now.observations, offset = (this.span - 1) / 2;
-        const discs = kit.marks('discs', SQUARES), legal = kit.marks('legal', SQUARES), seen = kit.marks('observed', 9), last = kit.marks('last', 1), flag = kit.marks('legalFlag', 1);
-        const outline = kit.curve('window', 5, this.accent);
+        const now = frame.frameAt(frame.state.step), words = now.words, obs = now.observations;
+        const discs = kit.marks('discs', SQUARES), legal = kit.marks('legal', SQUARES), seen = kit.marks('observed', SQUARES), last = kit.marks('last', 1);
         for (const square of this.squares) {
-          const owner = reversiOwner(words, square);
+          const owner = reversiOwner(words, square), value = obs[this.span * reversiRow(square) + reversiColumn(square)]!;
           this.cell(square, this.at);
           if (owner !== REVERSI_EMPTY) discs.set(this.at.x, 0.05, this.at.z, 0.17, owner === REVERSI_AGENT ? TOKENS.uiCyan : TOKENS.cueMagenta);
           if (reversiHas(words, REVERSI_LEGAL, square)) legal.set(this.at.x, 0.05, this.at.z, 0.07, 0x86f0b4);
+          if (value !== 0) seen.set(this.at.x + 0.3, 0.06, this.at.z + 0.3, 0.08, value > 0 ? TOKENS.uiCyan : TOKENS.cueMagenta);
         }
-        const x = reversiColumn(reversiCursor(words)), y = reversiRow(reversiCursor(words));
-        for (let k = 0; k < 9; k++) {
-          const value = obs[k]!;
-          if (value !== 0) seen.set(x + (k % 3) - 1 - offset + 0.3, 0.06, y + Math.floor(k / 3) - 1 - offset + 0.3, 0.08, value > 0 ? TOKENS.uiCyan : TOKENS.cueMagenta);
+        const moved = lastSquare(words);
+        if (moved >= 0) {
+          this.cell(moved, this.at);
+          last.set(this.at.x, 0.07, this.at.z, 0.26, GOLD);
         }
-        for (const [dx, dy] of [[-1.5, -1.5], [1.5, -1.5], [1.5, 1.5], [-1.5, 1.5], [-1.5, -1.5]] as const) outline.point(x - offset + dx, 0.06, y - offset + dy);
-        if (obs[12]! >= 0) last.set(Math.round(obs[12]! * (this.span - 1)) - offset, 0.07, Math.round(obs[13]! * (this.span - 1)) - offset, 0.26, GOLD);
-        flag.set(x - offset - 0.3, 0.07, y - offset - 0.3, 0.09, obs[11]! > 0 ? 0x86f0b4 : 0xff6b5a);
       },
     };
   }
@@ -271,13 +260,12 @@ class ReversiScene extends Stage2DScene {
 
     this.hintAlpha = new THREE.InstancedBufferAttribute(new Float32Array(2 * SQUARES), 1).setUsage(THREE.DynamicDrawUsage);
     this.hints = this.add(instancedMesh(flat(HINT, HINT), hintMaterial(this.hintAlpha, this.accent), 2 * SQUARES), 3);
-    this.window = this.add(new THREE.Mesh(flat(WINDOW, WINDOW), windowMaterial(this.windowStrength, half, this.accent)), 4);
     this.discLook = new THREE.InstancedBufferAttribute(new Float32Array(CAPACITY * 4), 4).setUsage(THREE.DynamicDrawUsage);
     this.discFx = new THREE.InstancedBufferAttribute(new Float32Array(CAPACITY * 4), 4).setUsage(THREE.DynamicDrawUsage);
     this.discs = this.add(instancedMesh(flat(SPRITE, SPRITE), discMaterial(this.discLook, this.discFx, lit, GOLD), CAPACITY), 5);
     this.bracket = this.add(new THREE.Mesh(flat(BRACKET, BRACKET), bracketMaterial(uniform(this.bracketTint) as unknown as N<'vec3'>, this.bracketAlpha)), 6);
 
-    this.cursorLamp = this.lamp(light, new THREE.CircleGeometry(0.12, 24), 0, 0);
+    this.proposalLamp = this.lamp(light, new THREE.CircleGeometry(0.12, 24), 0, 0);
     this.flashes = [this.lamp(light, new THREE.CircleGeometry(0.2, 24), 0, 0), this.lamp(light, new THREE.CircleGeometry(0.2, 24), 0, 0)];
     this.seats = [this.seat(light, -this.seatX, this.accent), this.seat(light, this.seatX, RIVAL)];
 
@@ -312,10 +300,10 @@ class ReversiScene extends Stage2DScene {
   }
 
   private seat(light: Light2D, x: number, color: number): Seat {
-    const tint = new THREE.Color(color), glow = uniform(0), busy = uniform(0), spin = uniform(0), shown = uniform(1);
-    this.add(new THREE.Mesh(flat(PLAQUE_W + 0.3, PLAQUE_H + 0.3), plaqueMaterial(uniform(tint) as unknown as N<'vec3'>, glow, busy, spin, light.lit)), 1).position.set(x, 0, 0);
+    const tint = new THREE.Color(color), glow = uniform(0), shown = uniform(1);
+    this.add(new THREE.Mesh(flat(PLAQUE_W + 0.3, PLAQUE_H + 0.3), plaqueMaterial(uniform(tint) as unknown as N<'vec3'>, glow, light.lit)), 1).position.set(x, 0, 0);
     return {
-      x, tint, glow, busy, spin,
+      x, tint, glow,
       title: this.label(light, 2.4, 0.5, x, -2.08, TITLE, false, shown),
       sub: this.label(light, 2.4, 0.34, x, -1.68, MUTED, false, shown),
       count: this.label(light, 2.4, 0.9, x, 0.93, TITLE, false, shown),
@@ -341,8 +329,8 @@ class ReversiScene extends Stage2DScene {
     this.record(plan);
     this.drawDiscs(plan, a, outcome);
     this.drawHints(plan, a);
-    this.drawCursor(plan, a);
-    this.drawSeats(plan, a, outcome, time);
+    this.drawProposal(plan, a);
+    this.drawSeats(plan, a, outcome);
     this.drawBanner(outcome);
   }
 
@@ -359,47 +347,45 @@ class ReversiScene extends Stage2DScene {
   private planFor(frame: FrameUpdate, step: number): Plan {
     const peek = frame.frameAt(step + 1), ahead = peek.step === step + 1;
     if (this.plan && this.plan.step === step && this.plan.ahead === ahead) return this.plan;
-    const now = frame.frameAt(step), words = Uint32Array.from(now.words), think = reversiThink(words), cursor = reversiCursor(words), white = reversiAgentWhite(words);
+    const now = frame.frameAt(step), words = Uint32Array.from(now.words), proposal = reversiProposal(words), white = reversiAgentWhite(words);
     const plan: Plan = {
-      step, ahead, kind: 'hold', words, board: this.owners(words), after: null, white, afterWhite: white, member: reversiMember(words), afterMember: reversiMember(words), cursor, to: cursor, think, afterThink: think,
-      passing: this.passing(frame, step, think), action: -1, legal: this.legalOf(words), afterLegal: [], last: lastSquare(words), afterLast: lastSquare(words),
-      agent: -1, rival: -1, toAgent: [], toRival: [], taken: false, split: false, result: 0, reward: now.reward, afterGame: reversiGame(words), doing: this.describe(frame, now),
+      step, ahead, kind: 'hold', words, board: this.owners(words), after: null, white, afterWhite: white, member: reversiMember(words), afterMember: reversiMember(words),
+      proposal, to: proposal, shown: reversiShown(words), options: reversiCount(words, REVERSI_LEGAL), preview: reversiFlips(words, proposal), afterPreview: [],
+      action: -1, legal: this.legalOf(words), afterLegal: [], last: lastSquare(words), afterLast: lastSquare(words),
+      agent: -1, rival: -1, rivals: [], toAgent: [], toRival: [], taken: false, split: false, result: 0, reward: now.reward, afterGame: reversiGame(words), doing: this.describe(frame, now),
     };
     this.plan = plan;
     if (!ahead) return plan;
     const later = peek.words;
-    plan.to = reversiCursor(later);
-    plan.afterThink = reversiThink(later);
+    plan.to = reversiProposal(later);
     plan.afterWhite = reversiAgentWhite(later);
     plan.afterMember = reversiMember(later);
     plan.afterGame = reversiGame(later);
     plan.afterLegal = this.legalOf(later);
     plan.afterLast = lastSquare(later);
     plan.after = this.owners(later);
-    plan.action = think === 0 ? reversiAction(peek.actions) : -1;
+    plan.action = reversiAction(peek.actions);
     if (peek.done) {
       plan.kind = 'reset';
       plan.result = Math.sign(peek.reward);
       return plan;
     }
     const changed = this.squares.some((square) => plan.board[square] !== plan.after![square]);
-    if (think === 0 && plan.action !== REVERSI_PLACE) {
-      if (changed) throw new Error(`Reversi step ${step + 1} changes the board on a cursor move`);
-      plan.kind = plan.to === cursor ? 'bump' : 'move';
-    } else if (think === 0 && !reversiHas(words, REVERSI_LEGAL, cursor)) {
-      if (changed) throw new Error(`Reversi step ${step + 1} changes the board on an illegal placement at ${squareName(cursor)}`);
-      plan.kind = 'deny';
-    } else if (!changed) {
-      if (think === 0) throw new Error(`Reversi step ${step + 1} leaves the board unchanged after a legal placement at ${squareName(cursor)}`);
-      plan.kind = 'think';
-    } else this.play(plan, step + 1);
+    if (!changed) {
+      if (plan.action !== REVERSI_NEXT || reversiShown(later) !== plan.shown + 1) throw new Error(`Reversi step ${step + 1} leaves the board unchanged without showing the next proposal`);
+      plan.kind = 'next';
+      plan.afterPreview = reversiFlips(later, plan.to);
+    } else {
+      if (plan.action === REVERSI_NEXT && plan.shown + 1 !== plan.options) throw new Error(`Reversi step ${step + 1} plays ${squareName(proposal)} before its clock ran out`);
+      this.play(plan, step + 1);
+    }
     return plan;
   }
 
   private play(plan: Plan, step: number): void {
     const after = plan.after!, added: number[] = [];
     plan.kind = 'play';
-    if (plan.think === 0) plan.agent = plan.cursor;
+    plan.agent = plan.proposal;
     for (const square of this.squares) {
       const was = plan.board[square]!, now = after[square]!;
       if (was !== REVERSI_EMPTY && now === REVERSI_EMPTY) throw new Error(`Reversi step ${step} lifts the disc on ${squareName(square)}`);
@@ -407,30 +393,23 @@ class ReversiScene extends Stage2DScene {
       else if (was === REVERSI_RIVAL && now === REVERSI_AGENT) plan.toAgent.push(square);
       else if (was === REVERSI_AGENT && now === REVERSI_RIVAL) plan.toRival.push(square);
     }
-    if (plan.agent >= 0 && !added.includes(plan.agent)) throw new Error(`Reversi step ${step} places nothing on ${squareName(plan.agent)} where the agent played`);
-    const rival = added.filter((square) => square !== plan.agent);
-    if (rival.length > 1 || (rival.length === 1 && rival[0] !== plan.afterLast)) throw new Error(`Reversi step ${step} adds discs its last-move word does not name`);
-    plan.rival = rival[0] ?? -1;
-    plan.taken = plan.agent >= 0 && after[plan.agent] === REVERSI_RIVAL;
+    if (!added.includes(plan.agent)) throw new Error(`Reversi step ${step} places nothing on ${squareName(plan.agent)} where the agent played`);
+    plan.rivals = added.filter((square) => square !== plan.agent);
+    if (plan.rivals.some((square) => after[square] !== REVERSI_RIVAL)) throw new Error(`Reversi step ${step} adds agent discs away from the proposal it played`);
+    if (plan.rivals.length > 0 !== plan.rivals.includes(plan.afterLast)) throw new Error(`Reversi step ${step} adds discs its last-move word does not name`);
+    plan.rival = plan.rivals.length > 0 ? plan.afterLast : -1;
+    plan.taken = after[plan.agent] === REVERSI_RIVAL;
     if (plan.rival < 0 && (plan.toRival.length > 0 || plan.taken)) throw new Error(`Reversi step ${step} turns agent discs without a rival move`);
-    if (plan.agent < 0 && (plan.rival < 0 || plan.toAgent.length > 0)) throw new Error(`Reversi step ${step} changes the board while only the rival may move`);
-    plan.split = plan.agent >= 0 && plan.rival >= 0;
-  }
-
-  private passing(frame: FrameUpdate, step: number, think: number): boolean {
-    if (think === 0) return false;
-    if (!this.searches) return true;
-    const began = step - (think - 1), start = frame.frameAt(began), before = frame.frameAt(began - 1);
-    return began >= 1 && start.step === began && before.step === began - 1 && !start.done && reversiThink(before.words) > 0;
+    plan.split = plan.rival >= 0;
   }
 
   private describe(frame: FrameUpdate, now: EnvFrame): string {
     const before = frame.frameAt(now.step - 1);
     if (now.step < 1 || before.step !== now.step - 1) return '—';
-    if (reversiThink(before.words) > 0) return 'waiting';
-    const action = reversiAction(now.actions), cursor = reversiCursor(before.words);
-    if (action === REVERSI_PLACE) return `place ${squareName(cursor)}${reversiHas(before.words, REVERSI_LEGAL, cursor) ? '' : ' · illegal'}`;
-    return `${ARROWS[action]}${!now.done && reversiCursor(now.words) === cursor ? ' · edge' : ''}`;
+    const played = squareName(reversiProposal(before.words));
+    if (reversiAction(now.actions) === REVERSI_PLAY) return `play ${played}`;
+    if (reversiShown(before.words) + 1 === reversiCount(before.words, REVERSI_LEGAL)) return `next · clock plays ${played}`;
+    return `next → ${squareName(reversiProposal(now.words))}`;
   }
 
   private outcome(frame: FrameUpdate, plan: Plan, a: number): Outcome | null {
@@ -456,13 +435,12 @@ class ReversiScene extends Stage2DScene {
   }
 
   private record(plan: Plan): void {
-    const ledger = this.ledger, words = plan.words, own = reversiCount(words, REVERSI_OWN), opp = reversiCount(words, REVERSI_OPP);
-    const nodes = Math.ceil((plan.think - 1) / this.perNode);
+    const ledger = this.ledger, words = plan.words, own = reversiCount(words, REVERSI_OWN), opp = reversiCount(words, REVERSI_OPP), seen = plan.shown + 1;
     ledger.step = plan.step;
     ledger.game = reversiGame(words);
-    ledger.turn = plan.think === 0 ? 'agent' : plan.passing ? 'agent passes · rival' : this.searches ? `rival thinking · ${formatCount(nodes)} node${nodes === 1 ? '' : 's'}` : 'rival';
+    ledger.proposal = `${squareName(plan.proposal)} · flips ${plan.preview.length}`;
+    ledger.clock = `${seen} of ${plan.options}${seen === plan.options ? ' · next plays' : ''}`;
     ledger.rival = this.opponent === RIVALS.length - 1 ? `league member ${reversiMember(words) + 1}` : RIVALS[this.opponent]!.name;
-    ledger.cursor = `${squareName(plan.cursor)}${plan.legal.includes(plan.cursor) ? ' · legal' : ''}`;
     ledger.action = plan.doing;
     ledger.discs = `agent ${own} · rival ${opp}`;
     ledger.reward = plan.reward;
@@ -477,9 +455,9 @@ class ReversiScene extends Stage2DScene {
     this.discFx!.setXYZW(i, angle, lift, marker, 0);
   }
 
-  private disc(square: number, white: number, alpha: number, lift: number, marker: number): void {
+  private disc(square: number, white: number, alpha: number, lift: number, marker: number, glow = 0): void {
     this.cell(square, this.at);
-    this.put(this.at.x, this.at.z, white, 1, 0, alpha, 0, lift, marker, 1);
+    this.put(this.at.x, this.at.z, white, 1, 0, alpha, glow, lift, marker, 1);
   }
 
   private turnOver(square: number, from: number, to: number, u: number, origin: number, marker: number): void {
@@ -501,7 +479,11 @@ class ReversiScene extends Stage2DScene {
     if (plan.kind === 'reset') {
       const fade = smoothstep01((a - 0.25) / 0.35), appear = smoothstep01((a - 0.6) / 0.3), after = plan.after!;
       for (const square of this.squares) if (board[square]) this.disc(square, face(board[square]!, plan.white), 1 - fade, 0, square === plan.last ? 1 - fade : 0);
-      if (appear > 0) for (const square of this.squares) if (after[square]) this.disc(square, face(after[square]!, plan.afterWhite), appear, 0.8 * (1 - appear), square === plan.afterLast ? appear : 0);
+      this.disc(plan.proposal, agent, GHOST * (1 - fade), 0, 0);
+      if (appear > 0) {
+        for (const square of this.squares) if (after[square]) this.disc(square, face(after[square]!, plan.afterWhite), appear, 0.8 * (1 - appear), square === plan.afterLast ? appear : 0);
+        this.disc(plan.to, face(REVERSI_AGENT, plan.afterWhite), GHOST * appear, 0, 0);
+      }
     } else if (plan.kind === 'play') {
       const first = plan.split ? FIRST : SOLO, second = plan.split ? SECOND : SOLO;
       const firstReach = this.reach(plan.toAgent, plan.agent), secondReach = this.reach(plan.taken ? [...plan.toRival, plan.agent] : plan.toRival, plan.rival);
@@ -514,22 +496,23 @@ class ReversiScene extends Stage2DScene {
         else if (plan.toRival.includes(square)) this.turnOver(square, agent, rival, flipAt(a, second, chebyshev(square, plan.rival), secondReach), plan.rival, marker);
         else this.disc(square, face(owner, plan.white), 1, 0, marker);
       }
-      if (plan.agent >= 0) {
-        const land = landAt(a, first), lift = 1 - smoothstep01(land), alpha = clamp01(land * 3);
-        if (plan.taken && a > second[0]) this.turnOver(plan.agent, agent, rival, flipAt(a, second, chebyshev(plan.agent, plan.rival), secondReach), plan.rival, 0);
-        else if (alpha > 0) {
-          this.cell(plan.agent, this.at);
-          this.put(this.at.x, this.at.z, agent, 1, 0, alpha, 0, lift, 0, 1);
-        }
+      const land = landAt(a, first);
+      if (plan.taken && a > second[0]) this.turnOver(plan.agent, agent, rival, flipAt(a, second, chebyshev(plan.agent, plan.rival), secondReach), plan.rival, 0);
+      else this.disc(plan.agent, agent, lerp(GHOST, 1, clamp01(land * 3)), 0.8 * Math.sin(Math.PI * land), 0);
+      const landing = landAt(a, second), alpha = clamp01(landing * 3);
+      if (alpha > 0) for (const square of plan.rivals) this.disc(square, rival, alpha, 1 - smoothstep01(landing), square === plan.rival ? smoothstep01((landing - 0.8) / 0.2) : 0);
+      const arriving = smoothstep01((a - 0.85) / 0.15);
+      if (arriving > 0) this.disc(plan.to, agent, GHOST * arriving, 0, 0);
+    } else {
+      const k = plan.kind === 'next' ? smoothstep01(a / 0.85) : 0;
+      for (const square of this.squares) {
+        if (!board[square]) continue;
+        const glow = (plan.preview.includes(square) ? 1 - k : 0) + (plan.afterPreview.includes(square) ? k : 0);
+        this.disc(square, face(board[square]!, plan.white), 1, 0, square === plan.last ? 1 : 0, PREVIEW * glow);
       }
-      if (plan.rival >= 0) {
-        const land = landAt(a, second), alpha = clamp01(land * 3);
-        if (alpha > 0) {
-          this.cell(plan.rival, this.at);
-          this.put(this.at.x, this.at.z, rival, 1, 0, alpha, 0, 1 - smoothstep01(land), smoothstep01((land - 0.8) / 0.2), 1);
-        }
-      }
-    } else for (const square of this.squares) if (board[square]) this.disc(square, face(board[square]!, plan.white), 1, 0, square === plan.last ? 1 : 0);
+      this.disc(plan.proposal, agent, GHOST * (1 - k), 0, 0);
+      if (k > 0) this.disc(plan.to, agent, GHOST * k, 0, 0);
+    }
 
     const turn = plan.kind === 'reset' && plan.afterWhite !== plan.white ? smoothstep01((a - 0.55) / 0.35) : 0;
     for (const [side, owner] of [[0, REVERSI_AGENT], [1, REVERSI_RIVAL]] as const) {
@@ -562,54 +545,41 @@ class ReversiScene extends Stage2DScene {
     alpha.needsUpdate = true;
   }
 
-  private drawCursor(plan: Plan, a: number): void {
-    const from = this.cell(plan.cursor, this.at), to = this.cell(plan.to, this.other);
-    let x = from.x, z = from.z, shown = plan.cursor, press = 0, deny = 0;
-    let alpha = lerp(plan.think === 0 ? 1 : IDLE, plan.afterThink === 0 ? 1 : IDLE, smoothstep01((a - 0.5) / 0.5));
-    if (plan.kind === 'move') {
+  private drawProposal(plan: Plan, a: number): void {
+    const from = this.cell(plan.proposal, this.at), to = this.cell(plan.to, this.other);
+    let x = from.x, z = from.z, press = 0, alpha = 1;
+    if (plan.kind === 'next') {
       const k = smoothstep01(a / 0.85);
       x = lerp(from.x, to.x, k);
       z = lerp(from.z, to.z, k);
-      if (k > 0.5) shown = plan.to;
-    } else if (plan.kind === 'bump') {
-      const [dx, dz] = DELTA[plan.action]!, k = 0.13 * Math.sin(Math.PI * clamp01(a / 0.7));
-      x += dx * k;
-      z += dz * k;
-    } else if (plan.kind === 'deny') {
-      deny = Math.sin(Math.PI * a);
-      x += 0.07 * Math.sin(3 * Math.PI * a) * (1 - a);
-    } else if (plan.kind === 'play' && plan.agent >= 0) {
+    } else if (plan.kind === 'play') {
+      const k = smoothstep01((a - 0.85) / 0.15);
       press = Math.sin(Math.PI * clamp01(a / (LAND * ((plan.split ? FIRST : SOLO)[1]))));
       if (plan.split) alpha = 1 - 0.4 * Math.sin(Math.PI * clamp01((a - SECOND[0]) / (SECOND[1] - SECOND[0])));
+      x = lerp(from.x, to.x, k);
+      z = lerp(from.z, to.z, k);
     } else if (plan.kind === 'reset') {
       const late = a > 0.5;
-      if (plan.action === REVERSI_PLACE) press = Math.sin(Math.PI * clamp01(a / 0.25));
+      press = Math.sin(Math.PI * clamp01(a / 0.25));
       if (late) {
         x = to.x;
         z = to.z;
-        shown = plan.to;
       }
-      alpha = late ? smoothstep01((a - 0.6) / 0.3) * (plan.afterThink === 0 ? 1 : IDLE) : (1 - smoothstep01((a - 0.15) / 0.25)) * (plan.think === 0 ? 1 : IDLE);
+      alpha = late ? smoothstep01((a - 0.6) / 0.3) : 1 - smoothstep01((a - 0.15) / 0.25);
     }
-    const legal = (plan.kind === 'reset' && shown === plan.to && a > 0.5 ? plan.afterLegal : plan.legal).includes(shown);
-    this.bracketTint.set(legal ? this.accent : NEUTRAL).lerp(this.color.set(BLOCKED), deny);
-    if (legal) this.bracketTint.multiplyScalar(1.15 + 0.6 * press);
+    this.bracketTint.set(this.accent).multiplyScalar(1.15 + 0.6 * press);
     this.bracketAlpha.value = alpha;
-    this.windowStrength.value = alpha;
     this.bracket!.position.set(x, 0, z);
     this.bracket!.scale.setScalar(1 - 0.1 * press);
-    this.window!.position.set(x, 0, z);
-    const lamp = this.cursorLamp!;
+    const lamp = this.proposalLamp!;
     lamp.mesh.position.set(x, 0, z);
     lamp.tint.set(this.accent).multiplyScalar(0.8 + 4.2 * alpha + 6 * press);
     const [agentFlash, rivalFlash] = this.flashes as [Lamp, Lamp];
     agentFlash.mesh.visible = rivalFlash.mesh.visible = false;
     if (plan.kind !== 'play') return;
-    if (plan.agent >= 0) {
-      this.cell(plan.agent, agentFlash.mesh.position);
-      agentFlash.tint.set(this.accent).multiplyScalar(7 * flashAt(a, plan.split ? FIRST : SOLO));
-      agentFlash.mesh.visible = true;
-    }
+    this.cell(plan.agent, agentFlash.mesh.position);
+    agentFlash.tint.set(this.accent).multiplyScalar(7 * flashAt(a, plan.split ? FIRST : SOLO));
+    agentFlash.mesh.visible = true;
     if (plan.rival >= 0) {
       this.cell(plan.rival, rivalFlash.mesh.position);
       rivalFlash.tint.set(RIVAL).multiplyScalar(7 * flashAt(a, plan.split ? SECOND : SOLO));
@@ -617,12 +587,12 @@ class ReversiScene extends Stage2DScene {
     }
   }
 
-  private drawSeats(plan: Plan, a: number, outcome: Outcome | null, time: number): void {
+  private drawSeats(plan: Plan, a: number, outcome: Outcome | null): void {
     const [agent, rival] = this.seats as [Seat, Seat], words = plan.words;
     const white = plan.kind === 'reset' && a > 0.72 ? plan.afterWhite : plan.white;
     const colour = (mine: boolean) => (mine === white ? 'white' : 'black');
     const member = this.opponent === RIVALS.length - 1 ? `member ${(plan.kind === 'reset' && a > 0.72 ? plan.afterMember : plan.member) + 1} · ` : '';
-    const nodes = Math.ceil((plan.think - 1) / this.perNode), thinking = this.searches && plan.think > 0;
+    const replying = plan.kind === 'play' && plan.split ? Math.sin(Math.PI * clamp01((a - SECOND[0]) / (SECOND[1] - SECOND[0]))) : 0;
     agent.title.caption.write('AGENT', 0.3, 700, 0.24);
     agent.sub.caption.write(`plays ${colour(true)}`, 0.2, 500, 0.08);
     rival.title.caption.write(RIVALS[this.opponent]!.title, 0.3, 700, 0.24);
@@ -632,14 +602,12 @@ class ReversiScene extends Stage2DScene {
     agent.unit.caption.write('DISCS', 0.15, 600, 0.3);
     rival.unit.caption.write('DISCS', 0.15, 600, 0.3);
 
-    let agentSays = plan.think === 0 ? 'TO MOVE' : plan.passing ? 'MUST PASS' : 'WAITING';
-    let rivalSays = thinking ? `THINKING · ${nodes}` : plan.think > 0 ? 'TO MOVE' : reversiLast(words) === REVERSI_PASS ? 'PASSED' : 'WAITING';
+    let agentSays = replying > 0.5 && plan.rivals.length > 1 ? 'PASSES' : 'TO MOVE';
+    let rivalSays = replying > 0.5 ? 'MOVES' : reversiLast(words) === REVERSI_PASS ? 'PASSED' : 'WAITING';
     agent.status.tint.set(this.accent);
     rival.status.tint.set(RIVAL);
-    agent.glow.value = plan.think === 0 ? 1 : 0.12;
-    rival.glow.value = plan.think > 0 ? 1 : 0.12;
-    rival.busy.value = thinking ? 1 : 0;
-    rival.spin.value = 3.2 * time;
+    agent.glow.value = 1 - 0.88 * replying;
+    rival.glow.value = 0.12 + 0.88 * replying;
     if (outcome) {
       const draw = outcome.reward === 0, agentWon = outcome.reward > 0;
       agentSays = draw ? 'DRAW' : agentWon ? 'WINS' : 'LOSES';

@@ -1,4 +1,4 @@
-import type { EnvDescriptor } from '../../data/envs';
+import { constantList, type EnvDescriptor } from '../../data/envs';
 import { NO_EVENTS, type EnvDecoder, type EnvFrame, type SimEvent } from '../types';
 
 export const DW_X = 0;
@@ -34,6 +34,11 @@ const MONSTER_SLOTS = 24;
 const CELL_WORDS = SIDE * SIDE / 8;
 const VIEW_WORDS = CELL_WORDS + ITEM_SLOTS / 2 + MONSTER_SLOTS;
 
+export const REACH = 3;
+export const SPAN = 2 * REACH + 1;
+const OBS_POTIONS = SPAN * SPAN + 7;
+const OBSERVED = OBS_POTIONS + 8;
+
 export const ROCK = 0;
 export const WALL = 1;
 export const FLOOR = 2;
@@ -44,6 +49,9 @@ export const STAIRS = 5;
 export const GOLD = 1;
 export const RATION = 2;
 export const POTION = 3;
+
+export const GLYPH_MONSTER = STAIRS + POTION + 8;
+export const GLYPH_UNSEEN = GLYPH_MONSTER + 16;
 
 export const EFFECTS = ['heal', 'extra heal', 'cure', 'fire ward', 'frost ward', 'poison', 'confusion', 'blindness'] as const;
 
@@ -119,6 +127,8 @@ export const floorKey = (frame: EnvFrame): number => frame.words[DW_RUN]! * 16 +
 
 function checkLayout(env: EnvDescriptor): void {
   if (env.words !== DW_WORDS || env.view !== VIEW_WORDS) throw new Error(`${env.envId} records ${env.words} words and ${env.view} view words where the dungeon layout reads ${DW_WORDS} and ${VIEW_WORDS}`);
+  if (env.obs !== OBSERVED) throw new Error(`${env.envId} records ${env.obs} observations where the dungeon layout reads ${OBSERVED}`);
+  if (constantList(env, 'DUNGEON_GLYPH').length !== GLYPH_UNSEEN + 1) throw new Error(`${env.envId} glyph table does not match the dungeon layout`);
 }
 
 const CUED = new Set([EV_KILL, EV_GOLD, EV_POTION, EV_RATION, EV_DESCEND, ...Array.from({ length: 8 }, (_, e) => EV_QUAFF + e)]);

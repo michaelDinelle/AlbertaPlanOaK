@@ -1,12 +1,12 @@
 #include <string.h>
 #include "../env.h"
 
-typedef struct { uint32_t opponent, window; } relicfogKnobs;
+typedef struct { uint32_t opponent; } relicfogKnobs;
 
 static const relicfogKnobs RELICFOG_KNOBS[3] = {
-    { 0u, 20u },
-    { 1u, 24u },
-    { 2u, 24u }
+    { 0u },
+    { 1u },
+    { 2u }
 };
 
 static const uint32_t RELICFOG_MOVE_COSTS[5] = { 1u, 2u, 3u, 4u, 5u };
@@ -38,7 +38,8 @@ static const float RELICFOG_DENSITY = 0.2f;
 enum {
     RF_SIDE = 24, RF_TILES = RF_SIDE * RF_SIDE, RF_EDGE = RF_SIDE - 1, RF_UNITS = 16, RF_RELICS = 6, RF_PAIRS = 3, RF_MATCH_STEPS = 100,
     RF_MATCH_FRAMES = RF_MATCH_STEPS + 1, RF_MATCHES = 5, RF_GAME_STEPS = RF_MATCHES * RF_MATCH_FRAMES, RF_SPAWN_RATE = 3, RF_START_ENERGY = 100,
-    RF_MAX_ENERGY = 400, RF_FIELD_LIMIT = 20, RF_SCHEDULE_SPAN = 50, RF_SELF_SIGHT = 10, RF_FOCUS_CENTER = 8, RF_NONE = RF_UNITS
+    RF_MAX_ENERGY = 400, RF_FIELD_LIMIT = 20, RF_SCHEDULE_SPAN = 50, RF_SELF_SIGHT = 10, RF_FOCUS_CENTER = 8, RF_NONE = RF_UNITS,
+    RF_CENTERED = RF_FOCUS_CENTER | RF_FOCUS_CENTER << 4, RF_AIM_SHIFT = 8
 };
 enum { RF_FIELDS = 4, RF_GRADIENTS = 208, RF_GRADIENT_BATCH = 32, RF_GRADIENT_STAGES = 7, RF_FINAL_STAGE = RF_GRADIENT_STAGES + RF_FIELDS * RF_SIDE, RF_SURVEY_DONE };
 enum { RF_NEBULA_FIELD, RF_ASTEROID_FIELD, RF_NODE_FIELD, RF_RELIC_FIELD };
@@ -49,7 +50,13 @@ enum { RF_IDLE, RF_HOLD, RF_TEST, RF_EXPLORE, RF_HARVEST };
 enum { RW_MODE, RW_CURSOR, RW_FOCUS, RW_CLOCK, RW_ROSTER, RW_GAME, RW_STEP, RW_MATCH, RW_OUR_POINTS, RW_THEIR_POINTS, RW_OUR_WINS, RW_THEIR_WINS, RW_GAIN, RW_MEMBER, RW_WORDS };
 enum { RF_TAG_GRADIENT = 1 << 24, RF_TAG_MAP = 2 << 24, RF_TAG_CONFIG = 3 << 24, RF_TAG_DRIFT = 4 << 24, RF_TAG_TIE = 5 << 24, RF_TAG_BOT = 6 << 24, RF_TAG_LEAGUE = 7 << 24 };
 enum { RF_SAP_RATIO, RF_RESERVE, RF_RETREAT, RF_EXPLORERS, RF_TESTERS, RF_CAUTION, RF_DROPOFF_GUESS, RF_HARVEST_WEIGHT, RF_THETA };
-enum { RF_BOT_BRIEF = 1, RF_BOT_ASSIGN = 2, RF_SURVEY_CLOCK = 19, RF_LAYERS = 64 };
+enum { RF_LAYERS = 64, RF_REACH = 2, RF_PATCH = 2 * RF_REACH + 1, RF_PATCH_CELLS = RF_PATCH * RF_PATCH };
+enum { RF_OFF_MAP = -1, RF_FOGGED, RF_OPEN, RF_NEBULA, RF_ASTEROID, RF_RELIC };
+enum {
+    RO_MODE, RO_ENERGY, RO_X, RO_Y, RO_FX, RO_FY, RO_FIELD, RO_MATCH, RO_ROUND, RO_GAIN, RO_LEAD, RO_MOVE_COST, RO_SAP_COST, RO_SAP_RANGE,
+    RO_TERRAIN, RO_SHIPS = RO_TERRAIN + RF_PATCH_CELLS, RO_COUNT = RO_SHIPS + RF_PATCH_CELLS
+};
+_Static_assert(RO_COUNT <= OAK_ENV_OBS_MAX && RO_COUNT % 4 == 0, "");
 enum {
     RF_VIEW_TILES = 0, RF_VIEW_UNITS = RF_TILES / 2, RF_VIEW_RELICS = RF_VIEW_UNITS + 4 * RF_UNITS, RF_VIEW_WEIGHTS = RF_VIEW_RELICS + RF_RELICS,
     RF_VIEW_NODE = RF_VIEW_WEIGHTS + RF_TILES / 8, RF_VIEW_SIGHT = RF_VIEW_NODE + 1, RF_VIEW_PARAMS = RF_VIEW_SIGHT + RF_TILES / 8,
@@ -89,6 +96,8 @@ typedef struct {
 typedef struct {
     relicfogOrder plan[RF_UNITS];
     int16_t left[RF_UNITS];
+    uint32_t seen[RF_SIDE], rock[RF_SIDE], relics[RF_SIDE], candidate[RF_SIDE], known[RF_SIDE], ruled[RF_SIDE];
+    int8_t energy[RF_TILES];
     uint32_t key;
 } relicfogOracle;
 
@@ -359,10 +368,9 @@ static void relicfog_resolve(relicfogWorld *w, const int8_t *field, int16_t (*af
                 int dx, dy;
                 relicfog_delta((uint32_t)o.type, &dx, &dy);
                 int x = w->ux[t][i] + dx, y = w->uy[t][i] + dy;
-                uint32_t lookX = x < 0 || x > RF_EDGE ? RF_EDGE : (uint32_t)x, lookY = y < 0 || y > RF_EDGE ? RF_EDGE : (uint32_t)y;
-                if (!relicfog_bit(w->map.asteroid, lookX, lookY)) {
-                    w->ux[t][i] = (uint8_t)(x < 0 ? 0 : x > RF_EDGE ? RF_EDGE : x);
-                    w->uy[t][i] = (uint8_t)(y < 0 ? 0 : y > RF_EDGE ? RF_EDGE : y);
+                if (!relicfog_blocked(w, x, y)) {
+                    w->ux[t][i] = (uint8_t)x;
+                    w->uy[t][i] = (uint8_t)y;
                     energy -= p->moveCost;
                 }
             }
@@ -447,7 +455,7 @@ static void relicfog_advanceWorld(relicfogWorld *w, uint32_t *words, uint32_t se
             relicfog_rescore(w);
         }
     int16_t after[2][RF_UNITS] = { { 0 } };
-    relicfog_resolve(w, relicfog_field(w, shared), after);
+    if (w->alive[0] | w->alive[1]) relicfog_resolve(w, relicfog_field(w, shared), after);
     if (match % RF_SPAWN_RATE == 0u)
         for (uint32_t t = 0u; t < 2u; t++) {
             uint32_t open = ~w->alive[t] & 0xFFFFu;
@@ -478,18 +486,22 @@ static uint32_t relicfog_verdict(const relicfogWorld *w, const uint32_t *words, 
     return philox4x32(seed, ENV_RNG_STREAM, words[RW_GAME], RF_TAG_TIE | words[RW_STEP], 0u, 0u).x >> 31;
 }
 
+static void relicfog_suspect(uint32_t *candidate, uint32_t *ruled, uint32_t x, uint32_t y) {
+    uint32_t band = relicfog_band((int)x - 2, (int)x + 2);
+    for (int v = (int)y - 2; v <= (int)y + 2; v++) {
+        if (v < 0 || v >= RF_SIDE) continue;
+        candidate[v] |= band;
+        ruled[v] &= ~band;
+    }
+}
+
 static void relicfog_brief(relicfogWorld *w, uint32_t seed, uint32_t game) {
     relicfogBot *b = &w->bot;
     for (uint32_t i = 0u; i < RF_RELICS; i++) {
         uint32_t x = w->map.relicX[i], y = w->map.relicY[i];
         if (!(w->relicMask >> i & 1u) || b->seen >> i & 1u || !relicfog_visible(w, 1u, x, y)) continue;
         b->seen |= 1u << i;
-        uint32_t band = relicfog_band((int)x - 2, (int)x + 2);
-        for (int v = (int)y - 2; v <= (int)y + 2; v++) {
-            if (v < 0 || v >= RF_SIDE) continue;
-            b->candidate[v] |= band;
-            b->ruled[v] &= ~band;
-        }
+        relicfog_suspect(b->candidate, b->ruled, x, y);
     }
     uint32_t n = 0u;
     memset(b->enemyRows, 0, sizeof b->enemyRows);
@@ -511,23 +523,28 @@ static void relicfog_brief(relicfogWorld *w, uint32_t seed, uint32_t game) {
     b->turn++;
 }
 
-static void relicfog_infer(relicfogWorld *w) {
-    relicfogBot *b = &w->bot;
-    uint32_t occupied[RF_SIDE], unknown[RF_SIDE], untested = 0u;
+static void relicfog_deduce(const uint32_t *occupied, int32_t gain, const uint32_t *candidate, uint32_t *known, uint32_t *ruled) {
+    uint32_t unknown[RF_SIDE], untested = 0u;
     int32_t explained = 0;
-    relicfog_occupied(w, 1u, occupied);
     for (uint32_t y = 0u; y < RF_SIDE; y++) {
-        uint32_t tested = occupied[y] & b->candidate[y] & ~b->ruled[y];
-        explained += __builtin_popcount(tested & b->known[y]);
-        unknown[y] = tested & ~b->known[y];
+        uint32_t tested = occupied[y] & candidate[y] & ~ruled[y];
+        explained += __builtin_popcount(tested & known[y]);
+        unknown[y] = tested & ~known[y];
         untested += (uint32_t)__builtin_popcount(unknown[y]);
     }
-    int32_t rest = w->gain[1] - explained;
+    int32_t rest = gain - explained;
     if (!untested) return;
     for (uint32_t y = 0u; y < RF_SIDE; y++) {
-        if (rest <= 0) b->ruled[y] |= unknown[y];
-        else if (rest >= (int32_t)untested) b->known[y] |= unknown[y];
+        if (rest <= 0) ruled[y] |= unknown[y];
+        else if (rest >= (int32_t)untested) known[y] |= unknown[y];
     }
+}
+
+static void relicfog_infer(relicfogWorld *w) {
+    relicfogBot *b = &w->bot;
+    uint32_t occupied[RF_SIDE];
+    relicfog_occupied(w, 1u, occupied);
+    relicfog_deduce(occupied, w->gain[1], b->candidate, b->known, b->ruled);
 }
 
 static void relicfog_waypoint(const relicfogBot *b, uint32_t u, uint32_t *x, uint32_t *y) {
@@ -586,11 +603,11 @@ static void relicfog_assign(relicfogWorld *w) {
     }
 }
 
-static relicfogOrder relicfog_step1(const relicfogWorld *w, const int8_t *field, uint32_t team, uint32_t i, uint32_t tx, uint32_t ty, float harvest, float caution, const uint32_t *enemyRows, uint32_t jitter) {
+static relicfogOrder relicfog_step1(const relicfogWorld *w, const int8_t *field, uint32_t i, uint32_t tx, uint32_t ty, float harvest, float caution, const uint32_t *enemyRows, uint32_t jitter) {
     relicfogOrder order = { RF_CENTER, 0, 0 };
-    int32_t energy = w->energy[team][i], cost = w->map.params.moveCost;
+    int32_t energy = w->energy[1][i], cost = w->map.params.moveCost;
     if (energy < cost) return order;
-    int x = w->ux[team][i], y = w->uy[team][i];
+    int x = w->ux[1][i], y = w->uy[1][i];
     float best = -1e9f;
     for (uint32_t k = 0u, a = jitter; k < 5u; k++, a = a == 4u ? 0u : a + 1u) {
         int dx, dy;
@@ -598,8 +615,8 @@ static relicfogOrder relicfog_step1(const relicfogWorld *w, const int8_t *field,
         int nx = x + dx, ny = y + dy;
         if (a && relicfog_blocked(w, nx, ny)) continue;
         float score = -4.0f * (float)(relicfog_span(nx, (int)tx) + relicfog_span(ny, (int)ty));
-        if (harvest != 0.0f && (!team || relicfog_beside(w, team, (uint32_t)nx, (uint32_t)ny))) score += harvest * 0.25f * (float)field[ny * RF_SIDE + nx];
-        if (enemyRows && relicfog_bit(enemyRows, (uint32_t)nx, (uint32_t)ny) && (float)relicfog_sum(w->energy[1u - team], relicfog_here(w, 1u - team, (uint32_t)nx, (uint32_t)ny)) >= (float)(energy - (a ? cost : 0)) - caution) score -= 1000.0f;
+        if (harvest != 0.0f && relicfog_beside(w, 1u, (uint32_t)nx, (uint32_t)ny)) score += harvest * 0.25f * (float)field[ny * RF_SIDE + nx];
+        if (enemyRows && relicfog_bit(enemyRows, (uint32_t)nx, (uint32_t)ny) && (float)relicfog_sum(w->energy[0], relicfog_here(w, 0u, (uint32_t)nx, (uint32_t)ny)) >= (float)(energy - (a ? cost : 0)) - caution) score -= 1000.0f;
         if (score > best) {
             best = score;
             order.type = (int8_t)a;
@@ -648,7 +665,7 @@ static relicfogOrder relicfog_sapper(relicfogWorld *w, const int8_t *field, uint
         harvest *= 4.0f;
     }
     if (b->task[i] == RF_HOLD && tx == x && ty == y && relicfog_bit(b->known, x, y)) return (relicfogOrder){ RF_CENTER, 0, 0 };
-    return relicfog_step1(w, field, 1u, i, tx, ty, harvest, theta[RF_CAUTION], b->enemyRows, b->jitter[i]);
+    return relicfog_step1(w, field, i, tx, ty, harvest, theta[RF_CAUTION], b->enemyRows, b->jitter[i]);
 }
 
 static relicfogOrder relicfog_scout(relicfogWorld *w, const int8_t *field, uint32_t i) {
@@ -662,26 +679,22 @@ static relicfogOrder relicfog_scout(relicfogWorld *w, const int8_t *field, uint3
         tx = (uint32_t)(x < 0 ? 0 : x > RF_EDGE ? RF_EDGE : x);
         ty = (uint32_t)(y < 0 ? 0 : y > RF_EDGE ? RF_EDGE : y);
     } else relicfog_waypoint(b, i, &tx, &ty);
-    return relicfog_step1(w, field, 1u, i, tx, ty, 0.0f, 0.0f, 0, b->jitter[i]);
+    return relicfog_step1(w, field, i, tx, ty, 0.0f, 0.0f, 0, b->jitter[i]);
 }
 
-static void relicfog_think(const relicfogKnobs *k, relicfogWorld *w, const uint32_t *words, uint32_t seed, uint32_t clock, const float *shared) {
+static void relicfog_think(const relicfogKnobs *k, relicfogWorld *w, const uint32_t *words, uint32_t seed, const float *shared) {
     if (words[RW_MATCH] == 0u) return;
-    uint32_t sapper = k->opponent != RF_SCOUT, first = sapper ? RF_BOT_ASSIGN + 1u : RF_BOT_ASSIGN;
-    if (clock == RF_BOT_BRIEF) {
-        relicfog_brief(w, seed, words[RW_GAME]);
-        if (sapper) relicfog_infer(w);
-        return;
-    }
-    if (sapper && clock == RF_BOT_ASSIGN) {
+    uint32_t sapper = k->opponent != RF_SCOUT;
+    relicfog_brief(w, seed, words[RW_GAME]);
+    if (sapper) {
+        relicfog_infer(w);
         relicfog_assign(w);
-        return;
     }
-    if (clock < first || clock >= first + RF_UNITS) return;
-    uint32_t i = clock - first;
-    if (!(w->alive[1] >> i & 1u) || w->energy[1][i] < 0) return;
     const int8_t *field = relicfog_field(w, shared);
-    w->order[1][i] = sapper ? relicfog_sapper(w, field, i) : relicfog_scout(w, field, i);
+    for (uint32_t bits = w->alive[1]; bits; bits &= bits - 1u) {
+        uint32_t i = (uint32_t)__builtin_ctz(bits);
+        if (w->energy[1][i] >= 0) w->order[1][i] = sapper ? relicfog_sapper(w, field, i) : relicfog_scout(w, field, i);
+    }
 }
 
 static void relicfog_open(relicfogWorld *w, uint32_t *words) {
@@ -689,12 +702,12 @@ static void relicfog_open(relicfogWorld *w, uint32_t *words) {
     if (words[RW_MATCH] != 0u)
         for (uint32_t bits = w->alive[0]; bits; bits &= bits - 1u) {
             uint32_t i = (uint32_t)__builtin_ctz(bits);
-            if (w->energy[0][i] >= 0) roster |= 1u << i;
+            if (w->energy[0][i] >= w->map.params.moveCost) roster |= 1u << i;
         }
     words[RW_ROSTER] = roster;
     words[RW_CURSOR] = roster ? (uint32_t)__builtin_ctz(roster) : RF_NONE;
     words[RW_MODE] = roster ? RF_ORDER : RF_WAIT;
-    words[RW_FOCUS] = RF_FOCUS_CENTER | RF_FOCUS_CENTER << 4;
+    words[RW_FOCUS] = RF_CENTERED;
     words[RW_CLOCK] = 0u;
     memset(w->order, 0, sizeof w->order);
 }
@@ -719,6 +732,7 @@ static void relicfog_begin(const relicfogKnobs *k, relicfogWorld *w, uint32_t *w
     uint32_t member = 0u;
     if (k->opponent == RF_LEAGUE) member = leaguePick(w->winRate, philox4x32(seed, LEAGUE_RNG_STREAM, game, RF_TAG_LEAGUE, 0u, 0u).x);
     for (uint32_t d = 0u; d < RF_THETA; d++) w->bot.theta[d] = k->opponent == RF_LEAGUE ? w->theta[member * RF_THETA + d] : RELICFOG_THETA[d];
+    memset(&w->oracle, 0, sizeof w->oracle);
     w->oracle.key = 0xFFFFFFFFu;
     words[RW_GAME] = game;
     words[RW_STEP] = words[RW_MATCH] = 0u;
@@ -751,26 +765,31 @@ static float relicfog_tick(const relicfogKnobs *k, relicfogWorld *w, uint32_t *w
     return reward;
 }
 
+static float relicfog_settle(const relicfogKnobs *k, relicfogWorld *w, uint32_t *words, uint32_t seed, const float *shared, uint32_t *done) {
+    float reward = 0.0f;
+    while (words[RW_MODE] == RF_WAIT) {
+        relicfog_think(k, w, words, seed, shared);
+        relicfog_survey(&w->survey, seed);
+        reward += relicfog_tick(k, w, words, seed, shared, done);
+    }
+    return reward;
+}
+
 static void relicfog_press(relicfogWorld *w, uint32_t *words, uint32_t action) {
-    uint32_t mode = words[RW_MODE], u = words[RW_CURSOR];
-    if (mode == RF_WAIT) return;
-    int fx = (int)(words[RW_FOCUS] & 15u) - RF_FOCUS_CENTER, fy = (int)(words[RW_FOCUS] >> 4) - RF_FOCUS_CENTER;
+    uint32_t mode = words[RW_MODE], u = words[RW_CURSOR], aimed = words[RW_FOCUS] >> RF_AIM_SHIFT;
+    int fx = (int)(words[RW_FOCUS] & 15u) - RF_FOCUS_CENTER, fy = (int)(words[RW_FOCUS] >> 4 & 15u) - RF_FOCUS_CENTER, reach = w->map.params.sapRange;
     if (mode == RF_ORDER && action == RF_SAP) {
         words[RW_MODE] = RF_TARGET;
-        words[RW_FOCUS] = RF_FOCUS_CENTER | RF_FOCUS_CENTER << 4;
+        words[RW_FOCUS] = aimed << RF_AIM_SHIFT | RF_CENTERED;
         return;
     }
-    if (mode == RF_TARGET && action == RF_SAP) {
-        words[RW_MODE] = RF_ORDER;
-        return;
-    }
-    if (mode == RF_TARGET && action != RF_CENTER) {
+    if (mode == RF_TARGET && action != RF_CENTER && action != RF_SAP && aimed <= 2u * (uint32_t)reach) {
         int dx, dy;
         relicfog_delta(action, &dx, &dy);
-        int reach = w->map.params.sapRange, nx = fx + dx, ny = fy + dy;
-        int x = w->ux[0][u] + nx, y = w->uy[0][u] + ny;
-        if (nx >= -reach && nx <= reach && ny >= -reach && ny <= reach && x >= 0 && y >= 0 && x < RF_SIDE && y < RF_SIDE)
-            words[RW_FOCUS] = (uint32_t)(nx + RF_FOCUS_CENTER) | (uint32_t)(ny + RF_FOCUS_CENTER) << 4;
+        int nx = fx + dx, ny = fy + dy, x = w->ux[0][u] + nx, y = w->uy[0][u] + ny;
+        uint32_t inside = nx >= -reach && nx <= reach && ny >= -reach && ny <= reach && x >= 0 && y >= 0 && x < RF_SIDE && y < RF_SIDE;
+        words[RW_FOCUS] = (aimed + 1u) << RF_AIM_SHIFT | (inside ? (uint32_t)(nx + RF_FOCUS_CENTER) | (uint32_t)(ny + RF_FOCUS_CENTER) << 4 : RF_CENTERED);
+        if (!inside) words[RW_MODE] = RF_ORDER;
         return;
     }
     w->order[0][u] = mode == RF_TARGET ? (relicfogOrder){ RF_SAP, (int8_t)fx, (int8_t)fy } : (relicfogOrder){ (int8_t)action, 0, 0 };
@@ -778,41 +797,51 @@ static void relicfog_press(relicfogWorld *w, uint32_t *words, uint32_t action) {
     words[RW_ROSTER] = roster;
     words[RW_CURSOR] = roster ? (uint32_t)__builtin_ctz(roster) : RF_NONE;
     words[RW_MODE] = roster ? RF_ORDER : RF_WAIT;
-    words[RW_FOCUS] = RF_FOCUS_CENTER | RF_FOCUS_CENTER << 4;
+    words[RW_FOCUS] = RF_CENTERED;
 }
 
 static void relicfog_observeWorld(const relicfogWorld *w, const uint32_t *words, float *obs, const float *shared) {
-    uint32_t mode = words[RW_MODE];
-    int32_t v[20] = {0};
-    v[0] = mode == RF_WAIT ? -1 : mode == RF_ORDER ? 0 : 1;
-    if (mode != RF_WAIT) {
-        uint32_t u = words[RW_CURSOR], x = w->ux[0][u], y = w->uy[0][u];
-        int fx = mode == RF_TARGET ? (int)(words[RW_FOCUS] & 15u) - RF_FOCUS_CENTER : 0, fy = mode == RF_TARGET ? (int)(words[RW_FOCUS] >> 4) - RF_FOCUS_CENTER : 0;
-        uint32_t px = (uint32_t)((int)x + fx), py = (uint32_t)((int)y + fy), seen = relicfog_visible(w, 0u, px, py);
-        v[1] = w->energy[0][u];
-        v[2] = (int32_t)x;
-        v[3] = (int32_t)y;
-        v[4] = fx;
-        v[5] = fy;
-        v[6] = (int32_t)seen;
-        v[10] = relicfog_sum(w->energy[0], relicfog_here(w, 0u, px, py));
-        if (seen) {
-            uint8x16_t them = relicfog_here(w, 1u, px, py);
-            v[7] = (int32_t)(relicfog_bit(w->map.nebula, px, py) + 2u * relicfog_bit(w->map.asteroid, px, py));
-            v[8] = relicfog_field(w, shared)[py * RF_SIDE + px];
-            v[9] = (int32_t)relicfog_bit(w->relicRows, px, py);
-            v[11] = relicfog_sum(w->energy[1], them);
-            v[12] = (int32_t)relicfog_lanesSet(them);
+    const relicfogParams *p = &w->map.params;
+    uint32_t u = words[RW_CURSOR], target = words[RW_MODE] == RF_TARGET;
+    int32_t v[RO_COUNT] = {0}, foe[RF_PATCH_CELLS] = {0};
+    int x = w->ux[0][u], y = w->uy[0][u];
+    int fx = target ? (int)(words[RW_FOCUS] & 15u) - RF_FOCUS_CENTER : 0, fy = target ? (int)(words[RW_FOCUS] >> 4 & 15u) - RF_FOCUS_CENTER : 0;
+    int px = x + fx, py = y + fy;
+    uint8_t seen[RF_PATCH_CELLS] = {0};
+    v[RO_MODE] = (int32_t)target;
+    v[RO_ENERGY] = w->energy[0][u];
+    v[RO_X] = x;
+    v[RO_Y] = y;
+    v[RO_FX] = fx;
+    v[RO_FY] = fy;
+    for (uint32_t c = 0u; c < RF_PATCH_CELLS; c++) {
+        int cx = px + (int)(c % RF_PATCH) - RF_REACH, cy = py + (int)(c / RF_PATCH) - RF_REACH;
+        if (cx < 0 || cy < 0 || cx >= RF_SIDE || cy >= RF_SIDE) {
+            v[RO_TERRAIN + c] = RF_OFF_MAP;
+            continue;
         }
+        seen[c] = (uint8_t)relicfog_visible(w, 0u, (uint32_t)cx, (uint32_t)cy);
+        if (!seen[c]) continue;
+        uint32_t kind = relicfog_bit(w->map.nebula, (uint32_t)cx, (uint32_t)cy) ? RF_NEBULA : relicfog_bit(w->map.asteroid, (uint32_t)cx, (uint32_t)cy) ? RF_ASTEROID : RF_OPEN;
+        v[RO_TERRAIN + c] = (int32_t)(kind + relicfog_bit(w->relicRows, (uint32_t)cx, (uint32_t)cy) * RF_RELIC);
     }
-    v[13] = (int32_t)words[RW_MATCH];
-    v[14] = (int32_t)(words[RW_STEP] / RF_MATCH_FRAMES);
-    v[15] = (int32_t)words[RW_GAIN];
-    v[16] = (int32_t)words[RW_OUR_POINTS] - (int32_t)words[RW_THEIR_POINTS];
-    v[17] = (int32_t)words[RW_OUR_WINS] - (int32_t)words[RW_THEIR_WINS];
-    for (uint32_t i = 0u; i < 16u; i += 4u) vst1q_f32(obs + i, vcvtq_f32_s32(vld1q_s32(v + i)));
-    obs[16] = (float)v[16];
-    obs[17] = (float)v[17];
+    if (seen[RF_PATCH_CELLS / 2u]) v[RO_FIELD] = relicfog_field(w, shared)[py * RF_SIDE + px];
+    for (uint32_t t = 0u; t < 2u; t++)
+        for (uint32_t bits = w->alive[t]; bits; bits &= bits - 1u) {
+            uint32_t i = (uint32_t)__builtin_ctz(bits);
+            uint32_t dx = (uint32_t)(w->ux[t][i] - px + RF_REACH), dy = (uint32_t)(w->uy[t][i] - py + RF_REACH), c = dy * RF_PATCH + dx;
+            if (w->energy[t][i] < 0 || dx >= RF_PATCH || dy >= RF_PATCH || (t && !seen[c])) continue;
+            (t ? foe : v + RO_SHIPS)[c] += w->energy[t][i] + 1;
+        }
+    for (uint32_t c = 0u; c < RF_PATCH_CELLS; c++) v[RO_SHIPS + c] = v[RO_SHIPS + c] ? v[RO_SHIPS + c] : -foe[c];
+    v[RO_MATCH] = (int32_t)words[RW_MATCH];
+    v[RO_ROUND] = (int32_t)(words[RW_STEP] / RF_MATCH_FRAMES);
+    v[RO_GAIN] = (int32_t)words[RW_GAIN];
+    v[RO_LEAD] = (int32_t)words[RW_OUR_POINTS] - (int32_t)words[RW_THEIR_POINTS];
+    v[RO_MOVE_COST] = p->moveCost;
+    v[RO_SAP_COST] = p->sapCost;
+    v[RO_SAP_RANGE] = p->sapRange;
+    for (uint32_t i = 0u; i < RO_COUNT; i += 4u) vst1q_f32(obs + i, vcvtq_f32_s32(vld1q_s32(v + i)));
 }
 
 static uint32_t relicfog_action(const float *ctrl) {
@@ -824,11 +853,8 @@ static inline __attribute__((always_inline)) float relicfog_advance(const relicf
     relicfogWorld *w = relicfog_world(extra);
     *done = 0u;
     relicfog_press(w, words, relicfog_action(ctrl));
-    uint32_t clock = ++words[RW_CLOCK];
-    relicfog_think(k, w, words, seed, clock, shared);
-    if (clock == RF_SURVEY_CLOCK) relicfog_survey(&w->survey, seed);
-    float reward = 0.0f;
-    if (clock >= k->window && words[RW_MODE] == RF_WAIT) reward = relicfog_tick(k, w, words, seed, shared, done);
+    words[RW_CLOCK]++;
+    float reward = relicfog_settle(k, w, words, seed, shared, done);
     relicfog_observeWorld(w, words, obs, shared);
     return reward;
 }
@@ -855,6 +881,8 @@ void relicfog_reset(uint32_t instance, uint32_t seed, uint32_t *words, uint32_t 
     for (uint32_t i = 0u; i < RW_WORDS; i++) words[i] = 0u;
     if (k->opponent == RF_LEAGUE) relicfog_league(w, seed);
     relicfog_begin(k, w, words, seed, 0u);
+    uint32_t done = 0u;
+    relicfog_settle(k, w, words, seed, 0, &done);
 }
 
 float relicfog_step(uint32_t instance, uint32_t seed, uint32_t step, const float *ctrl, uint32_t *words, uint32_t *extra, float *obs, uint32_t *done, const float *shared) {
@@ -909,68 +937,119 @@ static int32_t relicfog_route(const relicfogWorld *w, const int8_t *field, const
     return best;
 }
 
+static void relicfog_witness(relicfogWorld *w, const int8_t *field) {
+    relicfogOracle *o = &w->oracle;
+    uint32_t blank = 0u;
+    for (uint32_t y = 0u; y < RF_SIDE; y++)
+        for (uint32_t x = 0u; x < RF_SIDE; x++) {
+            if (!relicfog_visible(w, 0u, x, y)) continue;
+            uint32_t mx = RF_EDGE - y, my = RF_EDGE - x, rock = relicfog_bit(w->map.asteroid, x, y);
+            o->seen[y] |= 1u << x;
+            o->rock[y] = (o->rock[y] & ~(1u << x)) | rock << x;
+            o->rock[my] = (o->rock[my] & ~(1u << mx)) | rock << mx;
+            o->energy[y * RF_SIDE + x] = o->energy[my * RF_SIDE + mx] = field[y * RF_SIDE + x];
+            if (!relicfog_bit(w->relicRows, x, y) || relicfog_bit(o->relics, x, y)) continue;
+            o->relics[y] |= 1u << x;
+            o->relics[my] |= 1u << mx;
+            relicfog_suspect(o->candidate, o->ruled, x, y);
+            relicfog_suspect(o->candidate, o->ruled, mx, my);
+        }
+    relicfog_symmetrize(o->seen);
+    for (uint32_t y = 0u; y < RF_SIDE; y++) blank |= ~o->seen[y] & 0xFFFFFFu;
+    if (!blank) memset(o->seen, 0, sizeof o->seen);
+}
+
+static uint32_t relicfog_nearest(const uint32_t *rows, uint32_t x, uint32_t y, uint32_t *cx, uint32_t *cy) {
+    uint32_t far = 1000u;
+    for (uint32_t v = 0u; v < RF_SIDE; v++)
+        for (uint32_t bits = rows[v]; bits; bits &= bits - 1u) {
+            uint32_t u = (uint32_t)__builtin_ctz(bits), d = relicfog_span((int)x, (int)u) + relicfog_span((int)y, (int)v);
+            if (d < far) { far = d; *cx = u; *cy = v; }
+        }
+    return far < 1000u;
+}
+
+static void relicfog_claim(const relicfogWorld *w, uint32_t *free, uint32_t *open, uint32_t limit, uint8_t *tx, uint8_t *ty) {
+    for (uint32_t n = 0u; n < limit && *free; n++) {
+        uint32_t best = RF_NONE, bx = 0u, by = 0u, far = 1000u;
+        for (uint32_t y = 0u; y < RF_SIDE; y++)
+            for (uint32_t rows = open[y]; rows; rows &= rows - 1u) {
+                uint32_t x = (uint32_t)__builtin_ctz(rows);
+                for (uint32_t bits = *free; bits; bits &= bits - 1u) {
+                    uint32_t i = (uint32_t)__builtin_ctz(bits), d = relicfog_span(w->ux[0][i], (int)x) + relicfog_span(w->uy[0][i], (int)y);
+                    if (d < far) { far = d; best = i; bx = x; by = y; }
+                }
+            }
+        if (best == RF_NONE) return;
+        *free &= ~(1u << best);
+        open[by] &= ~(1u << bx);
+        tx[best] = (uint8_t)bx;
+        ty[best] = (uint8_t)by;
+    }
+}
+
 static void relicfog_plan(relicfogWorld *w, const uint32_t *words, const float *shared) {
     relicfogOracle *o = &w->oracle;
     const relicfogParams *p = &w->map.params;
-    const int8_t *field = relicfog_field(w, shared);
-    uint32_t targets[RF_SIDE], enemyRows[RF_SIDE] = {0}, passable[RF_SIDE], good[RF_SIDE], mine[RF_SIDE] = {0}, free = 0u, steps = words[RW_STEP];
-    uint32_t layer[RF_LAYERS][RF_SIDE];
-    memcpy(targets, w->score, sizeof targets);
-    for (uint32_t q = w->pairs; q < RF_PAIRS; q++)
-        if (w->map.schedule[q] >= 0 && (uint32_t)w->map.schedule[q] < steps + 24u && (uint32_t)w->map.schedule[q] / RF_MATCH_FRAMES == steps / RF_MATCH_FRAMES)
-            for (uint32_t y = 0u; y < RF_SIDE; y++) targets[y] |= w->map.weight[q][y];
+    const int32_t splash = (int32_t)(p->sapCost * RELICFOG_DROPOFF_QUARTERS[0] / 4u);
+    uint32_t occupied[RF_SIDE], hold[RF_SIDE], open[RF_SIDE], probe[RF_SIDE], lure[RF_SIDE], passable[RF_SIDE], good[RF_SIDE], unseen[RF_SIDE], enemyRows[RF_SIDE] = {0}, mine[RF_SIDE] = {0};
+    uint32_t layer[RF_LAYERS][RF_SIDE], sighted = 0u, free = 0u, relics = 0u;
+    relicfog_witness(w, relicfog_field(w, shared));
+    relicfog_occupied(w, 0u, occupied);
+    relicfog_deduce(occupied, (int32_t)words[RW_GAIN], o->candidate, o->known, o->ruled);
+    relicfog_symmetrize(o->known);
+    relicfog_symmetrize(o->ruled);
     for (uint32_t y = 0u; y < RF_SIDE; y++) {
         uint32_t drain = 0u;
-        for (uint32_t x = 0u; x < RF_SIDE; x++) drain |= (uint32_t)(field[y * RF_SIDE + x] - (int32_t)(relicfog_bit(w->map.nebula, x, y) * p->energyReduction) < -1) << x;
-        passable[y] = ~w->map.asteroid[y] & 0xFFFFFFu;
-        good[y] = (passable[y] & ~drain) | targets[y];
+        for (uint32_t x = 0u; x < RF_SIDE; x++) drain |= (uint32_t)(o->energy[y * RF_SIDE + x] < -1) << x;
+        hold[y] = open[y] = o->known[y] & ~o->ruled[y];
+        probe[y] = o->candidate[y] & ~o->known[y] & ~o->ruled[y];
+        lure[y] = hold[y] | probe[y] | o->relics[y];
+        passable[y] = ~o->rock[y] & 0xFFFFFFu;
+        good[y] = (passable[y] & ~drain) | hold[y] | probe[y];
+        unseen[y] = ~o->seen[y] & 0xFFFFFFu;
+        relics += (uint32_t)__builtin_popcount(o->relics[y]);
     }
     for (uint32_t bits = w->alive[1]; bits; bits &= bits - 1u) {
         uint32_t j = (uint32_t)__builtin_ctz(bits);
+        if (!relicfog_visible(w, 0u, w->ux[1][j], w->uy[1][j])) continue;
+        sighted |= 1u << j;
         enemyRows[w->uy[1][j]] |= 1u << w->ux[1][j];
+        o->left[j] = w->energy[1][j];
     }
-    uint8_t tx[RF_UNITS] = {0}, ty[RF_UNITS] = {0}, held[RF_UNITS] = {0};
     for (uint32_t bits = w->alive[0]; bits; bits &= bits - 1u) {
         uint32_t i = (uint32_t)__builtin_ctz(bits);
         o->plan[i] = (relicfogOrder){ RF_CENTER, 0, 0 };
         if (w->energy[0][i] >= 0) free |= 1u << i;
     }
-    for (uint32_t i = 0u; i < RF_UNITS; i++) o->left[i] = w->energy[1][i];
-    uint32_t open[RF_SIDE];
-    memcpy(open, targets, sizeof open);
-    for (uint32_t round = 0u; round < RF_UNITS && free; round++) {
-        uint32_t best = RF_NONE, bx = 0u, by = 0u, far = 1000u;
-        for (uint32_t y = 0u; y < RF_SIDE; y++)
-            for (uint32_t rows = open[y]; rows; rows &= rows - 1u) {
-                uint32_t x = (uint32_t)__builtin_ctz(rows);
-                for (uint32_t bits = free; bits; bits &= bits - 1u) {
-                    uint32_t i = (uint32_t)__builtin_ctz(bits), d = relicfog_span(w->ux[0][i], (int)x) + relicfog_span(w->uy[0][i], (int)y);
-                    if (d < far) { far = d; best = i; bx = x; by = y; }
-                }
-            }
-        if (best == RF_NONE) break;
-        free &= ~(1u << best);
-        open[by] &= ~(1u << bx);
-        tx[best] = (uint8_t)bx;
-        ty[best] = (uint8_t)by;
-        held[best] = 1u;
-        mine[by] |= 1u << bx;
+    uint8_t tx[RF_UNITS] = {0}, ty[RF_UNITS] = {0};
+    uint32_t held = free;
+    relicfog_claim(w, &free, open, RF_UNITS, tx, ty);
+    relicfog_claim(w, &free, probe, 1u, tx, ty);
+    held &= ~free;
+    for (uint32_t bits = held; bits; bits &= bits - 1u) {
+        uint32_t i = (uint32_t)__builtin_ctz(bits);
+        mine[ty[i]] |= 1u << tx[i];
     }
+    uint32_t round = words[RW_STEP] / RF_MATCH_FRAMES, explore = !relics || (round < RF_PAIRS && relics < 2u * (round + 1u)), reach = p->sensorRange;
     for (uint32_t bits = free; bits; bits &= bits - 1u) {
-        uint32_t i = (uint32_t)__builtin_ctz(bits), x = w->ux[0][i], y = w->uy[0][i], far = 1000u, cx = 12u, cy = 12u;
-        for (uint32_t v = 0u; v < RF_SIDE; v++)
-            for (uint32_t rows = targets[v]; rows; rows &= rows - 1u) {
-                uint32_t u = (uint32_t)__builtin_ctz(rows), d = relicfog_span((int)x, (int)u) + relicfog_span((int)y, (int)v);
-                if (d < far) { far = d; cx = u; cy = v; }
-            }
+        uint32_t i = (uint32_t)__builtin_ctz(bits), x = w->ux[0][i], y = w->uy[0][i], cx = RF_SIDE / 2u, cy = RF_SIDE / 2u;
+        if (explore && relicfog_nearest(unseen, x, y, &cx, &cy)) {
+            tx[i] = (uint8_t)cx;
+            ty[i] = (uint8_t)cy;
+            uint32_t band = relicfog_band((int)cx - (int)reach, (int)cx + (int)reach);
+            for (int v = (int)cy - (int)reach; v <= (int)cy + (int)reach; v++)
+                if (v >= 0 && v < RF_SIDE) unseen[v] &= ~band;
+            continue;
+        }
+        relicfog_nearest(lure, x, y, &cx, &cy);
         int32_t value = -1000;
         tx[i] = (uint8_t)cx;
         ty[i] = (uint8_t)cy;
         for (int v = (int)cy - 2; v <= (int)cy + 2; v++)
             for (int u = (int)cx - 2; u <= (int)cx + 2; u++) {
-                if (u < 0 || v < 0 || u >= RF_SIDE || v >= RF_SIDE || !relicfog_bit(passable, (uint32_t)u, (uint32_t)v) || relicfog_bit(mine, (uint32_t)u, (uint32_t)v)) continue;
-                int32_t score = field[v * RF_SIDE + u] - (int32_t)(relicfog_bit(w->map.nebula, (uint32_t)u, (uint32_t)v) * p->energyReduction);
-                if (score > value) { value = score; tx[i] = (uint8_t)u; ty[i] = (uint8_t)v; }
+                if (u < 0 || v < 0 || u >= RF_SIDE || v >= RF_SIDE || !relicfog_bit(passable, (uint32_t)u, (uint32_t)v) || relicfog_bit(mine, (uint32_t)u, (uint32_t)v) || relicfog_bit(probe, (uint32_t)u, (uint32_t)v)) continue;
+                if (o->energy[v * RF_SIDE + u] > value) { value = o->energy[v * RF_SIDE + u]; tx[i] = (uint8_t)u; ty[i] = (uint8_t)v; }
             }
         mine[ty[i]] |= 1u << tx[i];
     }
@@ -980,58 +1059,48 @@ static void relicfog_plan(relicfogWorld *w, const uint32_t *words, const float *
         if (energy < 0) continue;
         uint32_t x = w->ux[0][i], y = w->uy[0][i];
         if (energy >= p->sapCost + 10) {
-            int32_t best = held[i] && tx[i] == x && ty[i] == y ? p->sapCost : p->sapCost - p->sapCost / 4, pick = -1;
-            for (uint32_t bits1 = w->alive[1]; bits1; bits1 &= bits1 - 1u) {
+            int32_t best = held >> i & 1u && tx[i] == x && ty[i] == y ? p->sapCost : p->sapCost - p->sapCost / 4, pick = -1;
+            for (uint32_t bits1 = sighted; bits1; bits1 &= bits1 - 1u) {
                 uint32_t j = (uint32_t)__builtin_ctz(bits1);
                 if (relicfog_span(w->ux[1][j], (int)x) > p->sapRange || relicfog_span(w->uy[1][j], (int)y) > p->sapRange) continue;
                 int32_t value = 0;
-                for (uint32_t bits2 = w->alive[1]; bits2; bits2 &= bits2 - 1u) {
+                for (uint32_t bits2 = sighted; bits2; bits2 &= bits2 - 1u) {
                     uint32_t m = (uint32_t)__builtin_ctz(bits2), dx = relicfog_span(w->ux[1][m], w->ux[1][j]), dy = relicfog_span(w->uy[1][m], w->uy[1][j]), far = dx > dy ? dx : dy;
                     if (far > 1u || o->left[m] < 0) continue;
-                    int32_t hit = far ? p->sapCost * p->dropoff / 4 : p->sapCost, left = o->left[m] + 1;
+                    int32_t hit = far ? splash : p->sapCost, left = o->left[m] + 1;
                     value += hit < left ? hit : left;
-                    if (relicfog_bit(w->score, w->ux[1][m], w->uy[1][m]) && hit >= left) value += p->sapCost;
+                    if (relicfog_bit(hold, w->ux[1][m], w->uy[1][m]) && hit >= left) value += p->sapCost;
                 }
                 if (value > best) { best = value; pick = (int32_t)j; }
             }
             if (pick >= 0) {
-                for (uint32_t bits2 = w->alive[1]; bits2; bits2 &= bits2 - 1u) {
+                for (uint32_t bits2 = sighted; bits2; bits2 &= bits2 - 1u) {
                     uint32_t m = (uint32_t)__builtin_ctz(bits2), dx = relicfog_span(w->ux[1][m], w->ux[1][pick]), dy = relicfog_span(w->uy[1][m], w->uy[1][pick]), far = dx > dy ? dx : dy;
-                    if (far <= 1u) o->left[m] = (int16_t)(o->left[m] - (far ? p->sapCost * p->dropoff / 4 : p->sapCost));
+                    if (far <= 1u) o->left[m] = (int16_t)(o->left[m] - (far ? splash : p->sapCost));
                 }
                 o->plan[i] = (relicfogOrder){ RF_SAP, (int8_t)((int)w->ux[1][pick] - (int)x), (int8_t)((int)w->uy[1][pick] - (int)y) };
                 continue;
             }
         }
         if ((tx[i] == x && ty[i] == y) || energy < p->moveCost) continue;
-        int32_t move = relicfog_route(w, field, good, enemyRows, i, tx[i], ty[i], layer);
-        if (move < 0) move = relicfog_route(w, field, passable, enemyRows, i, tx[i], ty[i], layer);
-        o->plan[i] = move < 0 ? relicfog_step1(w, field, 0u, i, tx[i], ty[i], 1.0f, 0.0f, enemyRows, i % 5u) : (relicfogOrder){ (int8_t)move, 0, 0 };
+        int32_t move = relicfog_route(w, o->energy, good, enemyRows, i, tx[i], ty[i], layer);
+        if (move < 0) move = relicfog_route(w, o->energy, passable, enemyRows, i, tx[i], ty[i], layer);
+        if (move >= 0) o->plan[i] = (relicfogOrder){ (int8_t)move, 0, 0 };
     }
 }
 
 void relicfog_oracle(uint32_t instance, uint32_t seed, uint32_t step, const uint32_t *words, uint32_t *extra, const float *obs, float *ctrl, const float *shared) {
     (void)instance; (void)seed; (void)step; (void)obs;
     relicfogWorld *w = relicfog_world(extra);
-    uint32_t mode = words[RW_MODE];
-    ctrl[0] = (float)RF_CENTER;
-    if (mode == RF_WAIT) return;
     uint32_t key = words[RW_GAME] << 10 | words[RW_STEP];
     if (w->oracle.key != key) {
         relicfog_plan(w, words, shared);
         w->oracle.key = key;
     }
     relicfogOrder plan = w->oracle.plan[words[RW_CURSOR]];
-    if (mode == RF_ORDER) {
-        ctrl[0] = (float)plan.type;
-        return;
-    }
-    int fx = (int)(words[RW_FOCUS] & 15u) - RF_FOCUS_CENTER, fy = (int)(words[RW_FOCUS] >> 4) - RF_FOCUS_CENTER;
-    if (plan.type != RF_SAP) ctrl[0] = (float)RF_SAP;
-    else if (fx < plan.dx) ctrl[0] = (float)RF_RIGHT;
-    else if (fx > plan.dx) ctrl[0] = (float)RF_LEFT;
-    else if (fy < plan.dy) ctrl[0] = (float)RF_DOWN;
-    else if (fy > plan.dy) ctrl[0] = (float)RF_UP;
+    int fx = (int)(words[RW_FOCUS] & 15u) - RF_FOCUS_CENTER, fy = (int)(words[RW_FOCUS] >> 4 & 15u) - RF_FOCUS_CENTER;
+    uint32_t pressed = words[RW_MODE] == RF_ORDER ? (uint32_t)plan.type : fx < plan.dx ? RF_RIGHT : fx > plan.dx ? RF_LEFT : fy < plan.dy ? RF_DOWN : fy > plan.dy ? RF_UP : RF_CENTER;
+    ctrl[0] = (float)pressed;
 }
 
 uint32_t relicfog_view(uint32_t instance, const uint32_t *words, const uint32_t *extra, const float *shared, uint32_t *out) {

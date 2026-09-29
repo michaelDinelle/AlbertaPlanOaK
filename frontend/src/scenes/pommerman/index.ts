@@ -11,9 +11,9 @@ import { TOKENS } from '@kit/tokens';
 import type { FrameUpdate, LegendSpec, SceneContext, SceneFactory, ScenePost } from '@kit/types';
 import { countEvents, lastEvent } from '@sim/events';
 import {
-  DOWN, LEFT, LOST, OBS_OTHER, POM_CELL, RIGHT, RIGID, TIED, UP, WON, WOOD,
-  actOf, aliveOf, ammoOf, blastOf, bombsOf, cellOf, collapsedRings, cycleOf, fieldOf, flameOf, gameOf, hiddenOf, itemOf, kickOf,
-  partnerOf, phaseOf, pomShape, resultOf, ringOf, seatOf, terrainOf, tickOf, STEP_X, STEP_Y, type PomBomb, type PomShape,
+  LOST, POM_CELL, RIGHT, RIGID, TIED, UP, WON, WOOD,
+  actOf, aliveOf, ammoOf, blastOf, bombsOf, cellOf, collapsedRings, fieldOf, flameOf, gameOf, hiddenOf, itemOf, kickOf,
+  partnerOf, pomShape, resultOf, ringOf, seatOf, sightingsOf, terrainOf, tickOf, STEP_X, STEP_Y, type PomBomb, type PomShape,
 } from '@sim/envs/pommerman';
 import type { EnvFrame, GridCell } from '@sim/types';
 import { formatCount, formatSigned } from '../../format';
@@ -86,13 +86,12 @@ class PommermanScene extends Stage2DScene {
   private readonly to = new THREE.Vector3();
   private readonly color = new THREE.Color();
   private readonly matrix = new THREE.Matrix4();
-  private readonly ledger = { step: 0, x: 0, y: 0, alive: true, act: 0, ammo: 0, blast: 0, kick: false, rivals: 0, rivalSeats: 0, partner: false, reward: 0, result: 0, game: 0, tick: 0 };
+  private readonly ledger = { step: 0, x: 0, y: 0, act: 0, ammo: 0, blast: 0, kick: false, rivals: 0, rivalSeats: 0, partner: false, reward: 0, result: 0, game: 0, tick: 0 };
 
   protected extent(ctx: SceneContext): THREE.Box2 {
     const env = ctx.environment;
     this.shape = pomShape(env);
     this.grid = { w: this.shape.side, h: this.shape.side };
-    this.controlHz = TICK_HZ * this.shape.phases;
     this.accent = this.accentOf(ctx);
     this.legend = this.legendFor();
     const x = this.shape.side / 2 + RIM + 0.4 + BADGE_W + 0.2, z = this.shape.side / 2 + RIM + 0.2;
@@ -112,7 +111,7 @@ class PommermanScene extends Stage2DScene {
     return {
       title: 'POMMERMAN',
       rows: [
-        { key: 'you', label: 'agent', tint: this.accent, value: () => `${l.alive ? 'standing' : 'down'} · column ${l.x + 1} · row ${l.y + 1}` },
+        { key: 'you', label: 'agent', tint: this.accent, value: () => `column ${l.x + 1} · row ${l.y + 1}` },
         { key: 'action', label: 'action', tint: 0xdcf4ff, value: () => ACTIONS[l.act] ?? '—' },
         { key: 'arsenal', label: 'arsenal', tint: HUE.flameMid, value: () => `${l.ammo} bomb${l.ammo === 1 ? '' : 's'} · blast ${l.blast}${l.kick ? ' · kick' : ''}` },
         { key: 'field', label: shape.team ? 'teams' : shape.seats === 2 ? 'rival' : 'rivals', tint: FFA_RIVALS[0], value: () => this.field() },
@@ -184,7 +183,7 @@ class PommermanScene extends Stage2DScene {
 
     const time = board.time;
     this.bombs = this.batch(new Batch(shape.bombs, BOMB_QUAD, BOMB_QUAD, ['aBomb', 'aTint'], bombShade(lit, time), 4));
-    this.fx = this.batch(new Batch(96, FX_QUAD, FX_QUAD, ['aFx', 'aTint'], fxShade(time), 5));
+    this.fx = this.batch(new Batch(96, FX_QUAD, FX_QUAD, ['aFx', 'aTint'], fxShade(), 5));
     this.bombers = this.batch(new Batch(shape.seats, BOMBER_QUAD, BOMBER_QUAD, ['aBody', 'aTint', 'aMark'], bomberShade(lit, time, this.accent), 6));
     if (shape.fog) {
       const fog = fogShade(this.accent, time);
@@ -258,10 +257,10 @@ class PommermanScene extends Stage2DScene {
     if (cached) return cached;
     const shape = this.shape, source = this.frame(frame, step) ?? fallback;
     const words = Uint32Array.from(source.words), view = Uint32Array.from(source.view), game = gameOf(words), tick = tickOf(words);
-    const before = tick > 0 ? this.frame(frame, step - shape.phases) : null;
+    const before = tick > 0 ? this.frame(frame, step - 1) : null;
     const prev = before && gameOf(before.words) === game && tickOf(before.words) === tick - 1 ? before : null;
     const bombs = bombsOf(view, shape);
-    const record: Tick = { step, game, tick, start: step - tick * shape.phases, words, view, bombs, facing: this.facing(frame, step, words), happenings: prev ? this.happenings(prev, words, view, bombs, tick) : [] };
+    const record: Tick = { step, game, tick, start: step - tick, words, view, bombs, facing: this.facing(frame, step, words), happenings: prev ? this.happenings(prev, words, view, bombs, tick) : [] };
     if (prev || tick === 0) {
       this.ticks.set(step, record);
       if (this.ticks.size > 96) for (const key of [...this.ticks.keys()].sort((a, b) => Math.abs(b - step) - Math.abs(a - step)).slice(0, 32)) this.ticks.delete(key);
@@ -278,7 +277,7 @@ class PommermanScene extends Stage2DScene {
         if (!found[s] && act >= UP && act <= RIGHT) { out[s] = HEADING[act]!; found[s] = true; }
       }
       if (found.every(Boolean) || tickOf(source) === 0) break;
-      const f = this.frame(frame, step - (j + 1) * shape.phases);
+      const f = this.frame(frame, step - j - 1);
       source = f && gameOf(f.words) === game ? f.words : null;
     }
     return out;
@@ -311,7 +310,7 @@ class PommermanScene extends Stage2DScene {
   private history(frame: FrameUpdate, now: Tick, fallback: EnvFrame): Tick[] {
     const out = [now];
     for (let j = 1; j < HISTORY; j++) {
-      const step = now.step - j * this.shape.phases;
+      const step = now.step - j;
       if (step < now.start) break;
       const f = this.frame(frame, step);
       if (!f || gameOf(f.words) !== now.game) break;
@@ -349,12 +348,12 @@ class PommermanScene extends Stage2DScene {
   protected tick(frame: FrameUpdate, { pool, time }: Stage2D): void {
     pool.update(frame.dtReal, time);
     this.log = frame.eventLog;
-    const board = this.board!, shape = this.shape, s = frame.state.step, now = this.frame(frame, s);
+    const board = this.board!, step = frame.state.step, now = this.frame(frame, step);
     board.time.value = time;
     if (!now) return;
-    const step = s - phaseOf(now.words), current = this.tickAt(frame, step, now), ticks = this.history(frame, current, now);
-    const peek = this.frame(frame, step + shape.phases), next = peek && !peek.done && gameOf(peek.words) === current.game ? peek : null;
-    const u = clamp01((frame.position - step) / shape.phases);
+    const current = this.tickAt(frame, step, now), ticks = this.history(frame, current, now);
+    const peek = this.frame(frame, step + 1), next = peek && !peek.done && gameOf(peek.words) === current.game ? peek : null;
+    const u = clamp01(frame.position - step);
     board.u.value = u;
     board.start.value = (frame.position - current.start) / this.controlHz;
     if (current.step !== this.painted) {
@@ -376,16 +375,11 @@ class PommermanScene extends Stage2DScene {
   }
 
   private celebrate(frame: FrameUpdate, current: Tick, pool: CelebrationPool, time: number): void {
-    const shape = this.shape;
-    if (current.step !== this.lastTick && current.step - this.lastTick === shape.phases) {
-      const me = seatOf(current.words);
+    if (current.step - this.lastTick === 1) {
       for (const happening of current.happenings) {
         if (happening.kind !== 'death') continue;
         this.centre(happening.cell, this.at);
-        if (happening.arg === me) {
-          pool.sigh(0.5, this.at, time);
-          pool.ripple(this.at, TOKENS.failureBlue, 0.3, time);
-        } else pool.ripple(this.at, this.hue(current.words, happening.arg), 0.32, time);
+        pool.ripple(this.at, this.hue(current.words, happening.arg), 0.32, time);
       }
     }
     if (!frame.events.some((event) => event.type === 'done')) return;
@@ -531,28 +525,11 @@ class PommermanScene extends Stage2DScene {
         put(h.cell, kind, t, (record.step * 7 + h.cell) % 97, h.arg, hue);
       }
     }
-    if (shape.fog) this.drawMemory(frame, current, put);
     for (let c = 0; c < shape.cells; c++) {
       const field = fieldOf(current.view, c), item = hiddenOf(field) ? 0 : itemOf(field);
       if (!item || terrainOf(field)) continue;
       this.centre(c, this.at);
       this.lamp(this.at.x, this.at.z, 0.13, ITEM_HUES[item]!, 1.3);
-    }
-  }
-
-  private drawMemory(frame: FrameUpdate, current: Tick, put: (cell: number, kind: number, t: number, seed: number, arg: number, hue: number) => void): void {
-    const shape = this.shape, side = shape.side, s = frame.state.step, others = shape.seats - 1, seen = new Set<number>();
-    for (let back = 0; back < others * 2 && seen.size < others; back++) {
-      const f = this.frame(frame, s - back);
-      if (!f || gameOf(f.words) !== current.game) break;
-      const me = seatOf(f.words), q = (me + 1 + (cycleOf(f.words) % others)) % shape.seats;
-      if (seen.has(q)) continue;
-      seen.add(q);
-      const code = f.observations[OBS_OTHER]!;
-      if (code >= 0 || !aliveOf(current.words, q)) continue;
-      const cell = cellOf(f.words, me), x = cell % side + Math.round(f.observations[OBS_OTHER + 1]! * side), y = Math.floor(cell / side) + Math.round(f.observations[OBS_OTHER + 2]! * side);
-      if (x < 0 || y < 0 || x >= side || y >= side) throw new Error(`Pommerman step ${f.step} remembers seat ${q} off the board at (${x}, ${y})`);
-      put(y * side + x, FX.MEMORY, 0, 0, 0, this.hue(current.words, q));
     }
   }
 
@@ -576,16 +553,10 @@ class PommermanScene extends Stage2DScene {
     const fog = this.fog, shape = this.shape;
     if (!fog) return;
     const me = seatOf(current.words);
-    if (!aliveOf(current.words, me)) {
-      fog.strength.value = 0;
-      fog.veil.value = 0.34;
-      return;
-    }
     const from = cellOf(current.words, me), to = next ? cellOf(next.words, me) : from, side = shape.side, low = -(side - 1) / 2;
     const x = from % side + (to % side - from % side) * u, y = Math.floor(from / side) + (Math.floor(to / side) - Math.floor(from / side)) * u;
     fog.rect.value.set(low + Math.max(0, x - shape.fog) - 0.5, low + Math.max(0, y - shape.fog) - 0.5, low + Math.min(side - 1, x + shape.fog) + 0.5, low + Math.min(side - 1, y + shape.fog) + 0.5);
     fog.strength.value = 0.62;
-    fog.veil.value = 0;
   }
 
   private account(now: EnvFrame, current: Tick): void {
@@ -593,7 +564,6 @@ class PommermanScene extends Stage2DScene {
     l.step = now.step;
     l.x = cell % shape.side;
     l.y = Math.floor(cell / shape.side);
-    l.alive = aliveOf(words, me);
     l.act = actOf(words, shape, me);
     l.ammo = ammoOf(words, shape, me);
     l.blast = blastOf(words, shape, me);
@@ -611,8 +581,11 @@ class PommermanScene extends Stage2DScene {
     l.rivals = rivals;
     l.rivalSeats = seats;
     l.partner = shape.team && aliveOf(words, partnerOf(shape, me));
-    const code = now.observations[OBS_OTHER]!, q = (seatOf(now.words) + 1 + (cycleOf(now.words) % (shape.seats - 1))) % shape.seats, friend = code > 0 ? code < 0.75 : code > -0.375;
-    if (code && friend !== (q === partnerOf(shape, seatOf(now.words)))) throw new Error(`Pommerman step ${now.step} observes seat ${q} as ${friend ? 'a partner' : 'a rival'} against the team the scene draws`);
+    for (const seen of sightingsOf(now.observations, shape, me)) {
+      if ((seen.code > 0) !== (seen.seat === partnerOf(shape, me))) throw new Error(`Pommerman step ${now.step} observes seat ${seen.seat} as ${seen.code > 0 ? 'a partner' : 'a rival'} against the team the scene draws`);
+      const at = cellOf(words, seen.seat);
+      if (at % shape.side - cell % shape.side !== seen.dx || Math.floor(at / shape.side) - Math.floor(cell / shape.side) !== seen.dy) throw new Error(`Pommerman step ${now.step} observes seat ${seen.seat} at (${seen.dx}, ${seen.dy}) from the agent, where the board puts it elsewhere`);
+    }
   }
 
   private groundTruth(frame: FrameUpdate, kit: DebugKit): void {
@@ -643,19 +616,12 @@ class PommermanScene extends Stage2DScene {
     }
     const me = seatOf(words), obs = f.observations, home = cellOf(words, me);
     this.centre(home, this.at);
-    const rays = kit.curve('perception', 8, TOKENS.uiCyan);
-    if (aliveOf(words, me)) for (let d = 0; d < 4; d++) {
-      const reach = Math.round(obs[3 * d]! * side), dir = [UP, DOWN, LEFT, RIGHT][d]!;
-      rays.point(this.at.x, 0.07, this.at.z);
-      rays.point(this.at.x + STEP_X[dir]! * reach, 0.07, this.at.z + STEP_Y[dir]! * reach);
-    }
-    const reported = kit.marks('reported rival', 1), code = obs[OBS_OTHER]!;
-    if (code !== 0) {
-      const others = shape.seats - 1, q = (me + 1 + (cycleOf(words) % others)) % shape.seats;
-      reported.set(this.at.x + Math.round(obs[OBS_OTHER + 1]! * side), 0.09, this.at.z + Math.round(obs[OBS_OTHER + 2]! * side), code > 0 ? 0.12 : 0.07, this.hue(words, q));
-    }
+    const sight = kit.curve('sight', 5, TOKENS.uiCyan), reach = shape.sight + 0.5;
+    for (const [dx, dz] of [[-reach, -reach], [reach, -reach], [reach, reach], [-reach, reach], [-reach, -reach]] as const) sight.point(this.at.x + dx, 0.07, this.at.z + dz);
+    const sightings = sightingsOf(obs, shape, me), reported = kit.marks('reported bombers', shape.seats - 1);
+    for (const seen of sightings) reported.set(this.at.x + seen.dx, 0.09, this.at.z + seen.dy, seen.code > 0 ? 0.12 : 0.07, this.hue(words, seen.seat));
     const window = kit.curve('view window', 5, this.accent);
-    if (shape.fog && aliveOf(words, me)) {
+    if (shape.fog) {
       const x = home % side, y = Math.floor(home / side);
       const x0 = Math.max(0, x - shape.fog) - x - 0.5, x1 = Math.min(side - 1, x + shape.fog) - x + 0.5, z0 = Math.max(0, y - shape.fog) - y - 0.5, z1 = Math.min(side - 1, y + shape.fog) - y + 0.5;
       for (const [dx, dz] of [[x0, z0], [x1, z0], [x1, z1], [x0, z1], [x0, z0]] as const) window.point(this.at.x + dx, 0.07, this.at.z + dz);

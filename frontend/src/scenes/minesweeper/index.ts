@@ -10,7 +10,7 @@ import { Stage2DScene, type Stage2D } from '@kit/stage2d';
 import { TOKENS } from '@kit/tokens';
 import type { FrameUpdate, LegendSpec, SceneContext, SceneFactory, ScenePost } from '@kit/types';
 import { lastEvent } from '@sim/events';
-import { FLAGGED, MINED, MINESWEEPER_FEED, MINESWEEPER_FEED_X, MINESWEEPER_FEED_Y, MINESWEEPER_FLAGS, MINESWEEPER_GAME, MINESWEEPER_OPENED, MINESWEEPER_X, MINESWEEPER_Y, SHOWN, minesweeperPlane } from '@sim/envs/minesweeper';
+import { FLAGGED, MINED, MINESWEEPER_FEED, MINESWEEPER_FEED_X, MINESWEEPER_FEED_Y, MINESWEEPER_FLAGS, MINESWEEPER_FORCED, MINESWEEPER_GAME, MINESWEEPER_IDLE, MINESWEEPER_OPENED, MINESWEEPER_X, MINESWEEPER_Y, SHOWN, minesweeperPlane } from '@sim/envs/minesweeper';
 import type { EnvFrame, GridCell } from '@sim/types';
 import { parameter } from '../../data/envs';
 import { formatCount, formatSigned } from '../../format';
@@ -59,6 +59,7 @@ class MinesweeperScene extends Stage2DScene {
   private grid: GridSize = { w: 9, h: 9 };
   private mines = 10;
   private safe = 71;
+  private patience = 36;
   private digits = 3;
   private actions = 6;
   private around = new Int32Array(0);
@@ -99,7 +100,7 @@ class MinesweeperScene extends Stage2DScene {
   private readonly accent = new THREE.Color(ACCENT).multiplyScalar(2.4);
   private readonly white = new THREE.Color(0xffffff).multiplyScalar(3);
   private readonly red = new THREE.Color(0xff5a40).multiplyScalar(2.6);
-  private readonly ledger = { x: 0, y: 0, flags: 0, opened: 0, game: 1, reward: 0, action: '—', feed: '—', step: 0, won: undefined as number | undefined, lost: undefined as number | undefined, looked: -Infinity, clock: 0 };
+  private readonly ledger = { x: 0, y: 0, flags: 0, opened: 0, idle: 0, game: 1, reward: 0, action: '—', feed: '—', step: 0, won: undefined as number | undefined, lost: undefined as number | undefined, looked: -Infinity, clock: 0 };
 
   override legend: LegendSpec = {
     title: 'MINESWEEPER',
@@ -108,6 +109,7 @@ class MinesweeperScene extends Stage2DScene {
       { key: 'action', label: 'action', tint: 0xdcf4ff, value: () => this.ledger.action },
       { key: 'mines', label: 'mines left', tint: 0xe0392c, value: () => minus(this.mines - this.ledger.flags) },
       { key: 'opened', label: 'opened', tint: 0xdde2e8, value: () => `${formatCount(this.ledger.opened)} of ${formatCount(this.safe)}` },
+      { key: 'clock', label: 'clock', tint: 0xffb44a, value: () => `${formatCount(this.ledger.idle)} of ${formatCount(this.patience)}` },
       { key: 'feed', label: 'feed', tint: PING, value: () => this.ledger.feed },
       { key: 'reward', label: 'reward', tint: TOKENS.celebrationGold, value: () => formatSigned(this.ledger.reward) },
       { key: 'last', label: 'last game', tint: 0xffe2a8, value: () => this.lastGame() },
@@ -122,6 +124,7 @@ class MinesweeperScene extends Stage2DScene {
     this.mines = parameter(env, 'mines');
     this.actions = env.actions;
     this.safe = w * h - this.mines;
+    this.patience = 2 * (w + h);
     this.digits = Math.max(3, String(this.mines - w * h).length, String(this.safe).length);
     return new THREE.Box2(new THREE.Vector2(-w / 2 - RING - 0.45, -h / 2 - RING - BAR - 0.45), new THREE.Vector2(w / 2 + RING + 0.45, h / 2 + RING + 1.7));
   }
@@ -336,15 +339,15 @@ class MinesweeperScene extends Stage2DScene {
     const last = frame.frameAt(step), before = frame.frameAt(step - 1);
     if (last.step !== step || before.step !== step - 1 || !last.done) return null;
     const { w, h } = this.grid, cells = w * h, pre = this.boardOf(before), won = last.reward > 0;
-    const x = last.words[MINESWEEPER_X]!, y = last.words[MINESWEEPER_Y]!, pressed = y * w + x;
-    if (this.act(last) !== PRESS || x !== before.words[MINESWEEPER_X] || y !== before.words[MINESWEEPER_Y]) throw new Error(`Minesweeper step ${step} ended a game without a press in place`);
+    const x = last.words[MINESWEEPER_X]!, y = last.words[MINESWEEPER_Y]!, pressed = y * w + x, forced = last.words[MINESWEEPER_FORCED] === 1;
+    if (!forced && (this.act(last) !== PRESS || x !== before.words[MINESWEEPER_X] || y !== before.words[MINESWEEPER_Y])) throw new Error(`Minesweeper step ${step} ended a game without a press in place or a clock reveal`);
     const struck: number[] = [];
     if (!won && !pre.shown[pressed]) struck.push(pressed);
     if (!won && pre.shown[pressed]) for (let k = 0; k < 8; k++) {
       const o = this.around[pressed * 8 + k]!;
       if (o >= 0 && !pre.shown[o] && !pre.flag[o] && pre.mine[o]) struck.push(o);
     }
-    if (!won && (!struck.length || struck.some((c) => !pre.mine[c] || pre.flag[c]))) throw new Error(`Minesweeper step ${step} lost without pressing onto a mine`);
+    if (!won && (!struck.length || struck.some((c) => !pre.mine[c] || (pre.flag[c] && !forced)))) throw new Error(`Minesweeper step ${step} lost without pressing onto a mine`);
     const kind = new Uint8Array(cells), order = new Float32Array(cells), reach = new Float32Array(cells);
     for (let c = 0; c < cells; c++) kind[c] = pre.shown[c] ? OPEN : won ? (pre.mine[c] ? (pre.flag[c] ? KEPT : PLANT) : FLOOD) : pre.flag[c] ? (pre.mine[c] ? KEPT : WRONG) : pre.mine[c] ? BURIED : PLAIN;
     for (const c of struck) kind[c] = STRUCK;
@@ -452,16 +455,16 @@ class MinesweeperScene extends Stage2DScene {
     const cursor = this.cursor, lamp = this.lamp;
     if (!cursor || !lamp) return;
     const ax = now.words[MINESWEEPER_X]!, ay = now.words[MINESWEEPER_Y]!, bx = next ? next.words[MINESWEEPER_X]! : ax, by = next ? next.words[MINESWEEPER_Y]! : ay;
-    const act = next ? this.act(next) : -1, hop = clamp01(u / HOP), glide = smoothstep01(hop);
+    const act = next ? this.act(next) : -1, forced = next?.words[MINESWEEPER_FORCED] === 1, hop = clamp01(u / HOP), glide = smoothstep01(hop);
     let x = ax + (bx - ax) * glide, y = ay + (by - ay) * glide;
     if (act >= 0 && act < 4 && ax === bx && ay === by) {
       const bump = 0.12 * Math.sin(Math.PI * hop);
       x += DX[act]! * bump;
       y += DY[act]! * bump;
     }
-    const pinch = act === PRESS || act === FLAG ? Math.sin(Math.PI * clamp01(u / PINCH_U)) : 0;
+    const pinch = act === PRESS || act === FLAG || forced ? Math.sin(Math.PI * clamp01(u / PINCH_U)) : 0;
     this.pinch.value = pinch;
-    this.tone.value.copy(this.accent).lerp(act === FLAG ? this.red : this.white, 0.55 * pinch);
+    this.tone.value.copy(this.accent).lerp(act === FLAG && !forced ? this.red : this.white, 0.55 * pinch);
     this.lampLevel.value = 0.62 * (1 + 0.4 * pinch);
     this.spot.x = x;
     this.spot.y = y;
@@ -505,6 +508,7 @@ class MinesweeperScene extends Stage2DScene {
     ledger.y = now.words[MINESWEEPER_Y]!;
     ledger.flags = now.words[MINESWEEPER_FLAGS]!;
     ledger.opened = now.words[MINESWEEPER_OPENED]!;
+    ledger.idle = now.words[MINESWEEPER_IDLE]!;
     ledger.game = now.words[MINESWEEPER_GAME]! + 1;
     ledger.reward = now.reward;
     ledger.action = this.describe(frame, step, now);
@@ -530,16 +534,16 @@ class MinesweeperScene extends Stage2DScene {
   private describe(frame: FrameUpdate, step: number, now: EnvFrame): string {
     const before = step > 0 ? frame.frameAt(step - 1) : null;
     if (!before || before.step !== step - 1) return '—';
-    const act = this.act(now), x = before.words[MINESWEEPER_X]!, y = before.words[MINESWEEPER_Y]!, c = y * this.grid.w + x;
-    if (act < PRESS) return now.words[MINESWEEPER_X] === x && now.words[MINESWEEPER_Y] === y ? `${ARROWS[act]} · edge` : ARROWS[act]!;
+    const act = this.act(now), forced = now.words[MINESWEEPER_FORCED] === 1, x = now.words[MINESWEEPER_X]!, y = now.words[MINESWEEPER_Y]!, c = y * this.grid.w + x;
+    if (!forced && act < PRESS) return before.words[MINESWEEPER_X] === x && before.words[MINESWEEPER_Y] === y ? `${ARROWS[act]} · edge` : ARROWS[act]!;
     const pre = this.boardOf(before);
-    if (act === FLAG) return pre.shown[c] ? 'flag · no effect' : pre.flag[c] ? 'unflag' : 'flag';
-    if (pre.flag[c]) return 'press · flagged';
-    const chord = pre.shown[c] === 1;
-    if (now.done) return `${chord ? 'chord' : 'reveal'} · ${now.reward > 0 ? 'cleared' : 'mine'}`;
+    if (!forced && act === FLAG) return pre.shown[c] ? 'flag · no effect' : pre.flag[c] ? 'unflag' : 'flag';
+    if (!forced && pre.flag[c]) return 'press · flagged';
+    const chord = !forced && pre.shown[c] === 1, verb = forced ? 'clock reveal' : chord ? 'chord' : 'reveal';
+    if (now.done) return `${verb} · ${now.reward > 0 ? 'cleared' : 'mine'}`;
     const opened = now.words[MINESWEEPER_OPENED]! - before.words[MINESWEEPER_OPENED]!, cells = `${formatCount(opened)} cell${opened === 1 ? '' : 's'}`;
     if (chord) return opened > 0 ? `chord · ${cells}` : 'chord · no effect';
-    return before.words[MINESWEEPER_OPENED] === 0 && pre.mine[c] ? `reveal · ${cells} · mine moved` : `reveal · ${cells}`;
+    return before.words[MINESWEEPER_OPENED] === 0 && pre.mine[c] ? `${verb} · ${cells} · mine moved` : `${verb} · ${cells}`;
   }
 
   private lastGame(): string {

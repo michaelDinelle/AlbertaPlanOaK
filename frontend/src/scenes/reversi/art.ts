@@ -1,5 +1,5 @@
 import * as THREE from 'three/webgpu';
-import { abs, atan, cos, dot, exp, float, floor, fract, instancedDynamicBufferAttribute, length, max, min, mix, positionWorld, select, sin, smoothstep, texture, uv, vec2, vec3 } from 'three/tsl';
+import { abs, cos, dot, exp, float, floor, instancedDynamicBufferAttribute, length, max, min, mix, positionWorld, select, sin, smoothstep, texture, uv, vec2, vec3 } from 'three/tsl';
 import { coverage, fractal, rgb, sdBox, sdCircle } from '@kit/shapes2d';
 
 type N<T extends string> = THREE.Node<T>;
@@ -12,7 +12,6 @@ export const FRAME = 0.62;
 export const LIP = 0.05;
 export const CORNER = 0.3;
 export const HINT = 0.5;
-export const WINDOW = 3.5;
 export const BRACKET = 1.34;
 export const PLAQUE_W = 2.7;
 export const PLAQUE_H = 5.2;
@@ -39,8 +38,7 @@ const PX = 160;
 
 export const flat = (width: number, depth: number) => new THREE.PlaneGeometry(width, depth).rotateX(-Math.PI / 2);
 
-export const sheet = (additive = false) =>
-  new THREE.MeshBasicNodeMaterial({ transparent: true, depthTest: false, depthWrite: false, fog: false, blending: additive ? THREE.AdditiveBlending : THREE.NormalBlending });
+export const sheet = () => new THREE.MeshBasicNodeMaterial({ transparent: true, depthTest: false, depthWrite: false, fog: false });
 
 const toward = (v: N<'vec2'>) => v.div(max(length(v), 1e-5));
 
@@ -157,17 +155,6 @@ export function hintMaterial(alpha: THREE.InstancedBufferAttribute, tint: number
   return material;
 }
 
-export function windowMaterial(strength: Level, half: number, tint: number): THREE.MeshBasicNodeMaterial {
-  const material = sheet(true);
-  const p = uv().sub(0.5).mul(WINDOW), box = sdBox(p, vec2(1.5), 0.08);
-  const board = coverage(sdBox(vec2(positionWorld.x, positionWorld.z), vec2(half), 0));
-  const fill = coverage(box).mul(0.075), outline = coverage(abs(box).sub(0.012)).mul(0.45);
-  const halo = exp(abs(box).mul(-22)).mul(0.12);
-  material.colorNode = rgb(tint);
-  material.opacityNode = fill.add(outline).add(halo).mul(board).mul(strength);
-  return material;
-}
-
 export function bracketMaterial(tint: N<'vec3'>, alpha: Level): THREE.MeshBasicNodeMaterial {
   const material = sheet();
   const p = uv().sub(0.5).mul(BRACKET);
@@ -179,7 +166,7 @@ export function bracketMaterial(tint: N<'vec3'>, alpha: Level): THREE.MeshBasicN
   return material;
 }
 
-export function plaqueMaterial(tint: N<'vec3'>, glow: Level, busy: Level, spin: Level, lit: Lit): THREE.MeshBasicNodeMaterial {
+export function plaqueMaterial(tint: N<'vec3'>, glow: Level, lit: Lit): THREE.MeshBasicNodeMaterial {
   const material = sheet();
   const p = uv().sub(0.5).mul(vec2(PLAQUE_W + 0.3, PLAQUE_H + 0.3));
   const card = sdBox(p, vec2(PLAQUE_W / 2, PLAQUE_H / 2), 0.22);
@@ -191,10 +178,7 @@ export function plaqueMaterial(tint: N<'vec3'>, glow: Level, busy: Level, spin: 
   const recess = smoothstep(0.05, -0.02, well).mul(q.y.div(WELL_R).mul(0.25).add(0.3));
   face = face.mul(recess.oneMinus());
   const inset = coverage(abs(card.add(0.1)).sub(0.011));
-  const track = coverage(abs(well.sub(0.1)).sub(0.02));
-  const sweep = fract(atan(q.y, q.x).sub(spin).div(2 * Math.PI));
-  const arc = track.mul(smoothstep(0.25, 1, sweep).mul(0.85).add(0.15)).mul(busy);
-  const color = lit(face).add(tint.mul(inset.mul(glow.mul(0.9).add(0.25)))).add(tint.mul(1.4).mul(arc));
+  const color = lit(face).add(tint.mul(inset.mul(glow.mul(0.9).add(0.25))));
   material.colorNode = color;
   material.opacityNode = coverage(card);
   return material;

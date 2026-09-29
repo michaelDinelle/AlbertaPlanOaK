@@ -13,7 +13,7 @@ export const MATCH_STEPS = 100;
 export const MAX_ENERGY = 400;
 const FOCUS = 8;
 
-export const WAIT = 0;
+export const ORDER = 1;
 export const TARGET = 2;
 
 export const CENTER = 0;
@@ -30,7 +30,7 @@ export const ASTEROID = 2;
 export const RF_CURSOR_X = 0;
 export const RF_CURSOR_Y = 1;
 
-const OBSERVED = 18;
+const OBSERVED = 64;
 const GRID_DELTA = [[0, -1], [0, 1], [-1, 0], [1, 0]] as const;
 const PARAMETERS = ['moveCost', 'sensorRange', 'visionReduction', 'energyReduction', 'sapCost', 'sapRange', 'dropoff', 'voidFactor', 'nebulaSpeed', 'nodeSpeed', 'nodeMagnitude'] as const;
 const CHOICES: Record<Parameter, string> = {
@@ -66,7 +66,6 @@ export interface World {
 
 export interface RelicShape {
   opponent: number;
-  window: number;
   steps: readonly (readonly [number, number])[];
   choices: Record<Parameter, readonly number[]>;
 }
@@ -77,7 +76,7 @@ const signed8 = (value: number): number => (value << 24) >> 24;
 
 const orderOf = (code: number): Order => ({ type: code & 7, dx: ((code >>> 3) & 15) - FOCUS, dy: ((code >>> 7) & 15) - FOCUS });
 export const pendingOf = (view: ArrayLike<number>, i: number): Order => orderOf(field16(view, AT.orders + i));
-export const focusOf = (words: ArrayLike<number>): { dx: number; dy: number } => ({ dx: (words[RW.FOCUS]! & 15) - FOCUS, dy: (words[RW.FOCUS]! >>> 4) - FOCUS });
+export const focusOf = (words: ArrayLike<number>): { dx: number; dy: number } => ({ dx: (words[RW.FOCUS]! & 15) - FOCUS, dy: ((words[RW.FOCUS]! >>> 4) & 15) - FOCUS });
 
 export function keyOf(frame: EnvFrame): number {
   const pressed = frame.actions[0]!;
@@ -94,7 +93,7 @@ export function relicShape(env: EnvDescriptor): RelicShape {
   if (headings.length !== SAP) throw new Error(`${env.envId} heads ${headings.length} keys where the fleet moves on ${SAP}`);
   const steps = headings.map((heading, key) => key === CENTER ? [0, 0] as const : GRID_DELTA[heading & 3]!);
   const choices = Object.fromEntries(PARAMETERS.map((name) => [name, constantList(env, CHOICES[name])])) as Record<Parameter, number[]>;
-  return { opponent, window: parameter(env, 'window'), steps, choices };
+  return { opponent, steps, choices };
 }
 
 export function makeWorld(): World {
@@ -196,25 +195,22 @@ export const relicFogDecoder: EnvDecoder = {
   slots: 2,
   discrete: true,
   decode(frame, out) {
-    const cursor = frame.words[RW.CURSOR]!;
-    if (frame.words[RW.MODE] === WAIT || cursor >= UNITS) {
-      out.fill(-1);
-      return;
-    }
-    const place = field16(frame.view, AT.units + 2 * cursor);
+    const place = field16(frame.view, AT.units + 2 * frame.words[RW.CURSOR]!);
     out[RF_CURSOR_X] = place & 31;
     out[RF_CURSOR_Y] = (place >>> 5) & 31;
   },
   geometry({ environment }, initial) {
     const shape = relicShape(environment), world = readWorld(initial.view, shape, makeWorld());
-    if (initial.words[RW.STEP] !== 0 || initial.words[RW.MATCH] !== 0 || initial.words[RW.MODE] !== WAIT) throw new Error(`${environment.envId} opens at step ${initial.words[RW.STEP]} of match step ${initial.words[RW.MATCH]} in mode ${initial.words[RW.MODE]}`);
-    if (world.units.some((team) => team.some((unit) => unit.alive)) || world.pairs !== 0) throw new Error(`${environment.envId} opens with ships afloat or relics already surfaced`);
+    if (initial.words[RW.STEP] !== 1 || initial.words[RW.MATCH] !== 1 || initial.words[RW.MODE] !== ORDER) throw new Error(`${environment.envId} opens at step ${initial.words[RW.STEP]} of match step ${initial.words[RW.MATCH]} in mode ${initial.words[RW.MODE]}`);
+    if (world.units.some((team) => team.filter((unit) => unit.alive).length !== 1)) throw new Error(`${environment.envId} opens without exactly one ship a side`);
     return { grid: { w: SIDE, h: SIDE, walls: new Uint8Array(TILES) } };
   },
   deriveEvents(prev, next) {
     if (next.done) return next.reward > 0 ? WON_GAME : LOST_GAME;
-    if (prev.words[RW.MATCH]! > 0 && next.words[RW.MATCH] === 0) return next.reward > 0 ? WON : LOST;
-    if (RELIC_WORDS.every((k) => prev.view[k] === next.view[k]) || prev.words[RW.GAME] !== next.words[RW.GAME]) return NO_EVENTS;
+    if (prev.words[RW.GAME] !== next.words[RW.GAME]) return NO_EVENTS;
+    if (next.words[RW.OUR_WINS]! > prev.words[RW.OUR_WINS]!) return WON;
+    if (next.words[RW.THEIR_WINS]! > prev.words[RW.THEIR_WINS]!) return LOST;
+    if (RELIC_WORDS.every((k) => prev.view[k] === next.view[k])) return NO_EVENTS;
     for (let q = 0; q < PAIRS; q++) if (((field16(next.view, AT.relics + q) >>> 10) & 1) > ((field16(prev.view, AT.relics + q) >>> 10) & 1)) return REVEALS[q]!;
     return NO_EVENTS;
   },

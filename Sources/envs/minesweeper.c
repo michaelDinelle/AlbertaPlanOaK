@@ -8,7 +8,7 @@ static const minesweeperKnobs MINESWEEPER_KNOBS[3] = {
     { 30u, 16u, 99u }
 };
 
-enum { MINESWEEPER_X, MINESWEEPER_Y, MINESWEEPER_GAME, MINESWEEPER_OPENED, MINESWEEPER_FLAGS, MINESWEEPER_FEED };
+enum { MINESWEEPER_X, MINESWEEPER_Y, MINESWEEPER_GAME, MINESWEEPER_OPENED, MINESWEEPER_FLAGS, MINESWEEPER_FEED, MINESWEEPER_IDLE, MINESWEEPER_FORCED };
 enum { MINESWEEPER_HIDDEN, MINESWEEPER_FLAGGED, MINESWEEPER_OUTSIDE, MINESWEEPER_SHOWN };
 enum { MINESWEEPER_STRIDE = 32, MINESWEEPER_ROW = MINESWEEPER_STRIDE / 4 };
 
@@ -16,6 +16,7 @@ static uint32_t minesweeper_mines(const minesweeperKnobs *k) { return (k->height
 static uint32_t minesweeper_opens(const minesweeperKnobs *k) { return minesweeper_mines(k) + k->height + 2u; }
 static uint32_t minesweeper_pending(const minesweeperKnobs *k) { return minesweeper_opens(k) + k->height; }
 static uint32_t minesweeper_queued(const minesweeperKnobs *k) { return minesweeper_pending(k) + k->height; }
+static uint32_t minesweeper_patience(const minesweeperKnobs *k) { return 2u * (k->width + k->height); }
 
 uint32_t minesweeper_extraWords(uint32_t instance, uint32_t steps) {
     (void)steps;
@@ -44,6 +45,7 @@ static inline __attribute__((always_inline)) void minesweeper_board(const minesw
     }
     words[MINESWEEPER_OPENED] = 0u;
     words[MINESWEEPER_FLAGS] = 0u;
+    words[MINESWEEPER_IDLE] = 0u;
 }
 
 static __attribute__((noinline)) void minesweeper_deal(uint32_t instance, uint32_t seed, uint32_t *words, uint32_t *extra) {
@@ -100,24 +102,28 @@ static float minesweeper_end(uint32_t instance, uint32_t seed, uint32_t *words, 
     return reward;
 }
 
+static float minesweeper_uncover(uint32_t instance, uint32_t seed, uint32_t *words, uint32_t *extra, uint32_t *done, uint32_t at) {
+    const minesweeperKnobs *k = &MINESWEEPER_KNOBS[instance];
+    uint32_t *mine = extra + minesweeper_mines(k), shifted = minesweeper_mined(mine, at);
+    if (shifted) {
+        if (words[MINESWEEPER_OPENED]) return minesweeper_end(instance, seed, words, extra, done, -1.0f);
+        uint32_t row = 1u, interior = (2u << k->width) - 2u;
+        while (!(~mine[row] & interior)) row++;
+        uint32_t free = ~mine[row] & interior;
+        mine[row] |= free & (0u - free);
+        mine[at / MINESWEEPER_STRIDE] &= ~(1u << (at & (MINESWEEPER_STRIDE - 1u)));
+    }
+    minesweeper_open(k, words, extra, at);
+    return !shifted && words[MINESWEEPER_OPENED] == k->width * k->height - k->mines ? minesweeper_end(instance, seed, words, extra, done, 1.0f) : 0.0f;
+}
+
 static __attribute__((noinline)) float minesweeper_press(uint32_t instance, uint32_t seed, uint32_t *words, uint32_t *extra, uint32_t *done) {
     const minesweeperKnobs *k = &MINESWEEPER_KNOBS[instance];
     const uint8_t *cell = (const uint8_t *)extra;
-    uint32_t *mine = extra + minesweeper_mines(k), at = (words[MINESWEEPER_Y] + 1u) * MINESWEEPER_STRIDE + words[MINESWEEPER_X] + 1u, code = cell[at];
+    const uint32_t *mine = extra + minesweeper_mines(k);
+    uint32_t at = (words[MINESWEEPER_Y] + 1u) * MINESWEEPER_STRIDE + words[MINESWEEPER_X] + 1u, code = cell[at];
     uint32_t safe = k->width * k->height - k->mines, opened = words[MINESWEEPER_OPENED];
-    if (code == MINESWEEPER_HIDDEN) {
-        uint32_t shifted = minesweeper_mined(mine, at);
-        if (shifted) {
-            if (opened) return minesweeper_end(instance, seed, words, extra, done, -1.0f);
-            uint32_t row = 1u, interior = (2u << k->width) - 2u;
-            while (!(~mine[row] & interior)) row++;
-            uint32_t free = ~mine[row] & interior;
-            mine[row] |= free & (0u - free);
-            mine[at / MINESWEEPER_STRIDE] &= ~(1u << (at & (MINESWEEPER_STRIDE - 1u)));
-        }
-        minesweeper_open(k, words, extra, at);
-        return !shifted && words[MINESWEEPER_OPENED] == safe ? minesweeper_end(instance, seed, words, extra, done, 1.0f) : 0.0f;
-    }
+    if (code == MINESWEEPER_HIDDEN) return minesweeper_uncover(instance, seed, words, extra, done, at);
     if (code < MINESWEEPER_SHOWN) return 0.0f;
     uint32_t flags = 0u;
     for (uint32_t d = 0u; d < 8u; d++) flags += cell[minesweeper_around(at, d)] == MINESWEEPER_FLAGGED;
@@ -131,6 +137,25 @@ static __attribute__((noinline)) float minesweeper_press(uint32_t instance, uint
         if (cell[next] == MINESWEEPER_HIDDEN) minesweeper_open(k, words, extra, next);
     }
     return words[MINESWEEPER_OPENED] != opened && words[MINESWEEPER_OPENED] == safe ? minesweeper_end(instance, seed, words, extra, done, 1.0f) : 0.0f;
+}
+
+static __attribute__((noinline)) float minesweeper_force(uint32_t instance, uint32_t seed, uint32_t *words, uint32_t *extra, uint32_t *done) {
+    const minesweeperKnobs *k = &MINESWEEPER_KNOBS[instance];
+    uint8_t *cell = (uint8_t *)extra;
+    uint32_t x = words[MINESWEEPER_X], y = words[MINESWEEPER_Y], best = 0xFFFFFFFFu, target = 0u;
+    for (uint32_t row = 0u; row < k->height; row++)
+        for (uint32_t column = 0u; column < k->width; column++) {
+            uint32_t at = (row + 1u) * MINESWEEPER_STRIDE + column + 1u;
+            uint32_t rank = (uint32_t)(cell[at] == MINESWEEPER_FLAGGED) << 16 | ((column > x ? column - x : x - column) + (row > y ? row - y : y - row));
+            if (cell[at] < MINESWEEPER_OUTSIDE && rank < best) { best = rank; target = at; }
+        }
+    words[MINESWEEPER_X] = (target & (MINESWEEPER_STRIDE - 1u)) - 1u;
+    words[MINESWEEPER_Y] = target / MINESWEEPER_STRIDE - 1u;
+    if (cell[target] == MINESWEEPER_FLAGGED) {
+        cell[target] = MINESWEEPER_HIDDEN;
+        words[MINESWEEPER_FLAGS]--;
+    }
+    return minesweeper_uncover(instance, seed, words, extra, done, target);
 }
 
 static void minesweeper_obs(const minesweeperKnobs *k, const uint32_t *words, const uint32_t *extra, float *obs) {
@@ -147,6 +172,7 @@ static void minesweeper_obs(const minesweeperKnobs *k, const uint32_t *words, co
     obs[13] = feed ? CODE[cell[feed]] : -1.0f;
     obs[14] = (float)((int)k->mines - (int)words[MINESWEEPER_FLAGS]) / (float)k->mines;
     obs[15] = 1.0f;
+    obs[16] = (float)words[MINESWEEPER_IDLE] / (float)minesweeper_patience(k);
 }
 
 static uint32_t minesweeper_action(const float *ctrl) {
@@ -156,7 +182,7 @@ static uint32_t minesweeper_action(const float *ctrl) {
 
 static inline __attribute__((always_inline)) float minesweeper_play(uint32_t instance, uint32_t seed, const float *ctrl, uint32_t *words, uint32_t *extra, float *obs, uint32_t *done) {
     const minesweeperKnobs *k = &MINESWEEPER_KNOBS[instance];
-    uint32_t action = minesweeper_action(ctrl), x = words[MINESWEEPER_X], y = words[MINESWEEPER_Y];
+    uint32_t action = minesweeper_action(ctrl), x = words[MINESWEEPER_X], y = words[MINESWEEPER_Y], opened = words[MINESWEEPER_OPENED], flags = words[MINESWEEPER_FLAGS];
     float reward = 0.0f;
     *done = 0u;
     if (action < 4u) {
@@ -173,6 +199,10 @@ static inline __attribute__((always_inline)) float minesweeper_play(uint32_t ins
             words[MINESWEEPER_FLAGS] = code ? words[MINESWEEPER_FLAGS] - 1u : words[MINESWEEPER_FLAGS] + 1u;
         }
     }
+    uint32_t idle = *done || words[MINESWEEPER_OPENED] != opened ? 0u : words[MINESWEEPER_IDLE] + (words[MINESWEEPER_FLAGS] <= flags), forced = idle == minesweeper_patience(k);
+    words[MINESWEEPER_IDLE] = forced ? 0u : idle;
+    words[MINESWEEPER_FORCED] = forced;
+    if (forced) reward = minesweeper_force(instance, seed, words, extra, done);
     uint32_t *queued = extra + minesweeper_queued(k), rows = *queued, feed = 0u;
     if (rows) {
         uint32_t row = (uint32_t)__builtin_ctz(rows), *pending = extra + minesweeper_pending(k) + row, bits = *pending;
@@ -205,6 +235,7 @@ void minesweeper_reset(uint32_t instance, uint32_t seed, uint32_t *words, uint32
     words[MINESWEEPER_Y] = (k->height - 1u) / 2u;
     words[MINESWEEPER_GAME] = 0u;
     words[MINESWEEPER_FEED] = 0u;
+    words[MINESWEEPER_FORCED] = 0u;
     minesweeper_deal(instance, seed, words, extra);
 }
 
@@ -233,21 +264,102 @@ uint32_t minesweeper_view(uint32_t instance, const uint32_t *words, const uint32
     return count;
 }
 
+typedef struct { const uint8_t *cell; const uint32_t *covered; uint32_t *mined, *safe; } minesweeperBoard;
+
+static uint32_t minesweeper_count(const uint32_t *rows) { return (uint32_t)(__builtin_popcount(rows[0]) + __builtin_popcount(rows[1]) + __builtin_popcount(rows[2])); }
+
+static uint32_t minesweeper_clue(const minesweeperBoard *b, uint32_t x, uint32_t y, uint32_t *unknown) {
+    uint32_t window = 7u << x, known = 0u;
+    for (uint32_t i = 0u; i < 3u; i++) {
+        unknown[i] = b->covered[y + i] & ~b->mined[y + i] & window;
+        known += (uint32_t)__builtin_popcount(b->mined[y + i] & window);
+    }
+    return b->cell[(y + 1u) * MINESWEEPER_STRIDE + x + 1u] - MINESWEEPER_SHOWN - known;
+}
+
+static uint32_t minesweeper_mark(const minesweeperBoard *b, uint32_t mines, uint32_t y, const uint32_t *rows) {
+    uint32_t *into = mines ? b->mined : b->safe;
+    for (uint32_t i = 0u; i < 3u; i++) into[y + i] |= rows[i];
+    return mines ? 1u : 2u;
+}
+
+static uint32_t minesweeper_single(const minesweeperBoard *b, uint32_t x, uint32_t y) {
+    uint32_t unknown[3], left = minesweeper_clue(b, x, y, unknown), count = minesweeper_count(unknown);
+    return !count || (left && left != count) ? 0u : minesweeper_mark(b, left != 0u, y, unknown);
+}
+
+static uint32_t minesweeper_pair(const minesweeperBoard *b, uint32_t x, uint32_t y, uint32_t bx, uint32_t by) {
+    uint32_t a[3], rest[3], shared = 0u;
+    int left = (int)minesweeper_clue(b, x, y, a), right = (int)minesweeper_clue(b, bx, by, rest), sizeA = (int)minesweeper_count(a), sizeB = (int)minesweeper_count(rest);
+    for (uint32_t i = 0u; i < 3u; i++) {
+        uint32_t j = by + i - y, overlap = j < 3u ? rest[i] & a[j] : 0u;
+        shared += (uint32_t)__builtin_popcount(overlap);
+        rest[i] &= ~overlap;
+    }
+    int both = (int)shared, onlyA = sizeA - both, onlyB = sizeB - both;
+    int least = left - onlyA > right - onlyB ? left - onlyA : right - onlyB, most = both < left ? both : left;
+    least = least > 0 ? least : 0;
+    most = most < right ? most : right;
+    return !onlyB ? 0u : right - most == onlyB ? minesweeper_mark(b, 1u, by, rest) : right == least ? minesweeper_mark(b, 0u, by, rest) : 0u;
+}
+
+static uint32_t minesweeper_deduce(const minesweeperKnobs *k, const minesweeperBoard *b, const uint32_t *open) {
+    uint32_t edge[MINESWEEPER_STRIDE], found = 1u;
+    for (uint32_t y = 0u; y < k->height; y++) {
+        uint32_t near = b->covered[y] | b->covered[y + 1u] | b->covered[y + 2u];
+        edge[y] = open[y] & (near | near << 1 | near >> 1);
+    }
+    while (found == 1u) {
+        found = 0u;
+        for (uint32_t y = 0u; y < k->height && found < 2u; y++)
+            for (uint32_t bits = edge[y]; bits && found < 2u; bits &= bits - 1u) found |= minesweeper_single(b, (uint32_t)__builtin_ctz(bits) - 1u, y);
+        for (uint32_t y = 0u; y < k->height && !found; y++)
+            for (uint32_t bits = edge[y]; bits && !found; bits &= bits - 1u) {
+                uint32_t x = (uint32_t)__builtin_ctz(bits) - 1u;
+                for (uint32_t by = y < 2u ? 0u : y - 2u; by < k->height && by <= y + 2u && !found; by++)
+                    for (uint32_t near = edge[by] & (0x1Fu << x) >> 1 & ~(by == y ? bits & (0u - bits) : 0u); near && !found; near &= near - 1u) found = minesweeper_pair(b, x, y, (uint32_t)__builtin_ctz(near) - 1u, by);
+            }
+    }
+    return found;
+}
+
+static void minesweeper_guess(const minesweeperKnobs *k, const minesweeperBoard *b, uint32_t *pick) {
+    uint32_t known = 0u, unknown = 0u, bestRisk = 1u, bestOf = 0u;
+    for (uint32_t y = 1u; y <= k->height; y++) {
+        known += (uint32_t)__builtin_popcount(b->mined[y]);
+        unknown += (uint32_t)__builtin_popcount(b->covered[y] & ~b->mined[y]);
+    }
+    for (uint32_t y = 0u; y < k->height; y++)
+        for (uint32_t bits = b->covered[y + 1u] & ~b->mined[y + 1u]; bits; bits &= bits - 1u) {
+            uint32_t at = (y + 1u) * MINESWEEPER_STRIDE + (uint32_t)__builtin_ctz(bits), risk = 0u, of = 1u;
+            for (uint32_t d = 0u; d < 8u; d++) {
+                uint32_t next = minesweeper_around(at, d), around[3];
+                if (b->cell[next] <= MINESWEEPER_SHOWN) continue;
+                uint32_t left = minesweeper_clue(b, (next & (MINESWEEPER_STRIDE - 1u)) - 1u, next / MINESWEEPER_STRIDE - 1u, around), among = minesweeper_count(around);
+                if (left * of > risk * among) { risk = left; of = among; }
+            }
+            if (!risk) { risk = k->mines - known; of = unknown; }
+            if (risk * bestOf < bestRisk * of) {
+                for (uint32_t r = 0u; r <= y; r++) pick[r] = 0u;
+                bestRisk = risk; bestOf = of;
+            }
+            if (risk * bestOf == bestRisk * of) pick[y] |= bits & (0u - bits);
+        }
+}
+
 void minesweeper_oracle(uint32_t instance, uint32_t seed, uint32_t step, const uint32_t *words, uint32_t *extra, const float *obs, float *ctrl, const float *shared) {
     (void)seed; (void)step; (void)obs; (void)shared;
     const minesweeperKnobs *k = &MINESWEEPER_KNOBS[instance];
-    const uint32_t *mine = extra + minesweeper_mines(k), *open = extra + minesweeper_opens(k);
-    uint32_t zero[MINESWEEPER_STRIDE], safe[MINESWEEPER_STRIDE], covered[MINESWEEPER_STRIDE], anyZero = 0u, anySafe = 0u, interior = (2u << k->width) - 2u;
-    for (uint32_t y = 0u; y < k->height; y++) {
-        uint32_t near = 0u;
-        for (uint32_t r = y; r < y + 3u; r++) near |= mine[r] | mine[r] << 1 | mine[r] >> 1;
-        covered[y] = interior & ~open[y];
-        safe[y] = covered[y] & ~mine[y + 1u];
-        zero[y] = safe[y] & ~near;
-        anyZero |= zero[y];
-        anySafe |= safe[y];
+    const uint8_t *cell = (const uint8_t *)extra;
+    const uint32_t *open = extra + minesweeper_opens(k);
+    uint32_t covered[MINESWEEPER_STRIDE] = { 0u }, mined[MINESWEEPER_STRIDE] = { 0u }, safe[MINESWEEPER_STRIDE] = { 0u }, pick[MINESWEEPER_STRIDE] = { 0u }, interior = (2u << k->width) - 2u;
+    for (uint32_t y = 0u; y < k->height; y++) covered[y + 1u] = interior & ~open[y];
+    minesweeperBoard board = { cell, covered, mined, safe };
+    const uint32_t *target = safe + 1u;
+    if (!minesweeper_deduce(k, &board, open)) {
+        minesweeper_guess(k, &board, pick);
+        target = pick;
     }
-    const uint32_t *target = anyZero ? zero : anySafe ? safe : covered;
     uint32_t x = words[MINESWEEPER_X], y = words[MINESWEEPER_Y], place = x + 1u, best = 0xFFFFFFFFu, tx = x, ty = y;
     for (uint32_t r = 0u; r < k->height; r++) {
         uint32_t bits = target[r];
@@ -258,6 +370,6 @@ void minesweeper_oracle(uint32_t instance, uint32_t seed, uint32_t step, const u
         uint32_t distance = reach + (r > y ? r - y : y - r);
         if (distance < best) { best = distance; tx = column - 1u; ty = r; }
     }
-    uint32_t action = tx < x ? 2u : tx > x ? 3u : ty < y ? 0u : ty > y ? 1u : ((const uint8_t *)extra)[(y + 1u) * MINESWEEPER_STRIDE + x + 1u] == MINESWEEPER_FLAGGED ? 5u : 4u;
+    uint32_t action = tx < x ? 2u : tx > x ? 3u : ty < y ? 0u : ty > y ? 1u : cell[(y + 1u) * MINESWEEPER_STRIDE + x + 1u] == MINESWEEPER_FLAGGED ? 5u : 4u;
     ctrl[0] = (float)action;
 }

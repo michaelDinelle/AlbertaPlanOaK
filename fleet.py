@@ -32,24 +32,27 @@ TRIES = BENCH / "tries"
 CHAMPION = TRIES / "champion"
 QUEUE = REPO / ".build/queue"
 BEST = REPO / "best"
-ANCHOR = "4262868f4bce5ea25ac4905e60742f75d11be371"
+ANCHOR = "232cf8f183dddf4c46025163f06757a3703b4af4"
 RECORDED_ENGINE = "oak"
 STEPS = 1_000_000
 TERMINAL = 100_000
 MARGIN = 0.01
+BUDGET = 0.5
 ALPHA = 0.05
-BOOTSTRAP = 10_000
-POWER = 0.8
 PROBE_STEPS = 20_000
 PROBE_BLOCKS = 3
-TIEBREAK_SEEDS = 4
-POLICIES = ("random", "ppo", "oracle")
-POLICY_SOURCES = {"random": ("Sources/random.c",), "ppo": ("Sources/ppo.c",), "oracle": ()}
+CONFIRM_SEEDS = 3
+SELECTED_SEEDS = 1 + CONFIRM_SEEDS
+ENVCHECK_STEPS = 200_000
+REWARD_ANCHOR = BENCH / "reward-anchor"
+CHECKS = BENCH / "checks"
+POLICIES = ("random", "constant", "ppo", "stream", "oracle")
+POLICY_SOURCES = {"random": ("Sources/random.c",), "constant": ("Sources/constant.c",), "ppo": ("Sources/ppo.c",), "stream": ("Sources/stream.c",), "oracle": ()}
 ENV_LAYER = ("Sources/env.h", "Sources/rng.h", "Sources/portable.h")
 SNAPSHOT = ("Sources", "catalog.py", "setup.sh")
 ENV_ROW = re.compile(r'\s*X\(\s*\w+\s*,\s*(\w+)\s*,.*?"([^"]+)"')
-VERBS = ("judge", "adopt", "probe", "trace", "try")
-TIMING = ("probe", "trace", "try")
+VERBS = ("judge", "adopt", "probe", "trace", "try", "check", "invariance")
+TIMING = ("probe", "trace", "try", "check", "invariance")
 TRACE_SECONDS = 10
 ACTIVE = []
 
@@ -393,33 +396,11 @@ def quantile(sorted_xs, q):
     return sorted_xs[lo] + (sorted_xs[hi] - sorted_xs[lo]) * (pos - lo)
 
 
-def scale(xs):
-    s = sorted(xs)
-    iqr = quantile(s, 0.75) - quantile(s, 0.25)
-    if iqr > 0:
-        return iqr
-    med = quantile(s, 0.5)
-    mad = quantile(sorted(abs(x - med) for x in xs), 0.5) * 1.4826
-    return mad if mad > 0 else 1.0
-
-
 def iqm(xs):
     s = sorted(xs)
     n = len(s)
     lo, hi = n // 4, n - n // 4
     return mean(s[lo:hi])
-
-
-def bootstrap(groups, statistic):
-    rng = random.Random(0)
-    reps = []
-    for _ in range(BOOTSTRAP):
-        pooled = []
-        for group in groups:
-            pooled.extend(rng.choices(group, k=len(group)))
-        reps.append(statistic(pooled))
-    reps.sort()
-    return quantile(reps, 0.025), quantile(reps, 0.975)
 
 
 def normal_cdf(z):
@@ -463,70 +444,6 @@ def holm(pvalues):
     return rejected
 
 
-def wins(a, b):
-    return mean([1.0 if x > y else 0.5 if x == y else 0.0 for x, y in zip(a, b)])
-
-
-def rho_of(a, b):
-    ma, mb = mean(a), mean(b)
-    va = mean([(x - ma) ** 2 for x in a])
-    vb = mean([(y - mb) ** 2 for y in b])
-    cov = mean([(x - ma) * (y - mb) for x, y in zip(a, b)])
-    return min(1.0, cov / math.sqrt(va * vb)) if va > 0 and vb > 0 else 0.0
-
-
-def mdr(rho, tests, n):
-    normal = statistics.NormalDist()
-    return (normal.inv_cdf(1 - ALPHA / tests) + normal.inv_cdf(POWER)) * math.sqrt(2 * (1 - rho)) / (2 * normal.inv_cdf(0.75) * math.sqrt(n))
-
-
-def report(candidate, baselines, best):
-    cols = ["env", "oak", "random", "oracle", "score", "ppo", "win>ppo"]
-    if best is not None:
-        cols += ["best", "d", "win>best", "guard p", "rho", "mdr"]
-    else:
-        cols += ["mdr"]
-    rows = []
-    d_groups, diff_groups, pvalues, win_best = [], [], [], []
-    for env in candidate.envs:
-        oak = candidate.scores(env)
-        rnd = baselines["random"][env].scores(env)
-        ppo = baselines["ppo"][env].scores(env)
-        oracle = baselines["oracle"][env].scores(env)
-        row = [env, mean(oak), mean(rnd), mean(oracle), (mean(oak) - mean(rnd)) / (mean(oracle) - mean(rnd)), mean(ppo), wins(oak, ppo)]
-        if best is not None:
-            ref = best.scores(env)
-            s = scale(ref)
-            d = [(x - y) / s for x, y in zip(oak, ref)]
-            diffs = [x - y for x, y in zip(oak, ref)]
-            p = wilcoxon_less(diffs)
-            rho = rho_of(oak, ref)
-            row += [mean(ref), iqm(d), wins(oak, ref), p, rho, mdr(rho, len(candidate.envs), len(oak))]
-            d_groups.append(d)
-            diff_groups.append(diffs)
-            pvalues.append(p)
-            win_best.append(wins(oak, ref))
-        else:
-            row += [mdr(0.0, len(candidate.envs), len(oak))]
-        rows.append(row)
-    table_print(cols, rows)
-    dead = sum(1 for h in candidate.health if h != 0xffffffff)
-    print(f"dead lanes: {dead} of {candidate.lanes}")
-    if best is None:
-        return None
-    suite = iqm([x for g in d_groups for x in g])
-    lo, hi = bootstrap(d_groups, iqm)
-    poi = mean(win_best)
-    plo, phi = bootstrap([[1.0 if x > 0 else 0.5 if x == 0 else 0.0 for x in g] for g in diff_groups], mean)
-    guard = holm(pvalues)
-    fired = [env for env, rej in zip(candidate.envs, guard) if rej]
-    identical = all(candidate.hash[candidate.lane[key]] == best.hash[best.lane[key]] for key in candidate.lane)
-    print(f"suite IQM d: {suite:+.4f}  95% CI [{lo:+.4f}, {hi:+.4f}]   P(improve): {poi:.3f} [{plo:.3f}, {phi:.3f}]")
-    print(f"regression guard (Holm {ALPHA}): {'fired on ' + ', '.join(fired) if fired else 'silent'}")
-    print(f"reward streams: {'identical' if identical else 'different'}")
-    return {"lo": lo, "hi": hi, "guard": bool(fired), "identical": identical}
-
-
 def fmt(v):
     if isinstance(v, float):
         return f"{v:.4g}" if abs(v) < 1e-3 or abs(v) >= 1e4 else f"{v:.4f}"
@@ -545,83 +462,82 @@ def table_print(cols, rows):
         print(" | ".join(fmt(v).rjust(w) if i else fmt(v).ljust(w) for i, (v, w) in enumerate(zip(r, widths))))
 
 
-def keep_engine(engine, root):
-    staged = root / f".{RECORDED_ENGINE}.partial"
-    shutil.copy2(engine, staged)
-    staged.rename(root / RECORDED_ENGINE)
+def lanes_of(recordings):
+    found = {}
+    for rec in recordings:
+        for key, lane in rec.lane.items():
+            found[key] = (rec.score[lane], rec.hash[lane], rec.health[lane])
+    return found
 
 
-def attempted(engine, root, first, count, tree=None):
-    if complete(root):
-        print(f"already tried: {root.name[:9]} (seeds {first}..{first + count - 1})", flush=True)
-    else:
-        shutil.rmtree(root, ignore_errors=True)
-        staged = root.with_name(root.name + ".source")
-        if tree is not None:
-            snapshot(staged, tree)
-        with quiet():
-            subprocess.run(["caffeinate", "-i", str(engine), "try", "oak", str(STEPS), str(first), str(count), str(root)], check=True, cwd=REPO)
-        if tree is not None:
-            staged.rename(root / "source")
-            keep_engine(engine, root)
-    return Recording(root)
+class Baselines:
+    def __init__(self, recording):
+        self.links = json.loads((recording.root / "baselines.json").read_text())
+        missing = [policy for policy in POLICIES if policy not in self.links]
+        if missing:
+            raise SystemExit(f"Recording {recording.root.name[:9]} links no {', '.join(missing)} baselines")
+        self.loaded = {}
+
+    def mean(self, policy, env):
+        name = self.links[policy][env]
+        if name not in self.loaded:
+            self.loaded[name] = Recording(BENCH / name)
+        return mean(self.loaded[name].scores(env))
+
+    def span(self, env):
+        floor = max(self.mean("random", env), self.mean("constant", env))
+        return floor, self.mean("oracle", env) - floor
+
+    def norm(self, env, value):
+        floor, width = self.span(env)
+        return (value - floor) / width if width > 0 else math.nan
 
 
-def compare(table, best, candidates, references):
-    links = json.loads((best.root / "baselines.json").read_text())
-    loaded = {}
+def finite(values):
+    return [v for v in values if math.isfinite(v)]
 
-    def linked(policy, env):
-        name = links[policy][env]
-        if name not in loaded:
-            loaded[name] = Recording(BENCH / name)
-        return loaded[name]
 
-    def lanes(recordings):
-        found = {}
-        for rec in recordings:
-            for key, lane in rec.lane.items():
-                found[key] = (rec.score[lane], rec.hash[lane], rec.health[lane])
-        return found
+def average(values):
+    kept = finite(values)
+    return mean(kept) if kept else math.nan
 
-    cand, ref = lanes(candidates), lanes(references)
+
+def compare(table, best, candidates, references, seeds, title):
+    print(f"\n{title}", flush=True)
+    base = Baselines(best)
+    cand, ref = lanes_of(candidates), lanes_of(references)
     category = {row["envId"]: row["category"] for row in table}
     rows = []
     for env in candidates[0].envs:
-        keys = sorted(key for key in cand if key[0] == env)
-        low, high = mean(linked("random", env).scores(env)), mean(linked("oracle", env).scores(env))
-        ppo = linked("ppo", env)
-
-        def norm(value):
-            return (value - low) / (high - low)
-
-        same = all(cand[key][1] == ref[key][1] for key in keys)
-        row = {"env": env, "category": category[env], "cand": mean([norm(cand[key][0]) for key in keys]), "ref": mean([norm(ref[key][0]) for key in keys]),
-               "best": mean([norm(best.score[best.lane[key]]) for key in keys]), "ppo": mean([norm(ppo.score[ppo.lane[key]]) for key in keys]),
-               "same": same, "dead": any(cand[key][2] != 0xffffffff for key in keys)}
-        row["d"] = 0.0 if same else row["cand"] - row["ref"]
-        rows.append(row)
+        keys = [(env, seed) for seed in seeds[env]]
+        absent = [key[1] for key in keys if key not in cand or key not in ref]
+        if absent:
+            raise SystemExit(f"{title}: {env} lacks lanes for seeds {absent}")
+        c, r = mean([cand[k][0] for k in keys]), mean([ref[k][0] for k in keys])
+        same = all(cand[k][1] == ref[k][1] for k in keys)
+        rows.append({"env": env, "category": category[env], "cand": base.norm(env, c), "ref": base.norm(env, r),
+                     "ppo": base.norm(env, base.mean("ppo", env)), "stream": base.norm(env, base.mean("stream", env)),
+                     "sign": 0 if same or c == r else (1 if c > r else -1), "same": same, "dead": any(cand[k][2] != 0xffffffff for k in keys)})
     rows.sort(key=lambda r: (r["category"], r["env"]))
-    table_print(["env", "category", "oak", "ref", "best", "ppo", "d"],
-                [[r["env"], r["category"], r["cand"], r["ref"], r["best"], r["ppo"], "=" if r["same"] else r["d"]] for r in rows])
+    table_print(["env", "category", "oak", "ref", "ppo", "stream", "d"],
+                [[r["env"], r["category"], r["cand"], r["ref"], r["ppo"], r["stream"], "=" if r["same"] else r["cand"] - r["ref"]] for r in rows])
     groups = [("suite", rows)] + [(name, [r for r in rows if r["category"] == name]) for name in sorted(set(category.values()))]
     better, worse, summary = [], [], []
     for name, members in groups:
-        wins, losses = sum(1 for r in members if r["d"] > 0), sum(1 for r in members if r["d"] < 0)
-        better.append(sign_tail(wins, losses))
-        worse.append(sign_tail(losses, wins))
-        summary.append([name, len(members)] + [mean([r[k] for r in members]) for k in ("cand", "ref", "best", "ppo")] + [wins, losses, better[-1], worse[-1]])
+        up, down = sum(1 for r in members if r["sign"] > 0), sum(1 for r in members if r["sign"] < 0)
+        better.append(sign_tail(up, down))
+        worse.append(sign_tail(down, up))
+        summary.append([name, len(members), average([r["cand"] for r in members]), average([r["ref"] for r in members]), up, down, better[-1], worse[-1]])
     print()
-    table_print(["group", "n", "oak", "ref", "best", "ppo", "wins", "losses", "p better", "p worse"], summary)
+    table_print(["group", "n", "oak", "ref", "wins", "losses", "p better", "p worse"], summary)
     stats = {}
-    for key, name in (("cand", "oak"), ("ref", "ref")):
-        values = [r[key] for r in rows]
-        stats[key] = (mean(values), iqm(values), quantile(sorted(values), 0.5))
-        print(f"{name}: mean {stats[key][0]:+.4f}  IQM {stats[key][1]:+.4f}  median {stats[key][2]:+.4f}  below Random {sum(1 for v in values if v < 0)}  above PPO {sum(1 for r in rows if r[key] > r['ppo'])}")
+    for key in ("cand", "ref"):
+        values = sorted(finite([r[key] for r in rows]))
+        stats[key] = (mean(values), iqm(values), quantile(values, 0.5))
+        print(f"{'oak' if key == 'cand' else 'ref'}: mean {stats[key][0]:+.4f}  IQM {stats[key][1]:+.4f}  median {stats[key][2]:+.4f}", flush=True)
     for rec in candidates:
         sps = rec.meta["stepsPerSecond"]
-        cores = min(os.cpu_count() or 1, rec.lanes)
-        print(f"{rec.root.name[:12]}: dead lanes {sum(1 for h in rec.health if h != 0xffffffff)} of {rec.lanes}   {sps:,.0f} steps/s   {cores / sps * 1e6:.3f} us per step per core   {rec.lanes * rec.steps / sps:.1f} s")
+        print(f"{rec.root.name[:12]}: dead lanes {sum(1 for h in rec.health if h != 0xffffffff)} of {rec.lanes}   {sps:,.0f} steps/s   {rec.lanes * rec.steps / sps:.1f} s", flush=True)
     if all(r["same"] for r in rows):
         verdict = "IDENTICAL"
     elif any(holm(worse)):
@@ -630,31 +546,166 @@ def compare(table, best, candidates, references):
         verdict = "BETTER"
     else:
         verdict = "NO SIGNAL"
-    closer = all(c > r for c, r in zip(stats["cand"], stats["ref"]))
-    return verdict, closer, summary[0]
+    print(f"verdict: {verdict}", flush=True)
+    return {"verdict": verdict, "closer": all(c > r for c, r in zip(stats["cand"], stats["ref"])), "wins": summary[0][4], "losses": summary[0][5], "rows": rows}
+
+
+def guard(candidate, reference, seeds, title):
+    pvalues = []
+    for env in candidate.envs:
+        diffs = [candidate.score[candidate.lane[(env, seed)]] - reference.score[reference.lane[(env, seed)]] for seed in seeds[env]]
+        pvalues.append(wilcoxon_less(diffs))
+    fired = [env for env, rejected in zip(candidate.envs, holm(pvalues)) if rejected]
+    print(f"regression guard against {title} (Holm {ALPHA}): {'fired on ' + ', '.join(fired) if fired else 'silent'}", flush=True)
+    return fired
+
+
+def atlas(recording, rows):
+    raw = array("I", (recording.root / "instruments.u32").read_bytes())
+    if len(raw) != 4 * recording.lanes:
+        raise SystemExit(f"Recording {recording.root.name[:9]} has instruments for {len(raw) // 4} of {recording.lanes} lanes")
+    standing = {r["env"]: r for r in rows}
+    found = {}
+    for env in recording.envs:
+        lanes = [recording.lane[(env, seed)] for seed in recording.seeds[env]]
+        firsts = [raw[4 * lane + 3] for lane in lanes if raw[4 * lane + 3]]
+        entry = {"episodesPerMillion": mean([raw[4 * lane] for lane in lanes]) * 1_000_000 / recording.steps,
+                 "positive": sum(raw[4 * lane + 1] for lane in lanes), "negative": sum(raw[4 * lane + 2] for lane in lanes),
+                 "firstPositive": min(firsts) if firsts else None, "labels": []}
+        row = standing.get(env)
+        floored = bool(row) and math.isfinite(row["cand"]) and row["cand"] <= 0.02
+        if floored and entry["positive"] == 0:
+            entry["labels"].append("never rewarded")
+        if floored and entry["episodesPerMillion"] < 100:
+            entry["labels"].append("starved")
+        if floored:
+            entry["labels"].append("at the floor")
+        if row and math.isfinite(row["cand"]) and math.isfinite(row["ppo"]) and row["cand"] < row["ppo"]:
+            entry["labels"].append("below PPO")
+        if row:
+            entry["score"] = row["cand"]
+        found[env] = entry
+    (recording.root / "atlas.json").write_text(json.dumps(found, indent=1, sort_keys=True) + "\n")
+    counts = {}
+    for entry in found.values():
+        for label in entry["labels"]:
+            counts[label] = counts.get(label, 0) + 1
+    print("atlas: " + ", ".join(f"{label} {count}" for label, count in sorted(counts.items())), flush=True)
+    return found
+
+
+def keep_engine(engine, root):
+    staged = root / f".{RECORDED_ENGINE}.partial"
+    shutil.copy2(engine, staged)
+    staged.rename(root / RECORDED_ENGINE)
+
+
+def attempted(engine, root, first, count, tree=None, policy="oak"):
+    if complete(root):
+        print(f"already tried: {root.name[:9]} (seeds {first}..{first + count - 1})", flush=True)
+    else:
+        shutil.rmtree(root, ignore_errors=True)
+        staged = root.with_name(root.name + ".source")
+        if tree is not None:
+            snapshot(staged, tree)
+        with quiet():
+            subprocess.run(["caffeinate", "-i", str(engine), "try", policy, str(STEPS), str(first), str(count), str(root)], check=True, cwd=REPO)
+        if tree is not None:
+            staged.rename(root / "source")
+            keep_engine(engine, root)
+    return Recording(root)
 
 
 def attempt(engine, tree, table, best):
     TRIES.mkdir(parents=True, exist_ok=True)
     key = file_digest(engine)[:40]
-    candidate = attempted(engine, TRIES / key, 0, 1, tree)
+    label = f"try {key[:9]} against best {best.root.name[:9]}"
+    screen = attempted(engine, TRIES / key, 0, 1, tree)
+    s = compare(table, best, [screen], [best], {env: best.seeds[env][:1] for env in best.envs}, "screen: seed 0 against the best")
+    atlas(screen, s["rows"])
+    if s["verdict"] == "IDENTICAL":
+        return f"IDENTICAL: {label}"
+    if s["verdict"] == "WORSE" or (s["verdict"] == "NO SIGNAL" and not s["closer"]):
+        return f"{s['verdict']}: {label} on seed 0; suite {s['wins']} wins, {s['losses']} losses"
+    fresh = {env: best.seeds[env][1:1 + CONFIRM_SEEDS] for env in best.envs}
+    wide = attempted(engine, TRIES / f"{key}+1+{CONFIRM_SEEDS}", 1, CONFIRM_SEEDS)
+    c = compare(table, best, [wide], [best], fresh, f"confirmation: seeds 1..{CONFIRM_SEEDS} against the best")
+    crowned, against = c["verdict"] == "BETTER", ""
     champion = CHAMPION.read_text().strip() if CHAMPION.exists() else ""
-    reference = Recording(TRIES / champion) if champion else best
-    label = f"champion {champion[:9]}" if champion else f"best {best.root.name[:9]}"
-    verdict, closer, suite = compare(table, best, [candidate], [reference])
-    if verdict == "NO SIGNAL" and closer:
-        print(f"\ntie-break: mean, IQM and median all improved; adding seeds 1..{TIEBREAK_SEEDS - 1} of every block", flush=True)
-        wide = attempted(engine, TRIES / f"{key}+1+{TIEBREAK_SEEDS - 1}", 1, TIEBREAK_SEEDS - 1)
-        if champion:
-            referenceWide = attempted(TRIES / champion / "oak", TRIES / f"{champion}+1+{TIEBREAK_SEEDS - 1}", 1, TIEBREAK_SEEDS - 1)
-            references = [reference, referenceWide]
-        else:
-            references = [best]
-        verdict, closer, suite = compare(table, best, [candidate, wide], references)
-        verdict = f"{verdict} on {TIEBREAK_SEEDS} seeds"
-    if verdict.startswith(("IDENTICAL", "BETTER")):
+    if crowned and champion:
+        h = compare(table, best, [wide], [Recording(TRIES / f"{champion}+1+{CONFIRM_SEEDS}")], fresh, f"against champion {champion[:9]}'s confirmation run")
+        against = f"; against champion {champion[:9]}: {h['verdict']}"
+        crowned = h["verdict"] != "WORSE"
+    if crowned:
         CHAMPION.write_text(key + "\n")
-    return f"{verdict}: try {key[:9]} against {label}; suite {suite[6]} wins, {suite[7]} losses"
+        return f"BETTER, confirmed: {label}; seeds 1-{CONFIRM_SEEDS} suite {c['wins']} wins, {c['losses']} losses{against}"
+    return f"{s['verdict']} on seed 0, {c['verdict']} on seeds 1-{CONFIRM_SEEDS}: {label}; suite {c['wins']} wins, {c['losses']} losses{against}"
+
+
+def invariance(engine, tree, table, best):
+    key = file_digest(engine)[:40]
+    screen = attempted(engine, TRIES / key, 0, 1, tree)
+    first = {env: best.seeds[env][:1] for env in best.envs}
+    CHECKS.mkdir(parents=True, exist_ok=True)
+    found = []
+    for variant in ("oak-permuted", "oak-rescaled"):
+        probe_run = attempted(engine, CHECKS / f"{key}-{variant}", 0, 1, policy=variant)
+        v = compare(table, best, [probe_run], [screen], first, f"{variant} against the plain try")
+        found.append(f"{variant[4:]} {'INVARIANT' if v['verdict'] in ('NO SIGNAL', 'IDENTICAL') else 'VARIES (' + v['verdict'] + ')'}")
+    return "invariance: " + "; ".join(found)
+
+
+def fuzz_runs(engine):
+    return [json.loads(line) for line in subprocess.run([str(engine), "fuzz"], stdout=subprocess.PIPE, text=True, check=True, cwd=REPO).stdout.splitlines() if line.strip()]
+
+
+def failing(runs):
+    return [f for f in runs if f["nonfinite"] or f["invalidControls"]]
+
+
+def check(engine, tree_id):
+    CHECKS.mkdir(parents=True, exist_ok=True)
+    with quiet():
+        worlds = [json.loads(line) for line in subprocess.run([str(engine), "envcheck", str(ENVCHECK_STEPS)], stdout=subprocess.PIPE, text=True, check=True, cwd=REPO).stdout.splitlines() if line.strip()]
+        fuzzed = fuzz_runs(engine)
+    flagged = []
+    for w in worlds:
+        floor = max(w["random"]["reward"], w["constant"]["reward"])
+        flags = []
+        if not w["deterministic"]:
+            flags.append("oracle not deterministic")
+        if not all(w[p]["healthy"] for p in ("random", "constant", "oracle")):
+            flags.append("non-finite reward or observation")
+        if w["oracle"]["reward"] <= floor:
+            flags.append("oracle at or below the floor")
+        w["flags"] = flags
+        if flags:
+            flagged.append(w)
+    table_print(["env", "random", "constant", "oracle", "oracle eps", "random eps", "flags"],
+                [[w["env"], w["random"]["reward"], w["constant"]["reward"], w["oracle"]["reward"], w["oracle"]["episodes"], w["random"]["episodes"], "; ".join(w["flags"])] for w in worlds])
+    failures = failing(fuzzed)
+    print()
+    if failures:
+        table_print(["env", "obs", "actions", "box", "scenario", "nonfinite", "invalid"], [[f["env"], f["obs"], f["actions"], f["box"], f["scenario"], f["nonfinite"], f["invalidControls"]] for f in failures])
+    (CHECKS / f"{tree_id}.json").write_text(json.dumps({"worlds": worlds, "fuzz": fuzzed}, indent=1) + "\n")
+    return f"check: {len(worlds)} worlds, {len(flagged)} flagged; fuzz: {len(failures)} of {len(fuzzed)} runs failed"
+
+
+def anchor_ratio(recording):
+    path = recording.root / "speed.json"
+    if not path.exists():
+        raise SystemExit(f"Recording {recording.root.name[:9]} carries no ratio to the budget anchor; adopt it first")
+    return json.loads(path.read_text())["anchorRatio"]
+
+
+def standing(table, recording):
+    base = Baselines(recording)
+    category = {row["envId"]: row["category"] for row in table}
+    rows = [{"env": env, "category": category[env], "cand": base.norm(env, mean(recording.scores(env))), "ref": math.nan,
+             "ppo": base.norm(env, base.mean("ppo", env)), "stream": base.norm(env, base.mean("stream", env))} for env in recording.envs]
+    groups = [(name, [r for r in rows if r["category"] == name]) for name in sorted(set(category.values()))] + [("suite", rows)]
+    table_print(["group", "n", "oak", "ppo", "stream"], [[name, len(members)] + [average([r[key] for r in members]) for key in ("cand", "ppo", "stream")] for name, members in groups])
+    return rows
 
 
 def execute(tree, verb):
@@ -665,6 +716,8 @@ def execute(tree, verb):
     subprocess.run([tree / "setup.sh"], cwd=tree, check=True)
     engine = tree / ".build/oak"
     tree_id = hashlib.sha256(digest(("Sources", "setup.sh"), tree).encode()).hexdigest()[:40]
+    if verb == "check":
+        return check(engine, tree_id)
     table = json.loads(subprocess.run([engine, "envs"], capture_output=True, text=True, check=True).stdout)
     schedule = {row["envId"]: [row["seedStart"], row["seedEnd"]] for row in table}
     digests = env_digests(table, tree)
@@ -675,8 +728,8 @@ def execute(tree, verb):
             raise SystemExit("Schedule differs from the recorded best; environments, seeds, and horizon must match: ./fleet.py adopt if this change is intended")
         reference_sources = reference.sources()["envs"]
         changed = sorted(env for env in reference_sources.keys() | digests.keys() if reference_sources.get(env) != digests.get(env))
-        if changed and verb == "try":
-            raise SystemExit(f"REFUSE: environment sources changed since the recorded best ({', '.join(changed)}); a try compares agents only")
+        if changed and verb in ("try", "invariance"):
+            raise SystemExit(f"REFUSE: environment sources changed since the recorded best ({', '.join(changed)}); a {verb} compares agents only")
         if changed:
             print(f"Environment sources changed since the recorded best ({len(changed)} environments); comparing on the same seeds and horizon: {', '.join(changed)}", flush=True)
     if verb == "trace":
@@ -684,21 +737,31 @@ def execute(tree, verb):
         return f"trace: sampled {TRACE_SECONDS} s of the working tree's engine"
     if verb == "try":
         return attempt(engine, tree, table, reference)
+    if verb == "invariance":
+        return invariance(engine, tree, table, reference)
     other = reference_engine(reference)
     if judged and filecmp.cmp(engine, other, shallow=False):
         if verb == "probe":
             return f"probe: binary identical to recorded {best_id[:9]}"
         raise SystemExit(f"REJECT: binary identical to recorded {best_id[:9]}; nothing to judge")
     if judged:
-        timing = (other, reference)
+        chain = anchor_ratio(reference)
+        ratio = speed_stage(engine, other, reference, True)
+        budget = ratio * chain
     else:
         anchor = Recording(BENCH / ANCHOR)
-        timing = (other if best_id == ANCHOR else reference_engine(anchor), anchor)
-    ratio = speed_stage(engine, timing[0], timing[1], judged)
+        ratio = None
+        budget = speed_stage(engine, other if best_id == ANCHOR else reference_engine(anchor), anchor, False)
     if verb == "probe":
-        return f"probe: {ratio:.4f}x against recorded {best_id[:9]}"
-    if ratio < 1 - MARGIN:
-        raise SystemExit(f"{'REJECT' if judged else 'REFUSE'}: paired speed {ratio:.4f}x against recorded {timing[1].root.name[:9]}; best stays {best_id}")
+        return f"probe: {ratio:.4f}x against recorded {best_id[:9]}; {budget:.4f}x the budget anchor"
+    if budget < BUDGET:
+        raise SystemExit(f"{'REJECT' if judged else 'REFUSE'}: {budget:.4f}x the budget anchor's throughput, below the budget of {BUDGET}; best stays {best_id}")
+    if judged:
+        with quiet():
+            fuzz_best, fuzz_candidate = len(failing(fuzz_runs(other))), len(failing(fuzz_runs(engine)))
+        print(f"fuzz: {fuzz_candidate} failing runs against the best's {fuzz_best}", flush=True)
+        if fuzz_candidate > fuzz_best:
+            raise SystemExit(f"REJECT: fuzz failures rise from {fuzz_best} to {fuzz_candidate}; best stays {best_id}")
     baselines = {policy: baseline(policy, digests, schedule, engine, tree) for policy in POLICIES}
     candidate_root = BENCH / tree_id
     sources = {"policy": "oak", "envs": digests, "policyDigest": digest(("Sources",), tree)}
@@ -708,37 +771,70 @@ def execute(tree, verb):
         candidate = Recording(candidate_root)
     else:
         candidate = record(engine, "oak", candidate_root, sources, tree)
-    tried = TRIES / file_digest(engine)[:40]
-    if complete(tried):
-        attempted = Recording(tried)
-        drifted = [env for env in attempted.envs if attempted.hash[attempted.lane[(env, attempted.seeds[env][0])]] != candidate.hash[candidate.lane[(env, attempted.seeds[env][0])]]]
-        if drifted:
-            raise SystemExit(f"ERROR: the try of this binary differs from its fleet lanes on {len(drifted)} environments: {', '.join(drifted)}")
+    (candidate_root / "speed.json").write_text(json.dumps({"anchorRatio": budget, "bestRatio": ratio}, indent=1) + "\n")
+    key = file_digest(engine)[:40]
+    for tried in (TRIES / key, TRIES / f"{key}+1+{CONFIRM_SEEDS}"):
+        if complete(tried):
+            run = Recording(tried)
+            drifted = sorted({env for (env, seed), lane in run.lane.items() if run.hash[lane] != candidate.hash[candidate.lane[(env, seed)]]})
+            if drifted:
+                raise SystemExit(f"ERROR: the try of this binary differs from its fleet lanes on {len(drifted)} environments: {', '.join(drifted)}")
     for policy, found in baselines.items():
         if set(found) != set(candidate.envs) or any(found[env].steps != candidate.steps or found[env].seeds[env] != candidate.seeds[env] for env in candidate.envs):
             raise SystemExit(f"Recorded {policy} baselines do not match the candidate schedule")
     (candidate_root / "baselines.json").write_text(json.dumps(
         {policy: {env: rec.root.name for env, rec in found.items()} for policy, found in baselines.items()},
         indent=1, sort_keys=True) + "\n")
-    if judged and (set(reference.envs) != set(candidate.envs) or reference.seeds != candidate.seeds or reference.steps != candidate.steps):
-        raise SystemExit("Schedule differs from the best: ./fleet.py adopt if this change is intended")
-    verdict = report(candidate, baselines, reference if judged else None)
     sps = candidate.meta["stepsPerSecond"]
     if not judged:
-        print(f"Steps/s: {sps:,.0f}")
+        atlas(candidate, standing(table, candidate))
+        print(f"Steps/s: {sps:,.0f}; {budget:.4f}x the budget anchor")
         common = [key for key in candidate.lane if key in reference.lane]
         same = sum(1 for key in common if candidate.hash[candidate.lane[key]] == reference.hash[reference.lane[key]])
         print(f"reward streams identical to the previous best on {same} of {len(common)} shared lanes")
         BEST.write_text(tree_id + "\n")
+        REWARD_ANCHOR.write_text(tree_id + "\n")
         CHAMPION.unlink(missing_ok=True)
         return f"ADOPT: best is {tree_id}"
-    print(f"Steps/s: {sps:,.0f} recorded; paired speed against best: {ratio:.4f}x")
-    reward_better = verdict["lo"] > 0 and not verdict["guard"]
-    reward_not_worse = verdict["identical"] or (verdict["lo"] >= -MARGIN and not verdict["guard"])
-    if reward_not_worse and ((reward_better and ratio >= 1 - MARGIN) or ratio >= 1 + MARGIN):
+    if set(reference.envs) != set(candidate.envs) or reference.seeds != candidate.seeds or reference.steps != candidate.steps:
+        raise SystemExit("Schedule differs from the best: ./fleet.py adopt if this change is intended")
+    judged_key = file_digest(engine)[:40]
+    if all(candidate.hash[candidate.lane[key]] == reference.hash[reference.lane[key]] for key in reference.lane):
+        print(f"Steps/s: {sps:,.0f} recorded; paired speed against best: {ratio:.4f}x; every lane's reward stream is identical to the best's", flush=True)
+        if ratio >= 1 - MARGIN:
+            atlas(candidate, standing(table, candidate))
+            BEST.write_text(tree_id + "\n")
+            CHAMPION.unlink(missing_ok=True)
+            return f"PROMOTE on identity: {tree_id}"
+        raise SystemExit(f"REJECT: identical reward streams but {ratio:.4f}x the best's speed; best stays {best_id}")
+    selected = {env: reference.seeds[env][SELECTED_SEEDS:] for env in reference.envs}
+    j = compare(table, reference, [candidate], [reference], selected, f"judge: seeds {SELECTED_SEEDS}..{len(reference.seeds[reference.envs[0]]) - 1} against the best")
+    atlas(candidate, j["rows"])
+    fired = guard(candidate, reference, selected, "the best")
+    reward_better = j["verdict"] == "BETTER" and not fired
+    not_worse = j["verdict"] != "WORSE" and not fired
+    anchor_id = REWARD_ANCHOR.read_text().strip()
+    if not_worse and not reward_better and anchor_id != best_id:
+        anchor_run = Recording(BENCH / anchor_id)
+        a = compare(table, reference, [candidate], [anchor_run], selected, f"against the reward anchor {anchor_id[:9]}")
+        not_worse = a["verdict"] != "WORSE" and not guard(candidate, anchor_run, selected, "the reward anchor")
+    print(f"Steps/s: {sps:,.0f} recorded; paired speed against best: {ratio:.4f}x; {budget:.4f}x the budget anchor")
+    if reward_better:
+        BEST.write_text(tree_id + "\n")
+        REWARD_ANCHOR.write_text(tree_id + "\n")
+        CHAMPION.unlink(missing_ok=True)
+        return f"PROMOTE on reward: {tree_id}"
+    if not_worse and ratio >= 1 + MARGIN:
         BEST.write_text(tree_id + "\n")
         CHAMPION.unlink(missing_ok=True)
-        return f"PROMOTE: {tree_id}"
+        return f"PROMOTE on speed: {tree_id}"
+    if not_worse and fuzz_candidate < fuzz_best:
+        BEST.write_text(tree_id + "\n")
+        CHAMPION.unlink(missing_ok=True)
+        return f"PROMOTE on repair: {tree_id}; fuzz failures fall from {fuzz_best} to {fuzz_candidate}"
+    if CHAMPION.exists() and CHAMPION.read_text().strip() == judged_key:
+        CHAMPION.unlink()
+        raise SystemExit(f"REJECT: best stays {best_id}; champion {judged_key[:9]} dethroned")
     raise SystemExit(f"REJECT: best stays {best_id}")
 
 
@@ -887,7 +983,7 @@ def main():
         serve()
         return
     if verb not in VERBS:
-        raise SystemExit("usage: ./fleet.py [adopt|probe|trace|try]")
+        raise SystemExit(f"usage: ./fleet.py [{'|'.join(VERBS)}]")
     job = submit(verb)
     if not wake():
         print(f"queued {job.name}, but this shell runs at reduced priority (nice {os.getpriority(os.PRIO_PROCESS, 0)}), so no runner was started; run ./fleet.py from a normal-priority shell", flush=True)

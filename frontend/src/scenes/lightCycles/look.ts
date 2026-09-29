@@ -1,5 +1,5 @@
 import * as THREE from 'three/webgpu';
-import { abs, atan, attribute, clamp, cos, dot, exp, float, floor, fract, length, max, min, mix, positionWorld, select, sin, smoothstep, step, texture, uniform, uv, vec2, vec3 } from 'three/tsl';
+import { abs, attribute, clamp, dot, exp, float, floor, fract, length, max, min, mix, positionWorld, select, sin, smoothstep, step, texture, uv, vec2, vec3 } from 'three/tsl';
 import { coverage, rgb, sdBox, sdSegment } from '@kit/shapes2d';
 
 type N<T extends string> = THREE.Node<T>;
@@ -13,9 +13,6 @@ export const PAD = WALL + 0.03;
 export const NOSE = 0.46;
 export const RIM = 0.34;
 export const CYCLE = 1.8;
-export const DIAL = 1.8;
-export const DIAL_RADIUS = 0.68;
-export const LAP = 16;
 export const SHARD = 0.24;
 
 export const flat = (width: number, depth: number) => new THREE.PlaneGeometry(width, depth).rotateX(-Math.PI / 2);
@@ -129,26 +126,6 @@ export function shardMaterial(palette: Palette): THREE.MeshBasicNodeMaterial {
   material.colorNode = color;
   material.opacityNode = max(coverage(d), glow).mul(state.y);
   return material;
-}
-
-export interface Dial { material: THREE.MeshBasicNodeMaterial; progress: Level; alpha: Level; lock: Level }
-
-export function dialMaterial(color: number): Dial {
-  const material = sheet(), progress = uniform(0), alpha = uniform(0), lock = uniform(0);
-  const q = uv().sub(0.5).mul(DIAL), r = length(q);
-  const turn = fract(atan(q.x, q.y).div(2 * Math.PI).add(1));
-  const laps = floor(progress.div(LAP)), within = progress.sub(laps.mul(LAP));
-  const notch = floor(turn.mul(LAP)), inside = fract(turn.mul(LAP));
-  const arc = coverage(abs(inside.sub(0.5)).mul((2 * Math.PI * DIAL_RADIUS) / LAP).sub(0.085));
-  const band = coverage(abs(r.sub(DIAL_RADIUS)).sub(0.03));
-  const done = clamp(within.sub(notch), 0, 1), level = max(done, step(1, laps).mul(0.42));
-  const head = within.div(LAP).mul(2 * Math.PI);
-  const spark = exp(length(q.sub(vec2(sin(head), cos(head)).mul(DIAL_RADIUS))).mul(-24)).mul(step(0.01, progress));
-  const flash = coverage(abs(r.sub(DIAL_RADIUS)).sub(0.07)).mul(lock);
-  const hue = rgb(color);
-  material.colorNode = mix(hue.mul(level.mul(1.9).add(0.35)), mix(hue, vec3(1), 0.6).mul(3), max(spark, flash));
-  material.opacityNode = clamp(arc.mul(band).mul(level.mul(0.85).add(0.15)).add(spark).add(flash), 0, 1).mul(alpha);
-  return { material, progress, alpha, lock };
 }
 
 export class Strips {

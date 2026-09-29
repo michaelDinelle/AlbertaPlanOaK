@@ -8,13 +8,13 @@ import { TOKENS } from '@kit/tokens';
 import type { FrameUpdate, LegendSpec, SceneContext, SceneFactory, ScenePost } from '@kit/types';
 import { countEvents } from '@sim/events';
 import {
-  HANABI_COLOURS, HANABI_DISCARDED, HANABI_MISFIRED, HANABI_PLAY, HANABI_PLAYED, HANABI_RANKS, HANABI_TOLD_COLOUR, HANABI_TOLD_RANK,
-  hanabiAction, hanabiActor, hanabiAgentPlayedOwn, hanabiClued, hanabiColourOf, hanabiColours, hanabiCursor, hanabiDeck, hanabiDiscarded, hanabiEmpty, hanabiFinal, hanabiGame, hanabiGone, hanabiHeight,
-  hanabiId, hanabiInfo, hanabiLastAt, hanabiMisfireEnding, hanabiLastCard, hanabiLastCopy, hanabiLastKind, hanabiLastSeat, hanabiLastTouched, hanabiLife, hanabiMarked, hanabiMoved, hanabiRankOf, hanabiRanks, hanabiScore,
-  hanabiThink, hanabiTouched, hanabiTurn,
+  HANABI_COLOURS, HANABI_DISCARDED, HANABI_MISFIRED, HANABI_PLAY, HANABI_PLAYED, HANABI_PLAYERS, HANABI_RANKS, HANABI_TOLD_COLOUR, HANABI_TOLD_RANK,
+  hanabiAction, hanabiClock, hanabiClued, hanabiColourOf, hanabiColours, hanabiCursor, hanabiDeck, hanabiDiscarded, hanabiEmpty, hanabiEnding, hanabiFinal, hanabiGame, hanabiGone, hanabiHeight,
+  hanabiId, hanabiInfo, hanabiLastCopy, hanabiLatest, hanabiLife, hanabiMarked, hanabiMove, hanabiMoveAt, hanabiMoveCard, hanabiMoveForced, hanabiMoveKind, hanabiMoveSeat, hanabiMoveTouched,
+  hanabiMoved, hanabiRankOf, hanabiRanks, hanabiRound, hanabiScore, hanabiTouched, hanabiTurn,
 } from '@sim/envs/hanabi';
 import type { EnvFrame } from '@sim/types';
-import { constantList, parameter } from '../../data/envs';
+import { constant, constantList, parameter } from '../../data/envs';
 import { formatCount, formatSigned } from '../../format';
 import {
   BADGE_Q, BURST_Q, CARD_H, CARD_QH, CARD_QW, CARD_W, CELL_H, CELL_Q, CELL_W, CHIP_H, CHIP_W, FIREWORK, GOLD, LANTERN_Q, MISFIRE, PAPER, PLATE_H, PLATE_W, RING_R, TOKEN_Q,
@@ -26,6 +26,7 @@ type N<T extends string> = THREE.Node<T>;
 const COLOUR_NAMES = ['red', 'yellow', 'green', 'white', 'blue'] as const;
 const PRESSES = ['next →', '← previous', 'play', 'discard', 'hint colour', 'hint rank'] as const;
 const PARTNERS = ['literal', 'focus'] as const;
+const FOCUS = 1;
 const PITCH = 1.14;
 const SEAT_PITCH = 5.55;
 const LANTERN_GAP = 0.45;
@@ -52,14 +53,12 @@ const CHIP_Z = CARD_H / 2 + 0.12;
 const DECK_LAYERS = 8;
 const MOVE_SPAN = 4;
 const END_SPAN = 9;
-const LEAD = 2;
 const PANEL_HALF_W = 8.45;
 const RIM = 0.55;
 const HOLD = 2;
 const LAND = 0.62;
 const SPLIT = 0.45;
 const DEAL = 0.2;
-const WAIT = 0.34;
 const CARDS = 96;
 const TOKENS_MAX = 24;
 
@@ -74,7 +73,7 @@ const cardName = (id: number) => `${COLOUR_NAMES[hanabiColourOf(id)]} ${hanabiRa
 const single = (mask: number) => mask !== 0 && (mask & (mask - 1)) === 0 ? 31 - Math.clz32(mask) : -1;
 
 interface Spot { x: number; z: number }
-interface Active { m: number; before: EnvFrame; after: EnvFrame; u: number }
+interface Active { m: number; before: EnvFrame; after: EnvFrame; u: number; index: number; b: ArrayLike<number>; w: ArrayLike<number>; record: number }
 interface Lamp { mesh: THREE.Mesh; tint: THREE.Color }
 
 class Batch {
@@ -111,7 +110,7 @@ class HanabiScene extends Stage2DScene {
   private players = 2;
   private hand = 5;
   private partner = 0;
-  private thinkSteps = 3;
+  private patience = 1;
   private copies: number[] = [];
   private clueCapacity = 0;
   private lives = 0;
@@ -145,7 +144,7 @@ class HanabiScene extends Stage2DScene {
   private eventLog: FrameUpdate['eventLog'] | null = null;
   private readonly spot: Spot = { x: 0, z: 0 };
   private readonly other: Spot = { x: 0, z: 0 };
-  private readonly ledger = { step: 0, game: 0, turn: 0, actor: 0, think: 0, final: 0, cursor: '—', press: '—', move: '—', table: '—', reward: 0, score: 0 };
+  private readonly ledger = { step: 0, game: 0, turn: 0, acting: 0, clock: 0, final: 0, cursor: '—', press: '—', move: '—', table: '—', reward: 0, score: 0 };
 
   override legend: LegendSpec | null = null;
 
@@ -167,12 +166,12 @@ class HanabiScene extends Stage2DScene {
   }
 
   private turnText(): string {
-    const { actor, think } = this.ledger;
-    return actor === 0 ? 'you' : `seat ${actor} · thinking ${Math.min(think + 1, this.thinkSteps)} of ${this.thinkSteps}`;
+    const { acting, clock } = this.ledger;
+    return acting === 0 ? `you · move clock ${clock} of ${this.patience}` : `seat ${acting}`;
   }
 
   private partnersText(): string {
-    return `${plural(this.players - 1, `${PARTNERS[this.partner]} bot`)} · ${plural(this.thinkSteps, 'step')} to think`;
+    return plural(this.players - 1, `${PARTNERS[this.partner]} bot`);
   }
 
   private record(): string {
@@ -239,7 +238,7 @@ class HanabiScene extends Stage2DScene {
     this.hand = parameter(env, 'handSize');
     this.partner = parameter(env, 'partner');
     if (PARTNERS[this.partner] === undefined) throw new Error(`${env.envId} seats partner kind ${this.partner}, which Hanabi does not name`);
-    this.thinkSteps = parameter(env, 'thinkSteps');
+    this.patience = constant(env, 'HANABI_PATIENCE');
     this.copies = constantList(env, 'HANABI_COPIES');
     this.dealt = constantList(env, 'HANABI_ORDERED').length;
     this.accent = this.accentOf(ctx);
@@ -342,28 +341,27 @@ class HanabiScene extends Stage2DScene {
   }
 
   private startOf(frame: FrameUpdate, m: number): number {
-    const partner = hanabiActor(this.available(frame, m - 1)!.words) !== 0 && !this.available(frame, m)!.done;
-    for (let prev = m - 1; prev >= Math.max(1, m - LEAD - HOLD); prev--) {
-      if (!this.moveAt(frame, prev)) continue;
-      const lead = partner && !this.available(frame, prev)!.done ? LEAD : 0;
-      return Math.max(m - 1 - lead, prev + HOLD - 1);
-    }
-    return m - 1 - (partner ? LEAD : 0);
+    for (let prev = m - 1; prev >= Math.max(1, m - HOLD); prev--) if (this.moveAt(frame, prev)) return Math.max(m - 1, prev + HOLD - 1);
+    return m - 1;
   }
 
   private active(frame: FrameUpdate, position: number): Active | null {
-    const step = Math.floor(position);
-    for (let m = step + 1 + LEAD; m >= Math.max(1, step - END_SPAN - HOLD); m--) {
+    const step = Math.floor(position), round = MOVE_SPAN * this.players;
+    for (let m = step + 1; m >= Math.max(1, step - Math.max(END_SPAN, round) - HOLD); m--) {
       if (!this.moveAt(frame, m)) continue;
       const start = this.startOf(frame, m);
       if (start > position) continue;
-      const after = this.available(frame, m)!, span = after.done ? END_SPAN : MOVE_SPAN;
-      let end = start + span;
-      for (let next = m + 1; next <= Math.ceil(end) + 1 + LEAD; next++) if (this.moveAt(frame, next)) {
+      const before = this.available(frame, m - 1)!, after = this.available(frame, m)!;
+      let end = start + (after.done ? END_SPAN : round);
+      for (let next = m + 1; next <= Math.ceil(end) + 1; next++) if (this.moveAt(frame, next)) {
         end = Math.min(end, this.startOf(frame, next));
         break;
       }
-      return position < end ? { m, before: this.available(frame, m - 1)!, after, u: (position - start) / (end - start) } : null;
+      if (position >= end) return null;
+      const u = (position - start) / (end - start);
+      if (after.done) return { m, before, after, u, index: 0, b: before.words, w: after.words, record: 0 };
+      const states = hanabiRound(before.words, after.words, m, this.players, this.hand, this.partner === FOCUS, this.copies), index = Math.min(this.players - 1, Math.floor(u * this.players));
+      return { m, before, after, u: u * this.players - index, index, b: states[index]!, w: states[index + 1]!, record: hanabiMove(after.words, index) };
     }
     return null;
   }
@@ -392,12 +390,12 @@ class HanabiScene extends Stage2DScene {
     this.drawCursor(finale ? act.before : now, finale ? null : this.available(frame, step - 1), finale ? null : next, a, ending && !finale);
     this.drawLanterns(finale ? act.before : now, act);
     for (const b of [this.cards, this.chips, this.bursts, this.cells, this.tokens, this.lanterns]) b!.flush();
-    this.ledgerOf(frame, now);
+    this.ledgerOf(frame, now, act);
   }
 
   private drawStill(words: ArrayLike<number>, time: number): void {
     for (let seat = 0; seat < this.players; seat++) this.drawHand(seat, words, 1, 0, -1);
-    this.drawFireworks(words, -1, 1, time);
+    this.drawFireworks(words, 1, time);
     this.drawLedger(words, -1, 0);
     this.drawTokens(hanabiInfo(words), hanabiLife(words), -1, 0, -1, 0, 1, time);
     this.drawDeck(hanabiDeck(words), hanabiFinal(words), 1);
@@ -442,16 +440,16 @@ class HanabiScene extends Stage2DScene {
     chips.attrs[0]!.setXYZW(i, hanabiColourOf(id), hanabiRankOf(id), alpha, 0);
   }
 
-  private drawFireworks(words: ArrayLike<number>, bonus: number, alpha: number, time: number, flare = 0, slots = -1): void {
+  private drawFireworks(words: ArrayLike<number>, alpha: number, time: number, flare = 0, slots = -1): void {
     for (let c = 0; c < HANABI_COLOURS; c++) {
-      const height = hanabiHeight(words, c) + (c === bonus ? 1 : 0), under = slots >= 0 ? slots : height === 0 ? alpha : 0;
+      const height = hanabiHeight(words, c), under = slots >= 0 ? slots : height === 0 ? alpha : 0;
       if (under > 0) {
         this.stackSpot(c, 0, this.spot);
         this.pushCard(this.spot.x, this.spot.z, 1, 1, c, 5, 3, 0, 0, 0, under, 0);
       }
       for (let r = 0; r < height; r++) {
         this.stackSpot(c, r, this.spot);
-        this.pushFace(this.spot.x, this.spot.z, 1, 1, c * HANABI_RANKS + r, c === bonus && r === height - 1 ? 0.4 * flare : 0, alpha, 0);
+        this.pushFace(this.spot.x, this.spot.z, 1, 1, c * HANABI_RANKS + r, r === height - 1 ? 0.4 * flare : 0, alpha, 0);
       }
       const glow = Math.max(Math.exp(-(time - this.flared[c]!) / 0.9), flare);
       const bursts = this.bursts!, i = bursts.place(this.stackSpot(c, 0, this.spot).x, BURST_Z);
@@ -463,13 +461,13 @@ class HanabiScene extends Stage2DScene {
     }
   }
 
-  private drawLedger(words: ArrayLike<number>, fresh: number, freshGlow: number, extra = -1): void {
+  private drawLedger(words: ArrayLike<number>, fresh: number, freshGlow: number): void {
     const cells = this.cells!;
     for (let c = 0; c < HANABI_COLOURS; c++) for (let r = 0; r < HANABI_RANKS; r++) {
       const id = c * HANABI_RANKS + r, height = hanabiHeight(words, c), played = r < height;
       const flags = (hanabiGone(words, id) ? 1 : 0) | (played ? 2 : 0) | (!played && hanabiLastCopy(words, id) ? 4 : 0) | (id === fresh && freshGlow > 0 ? 8 : 0) | (this.copies[r]! << 4);
       const i = cells.place(this.cellSpot(c, r, this.spot).x, this.spot.z);
-      cells.attrs[0]!.setXYZW(i, c, r, hanabiDiscarded(words, id) + (id === extra ? 1 : 0), flags);
+      cells.attrs[0]!.setXYZW(i, c, r, hanabiDiscarded(words, id), flags);
     }
   }
 
@@ -514,10 +512,10 @@ class HanabiScene extends Stage2DScene {
   }
 
   private drawMove(act: Active, time: number): void {
-    const { before, after, u } = act, b = before.words, w = after.words;
-    const kind = hanabiLastKind(w), seat = hanabiLastSeat(w), landed = u >= LAND;
+    const { b, w, u, record } = act;
+    const kind = hanabiMoveKind(record), seat = hanabiMoveSeat(record), landed = u >= LAND;
     if (kind === HANABI_PLAYED || kind === HANABI_MISFIRED || kind === HANABI_DISCARDED) {
-      const at = hanabiLastAt(w), id = hanabiLastCard(w), base = seat * this.hand;
+      const at = hanabiMoveAt(record), id = hanabiMoveCard(record), base = seat * this.hand;
       if (hanabiId(b[base + at]!) !== id) throw new Error(`Hanabi step ${act.m} moves ${cardName(id)} from seat ${seat} slot ${at + 1}, which held ${cardName(hanabiId(b[base + at]!))}`);
       for (let k = at + 1; k < this.hand; k++) if (w[base + k - 1] !== b[base + k]) throw new Error(`Hanabi step ${act.m} does not close seat ${seat}'s hand over slot ${at + 1}`);
       for (let s = 0; s < this.players; s++) if (s !== seat) this.drawHand(s, w, 1, 0, -1);
@@ -546,7 +544,7 @@ class HanabiScene extends Stage2DScene {
         if (seat === 0 && e > 0.6) this.pushChip(this.spot.x, this.spot.z + CHIP_Z, hanabiId(drawn), clamp01((e - 0.6) / 0.4));
       }
       const success = kind === HANABI_PLAYED;
-      this.drawFireworks(landed ? w : b, -1, 1, time);
+      this.drawFireworks(landed ? w : b, 1, time);
       this.drawLedger(landed ? w : b, success ? -1 : id, landed ? 1 - (u - LAND) / (1 - LAND) : 0);
       const refund = hanabiInfo(w) > hanabiInfo(b);
       this.drawTokens(landed ? hanabiInfo(w) : hanabiInfo(b), landed ? hanabiLife(w) : hanabiLife(b), refund ? hanabiInfo(b) : -1, refund ? clamp01((u - LAND + 0.15) / 0.3) : 0,
@@ -555,11 +553,11 @@ class HanabiScene extends Stage2DScene {
       if (!landed) this.drawFlight(seat, at, b[base + at]!, id, success, u / LAND);
       return;
     }
-    const target = hanabiLastAt(w), value = hanabiLastCard(w), touched = hanabiLastTouched(w), told = u >= 0.5;
+    const target = hanabiMoveAt(record), value = hanabiMoveCard(record), touched = hanabiMoveTouched(record), told = u >= 0.5;
     if (kind !== HANABI_TOLD_COLOUR && kind !== HANABI_TOLD_RANK) throw new Error(`Hanabi step ${act.m} records move kind ${kind}`);
     const glow = bump(u, 0.42, 0.58, 1);
     for (let s = 0; s < this.players; s++) this.drawHand(s, s === target ? (told ? w : b) : w, 1, s === target ? touched : 0, glow);
-    this.drawFireworks(w, -1, 1, time);
+    this.drawFireworks(w, 1, time);
     this.drawLedger(w, -1, 0);
     const spent = u >= 0.15;
     this.drawTokens(spent ? hanabiInfo(w) : hanabiInfo(b), hanabiLife(w), hanabiInfo(w), clamp01(u / 0.3), -1, 0, 1, time);
@@ -606,24 +604,19 @@ class HanabiScene extends Stage2DScene {
   }
 
   private drawEnd(act: Active, time: number): void {
-    const { before, after, u } = act, b = before.words, w = after.words, misfire = hanabiMisfireEnding(before, after), lost = misfire && hanabiLife(b) === 1;
-    const own = hanabiAgentPlayedOwn(before, after), cursor = hanabiCursor(b), id = own ? hanabiId(b[cursor]!) : -1, success = own && after.reward > 0;
+    const { u, b, w } = act, end = hanabiEnding(b, w), lost = hanabiLife(end) === 0, burned = hanabiLife(end) < hanabiLife(b);
     if (u < SPLIT) {
-      const progress = u / (SPLIT * 0.7);
-      this.drawEnding(b, 1, own ? cursor : -1);
-      const settled = !own || progress >= 1, fizzle = lost && settled ? 1 - 0.6 * ease(clamp01((u - (own ? SPLIT * 0.7 : 0)) / 0.2)) : 1;
-      this.drawFireworks(b, success && settled ? hanabiColourOf(id) : -1, fizzle, time, lost || !settled ? 0 : 1 - u / SPLIT);
-      this.drawLedger(b, own && !success ? id : -1, own && !success && settled ? 1 : 0, own && !success && settled ? id : -1);
-      const burned = misfire && settled, life = burned ? hanabiLife(b) - 1 : hanabiLife(b);
-      this.drawTokens(hanabiInfo(b), life, -1, 0, burned ? life : -1, burned ? 1 - u / SPLIT : 0, 1, time);
+      this.drawEnding(b, 1);
+      this.drawFireworks(end, lost ? 1 - 0.6 * ease(clamp01(u / 0.2)) : 1, time, lost ? 0 : 1 - u / SPLIT);
+      this.drawLedger(b, -1, 0);
+      this.drawTokens(hanabiInfo(b), hanabiLife(end), -1, 0, burned ? hanabiLife(end) : -1, burned ? 1 - u / SPLIT : 0, 1, time);
       this.drawDeck(hanabiDeck(b), hanabiFinal(b), 1);
-      if (!settled) this.drawFlight(0, cursor, b[cursor]!, id, success, progress);
       return;
     }
     const deal = (u - SPLIT) / (1 - SPLIT), fade = 1 - ease(clamp01(deal / 0.3)), leave = 1 - ease(clamp01(deal / 0.15));
-    if (leave > 0) this.drawEnding(b, leave, own ? cursor : -1);
-    this.drawFireworks(b, success ? hanabiColourOf(id) : -1, fade * (lost ? 0.4 : 1), time, 0, 1);
-    this.drawLedger(deal < 0.3 ? b : w, -1, 0, deal < 0.3 && own && !success ? id : -1);
+    if (leave > 0) this.drawEnding(b, leave);
+    this.drawFireworks(end, fade * (lost ? 0.4 : 1), time, 0, 1);
+    this.drawLedger(deal < 0.3 ? b : w, -1, 0);
     this.drawTokens(hanabiInfo(w), hanabiLife(w), -1, 0, -1, 0, 1, time);
     const seats = this.players * this.hand;
     let left = 0;
@@ -648,8 +641,8 @@ class HanabiScene extends Stage2DScene {
     this.drawDeck(hanabiDeck(w) + left, hanabiFinal(w), 1);
   }
 
-  private drawEnding(words: ArrayLike<number>, alpha: number, played: number): void {
-    for (let q = 0; q < this.players * this.hand; q++) if (q !== played) this.drawCard(Math.floor(q / this.hand), q % this.hand, words[q]!, hanabiTouched(words, q), alpha, 0);
+  private drawEnding(words: ArrayLike<number>, alpha: number): void {
+    for (let q = 0; q < this.players * this.hand; q++) this.drawCard(Math.floor(q / this.hand), q % this.hand, words[q]!, hanabiTouched(words, q), alpha, 0);
   }
 
   private cursorSpot(words: ArrayLike<number>, q: number, out: Spot): Spot {
@@ -657,30 +650,28 @@ class HanabiScene extends Stage2DScene {
   }
 
   private drawCursor(now: EnvFrame, previous: EnvFrame | null, next: EnvFrame | null, a: number, hidden: boolean): void {
-    const words = now.words, mine = hanabiActor(words) === 0, q = hanabiCursor(words);
+    const words = now.words, q = hanabiCursor(words);
     this.cursorSpot(words, q, this.spot);
-    if (next && mine && !next.done && hanabiCursor(next.words) !== q) {
+    if (next && !next.done && hanabiCursor(next.words) !== q) {
       this.cursorSpot(next.words, hanabiCursor(next.words), this.other);
       const e = ease(a);
       this.spot.x = lerp(this.spot.x, this.other.x, e);
       this.spot.z = lerp(this.spot.z, this.other.z, e);
     }
-    const pressed = previous !== null && hanabiActor(previous.words) === 0 && hanabiAction(now.actions) >= HANABI_PLAY;
+    const pressed = previous !== null && hanabiAction(now.actions) >= HANABI_PLAY;
     const flash = pressed ? 1 - ease(a) : 0;
     this.cursorLook.tint.set(pressed && !hanabiMoved(previous, now) ? TOKENS.failureBlue : 0xffffff);
     this.cursorMesh!.position.set(this.spot.x, 0, this.spot.z);
-    this.cursorLook.alpha.value = hidden ? 0 : Math.max(mine ? 1 : WAIT, flash);
+    this.cursorLook.alpha.value = hidden ? 0 : 1;
     this.cursorLook.flash.value = flash;
   }
 
   private drawLanterns(now: EnvFrame, act: Active | null): void {
-    const lanterns = this.lanterns!, words = now.words, actor = hanabiActor(words), think = hanabiThink(words);
-    const acting = act ? (act.after.done ? hanabiActor(act.before.words) : hanabiLastSeat(act.after.words)) : -1, full = act !== null && act.u < (act.after.done ? SPLIT : 0.5);
+    const lanterns = this.lanterns!, clock = hanabiClock(now.words), acting = act && !act.after.done ? hanabiMoveSeat(act.record) : 0;
     for (let seat = 0; seat < this.players; seat++) {
       this.lanternSpot(seat, this.spot);
-      const i = lanterns.place(this.spot.x, this.spot.z), active = seat === actor || (full && seat === acting) ? 1 : 0;
-      const progress = seat === 0 ? 0 : full && seat === acting ? this.thinkSteps : seat === actor ? think + 1 : 0;
-      lanterns.attrs[0]!.setXYZW(i, seat === 0 ? 1 : 0, active, progress, seat === 0 ? 0 : this.thinkSteps);
+      const i = lanterns.place(this.spot.x, this.spot.z), active = seat === acting ? 1 : 0;
+      lanterns.attrs[0]!.setXYZW(i, seat === 0 ? 1 : 0, active, seat === 0 ? clock : 0, seat === 0 ? this.patience : 0);
       lanterns.attrs[1]!.setXYZW(i, seat, 1, 0, 0);
       const lamp = this.seatLamps[seat]!;
       lamp.mesh.visible = true;
@@ -691,37 +682,37 @@ class HanabiScene extends Stage2DScene {
 
   private celebrate(act: Active | null, frame: FrameUpdate, pool: Stage2D['pool'], time: number, step: number): void {
     if (!act) {
-      if (frame.scrubbed) this.fired = step;
+      if (frame.scrubbed) this.fired = (step + 1) * HANABI_PLAYERS - 1;
       return;
     }
-    const threshold = act.after.done ? (hanabiAgentPlayedOwn(act.before, act.after) ? SPLIT * 0.7 : 0.04) : LAND;
+    const key = act.m * HANABI_PLAYERS + act.index, threshold = act.after.done ? 0.04 : LAND;
     if (frame.scrubbed) {
-      this.fired = act.u >= threshold ? act.m : act.m - 1;
+      this.fired = act.u >= threshold ? key : key - 1;
       this.flared.fill(-Infinity);
       this.misfired = -Infinity;
       return;
     }
-    if (act.u < threshold || act.m <= this.fired) return;
-    this.fired = act.m;
-    const w = act.after.words, b = act.before.words, at = new THREE.Vector3();
+    if (act.u < threshold || key <= this.fired) return;
+    this.fired = key;
+    const at = new THREE.Vector3();
     if (act.after.done) {
-      if (hanabiMisfireEnding(act.before, act.after)) {
+      const end = hanabiEnding(act.b, act.w);
+      if (hanabiLife(end) < hanabiLife(act.b)) {
         pool.sigh(0.8, at.set(0, 0, BURST_Z), time);
         this.misfired = time;
-        if (hanabiLife(b) === 1) return;
+        if (hanabiLife(end) === 0) return;
       }
-      const own = hanabiAgentPlayedOwn(act.before, act.after) ? hanabiColourOf(hanabiId(b[hanabiCursor(b)]!)) : -1;
       for (let c = 0; c < HANABI_COLOURS; c++) {
-        const height = hanabiHeight(b, c) + (c === own ? 1 : 0);
+        const height = hanabiHeight(end, c);
         if (height === 0) continue;
         this.stackSpot(c, 0, this.spot);
         pool.burst(at.set(this.spot.x, 0, BURST_Z), FIREWORK[c]!, 0.5 + 0.22 * height, time);
         this.flared[c] = time;
       }
-      if (hanabiScore(b) + (act.after.reward > 0 ? 1 : 0) >= 15) pool.pulse.fire(0.8);
+      if (hanabiScore(end) >= 15) pool.pulse.fire(0.8);
       return;
     }
-    const kind = hanabiLastKind(w), id = hanabiLastCard(w);
+    const kind = hanabiMoveKind(act.record), id = hanabiMoveCard(act.record);
     if (kind === HANABI_PLAYED) {
       const c = hanabiColourOf(id), r = hanabiRankOf(id);
       this.stackSpot(c, r, this.spot);
@@ -730,7 +721,7 @@ class HanabiScene extends Stage2DScene {
       if (r === HANABI_RANKS - 1) pool.burst(at.set(this.spot.x, 0, BURST_Z), TOKENS.celebrationGold, 1.2, time);
       this.flared[c] = time;
     } else if (kind === HANABI_MISFIRED) {
-      this.fuseSpot(hanabiLife(w), this.spot);
+      this.fuseSpot(hanabiLife(act.w), this.spot);
       pool.sigh(0.5, at.set(this.spot.x, 0, this.spot.z), time);
       this.misfired = time;
     } else if (kind === HANABI_DISCARDED) {
@@ -739,13 +730,13 @@ class HanabiScene extends Stage2DScene {
     }
   }
 
-  private ledgerOf(frame: FrameUpdate, now: EnvFrame): void {
+  private ledgerOf(frame: FrameUpdate, now: EnvFrame, act: Active | null): void {
     const words = now.words, ledger = this.ledger, step = now.step;
     ledger.step = step;
     ledger.game = hanabiGame(words);
     ledger.turn = hanabiTurn(words);
-    ledger.actor = hanabiActor(words);
-    ledger.think = hanabiThink(words);
+    ledger.acting = act && !act.after.done ? hanabiMoveSeat(act.record) : 0;
+    ledger.clock = hanabiClock(words);
     ledger.final = hanabiFinal(words);
     ledger.reward = now.reward;
     ledger.score = hanabiScore(words);
@@ -755,16 +746,19 @@ class HanabiScene extends Stage2DScene {
       : seat === 0 ? `your card ${k + 1} · hidden · ${this.knowledge(slot)}` : `seat ${seat} card ${k + 1} · ${cardName(hanabiId(slot))}`;
     const before = step > 0 ? this.available(frame, step - 1) : null;
     if (!before) ledger.press = '—';
-    else if (hanabiActor(before.words) !== 0) ledger.press = 'waiting';
     else {
       const action = hanabiAction(now.actions), moved = hanabiMoved(before, now);
-      ledger.press = action >= HANABI_PLAY && !moved ? `${PRESSES[action]} · no effect` : PRESSES[action]!;
+      ledger.press = moved && !now.done && hanabiMoveForced(hanabiMove(words, 0)) ? `${PRESSES[action]} · move clock ran out`
+        : action >= HANABI_PLAY && !moved ? `${PRESSES[action]} · no effect` : PRESSES[action]!;
     }
-    if (now.done && before) {
-      const score = hanabiScore(before.words) + (now.reward > 0 ? 1 : 0);
-      ledger.move = hanabiMisfireEnding(before, now) && hanabiLife(before.words) === 1 ? `game over · last fuse burned · ${score} played` : `game over · score ${score}`;
-    } else if (hanabiLastKind(words) === 0) ledger.move = hanabiTurn(words) === 0 ? 'new deal' : '—';
-    else ledger.move = this.describe(words);
+    if (act && !act.after.done) ledger.move = this.describe(act.record);
+    else if (now.done && before) {
+      const end = hanabiEnding(before.words, words);
+      ledger.move = hanabiLife(end) === 0 ? `game over · last fuse burned · ${hanabiScore(end)} played` : `game over · score ${hanabiScore(end)}`;
+    } else {
+      const latest = hanabiLatest(words);
+      ledger.move = latest ? this.describe(latest) : hanabiTurn(words) === 0 ? 'new deal' : '—';
+    }
   }
 
   private knowledge(slot: number): string {
@@ -774,20 +768,21 @@ class HanabiScene extends Stage2DScene {
     return `${named} ${numbered}`.trim() || 'no hints';
   }
 
-  private describe(words: ArrayLike<number>): string {
-    const kind = hanabiLastKind(words), seat = hanabiLastSeat(words), who = seat === 0 ? 'you' : `seat ${seat}`, value = hanabiLastCard(words);
+  private describe(record: number): string {
+    const kind = hanabiMoveKind(record), seat = hanabiMoveSeat(record), who = seat === 0 ? 'you' : `seat ${seat}`, value = hanabiMoveCard(record);
+    const forced = hanabiMoveForced(record) ? ' · move clock ran out' : '';
     if (kind === HANABI_PLAYED) return `${who} played ${cardName(value)}`;
     if (kind === HANABI_MISFIRED) return `${who} misfired ${cardName(value)}`;
-    if (kind === HANABI_DISCARDED) return `${who} discarded ${cardName(value)}`;
-    const target = hanabiLastAt(words), whom = target === 0 ? 'you' : `seat ${target}`, count = hanabiLastTouched(words).toString(2).split('1').length - 1;
+    if (kind === HANABI_DISCARDED) return `${who} discarded ${cardName(value)}${forced}`;
+    const target = hanabiMoveAt(record), whom = target === 0 ? 'you' : `seat ${target}`, count = hanabiMoveTouched(record).toString(2).split('1').length - 1;
     const hint = kind === HANABI_TOLD_COLOUR ? COLOUR_NAMES[value] : `${value + 1}s`;
-    return `${who} told ${whom} ${hint} · ${plural(count, 'card')}`;
+    return `${who} told ${whom} ${hint} · ${plural(count, 'card')}${forced}`;
   }
 
   private debugDraw(frame: FrameUpdate, kit: Parameters<NonNullable<GroundTruthOptions['debug']>>[1]): void {
     const step = frame.state.step, now = frame.frameAt(step), words = now.words, seats = this.players * this.hand;
     const truth = kit.marks('truth', seats), touched = kit.marks('touched', seats), stacks = kit.marks('fireworks', HANABI_COLOURS * HANABI_RANKS);
-    const tokens = kit.marks('tokens', TOKENS_MAX), discards = kit.marks('discards', HANABI_COLOURS * HANABI_RANKS), actor = kit.marks('actor', 1);
+    const tokens = kit.marks('tokens', TOKENS_MAX), discards = kit.marks('discards', HANABI_COLOURS * HANABI_RANKS);
     for (let q = 0; q < seats; q++) {
       const slot = words[q]!, seat = Math.floor(q / this.hand), k = q % this.hand;
       if (hanabiEmpty(slot)) continue;
@@ -808,8 +803,6 @@ class HanabiScene extends Stage2DScene {
     }
     for (let k = 0; k < hanabiInfo(words); k++) tokens.set(this.clueSpot(k, this.spot).x, 0.05, this.spot.z, 0.1, TOKENS.uiCyan);
     for (let k = 0; k < hanabiLife(words); k++) tokens.set(this.fuseSpot(k, this.spot).x, 0.05, this.spot.z, 0.1, MISFIRE);
-    this.lanternSpot(hanabiActor(words), this.spot);
-    actor.set(this.spot.x, 0.05, this.spot.z, 0.2, TOKENS.celebrationGold);
     const q = hanabiCursor(words), seat = Math.floor(q / this.hand);
     this.cardSpot(seat, q % this.hand, hanabiClued(words[q]!) && !hanabiEmpty(words[q]!), this.spot);
     const box = kit.curve('cursor', 5, TOKENS.uiCyan), hw = CARD_W / 2 + 0.16, hh = CARD_H / 2 + 0.16;

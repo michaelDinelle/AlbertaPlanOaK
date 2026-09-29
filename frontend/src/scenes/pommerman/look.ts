@@ -420,9 +420,9 @@ export function bomberShade(lit: Lit, time: Level, accent: number) {
   };
 }
 
-export const FX = { SPLINTER: 0, PICKUP: 1, STREAK: 2, PUFF: 3, DUST: 4, MEMORY: 5, SLAM: 6 } as const;
+export const FX = { SPLINTER: 0, PICKUP: 1, STREAK: 2, PUFF: 3, DUST: 4, SLAM: 5 } as const;
 
-export function fxShade(time: Level) {
+export function fxShade() {
   return (p: N<'vec2'>, channel: (name: string) => N<'vec4'>) => {
     const material = sheet(), fx = channel('aFx'), tint = channel('aTint');
     const kind = fx.x, t = clamp(fx.y, 0, 1), seed = fx.z, arg = fx.w, hue = tint.xyz;
@@ -459,12 +459,6 @@ export function fxShade(time: Level) {
     const dust = coverage(abs(length(p.div(vec2(1, 0.8))).sub(t.mul(0.5).add(0.18))).sub(t.oneMinus().mul(0.05).add(0.01))).mul(t.oneMinus()).mul(0.55);
     const dustA = dust.mul(is(FX.DUST));
 
-    const angle = atan(p.y, p.x), dash = step(0.5, fract(angle.div(Math.PI * 2).mul(14).add(time.mul(0.4))));
-    const memory = coverage(abs(length(p).sub(0.3)).sub(0.02)).mul(dash).mul(0.85);
-    const hookAt = p.sub(vec2(0, 0.06)), hook = max(abs(length(hookAt).sub(0.058)).sub(0.019), min(hookAt.x.negate(), hookAt.y.negate()));
-    const mark = coverage(min(min(hook, sdSegment(p, vec2(0, 0.002), vec2(0, -0.03), 0.019)), sdCircle(p.sub(vec2(0, -0.085)), 0.024)));
-    const memoryA = clamp(memory.add(mark.mul(0.7)), 0, 1).mul(t.oneMinus()).mul(is(FX.MEMORY));
-
     const slam = coverage(abs(sdBox(p, vec2(t.mul(0.3).add(0.4)), 0.05)).sub(t.oneMinus().mul(0.05).add(0.01))).mul(t.oneMinus());
     const slamA = slam.mul(0.45).mul(is(FX.SLAM));
 
@@ -472,7 +466,7 @@ export function fxShade(time: Level) {
     const embers = mix(rgb(HUE.flameMid).mul(1.8), hue.mul(0.7), smoothstep(0.1, 0.55, t));
     const shaded = select(is(FX.SPLINTER).greaterThan(0.5), embers.mul(sin(p.x.mul(40)).mul(0.1).add(0.9)), select(is(FX.PUFF).add(is(FX.DUST)).greaterThan(0.5), hue.mul(puffN.mul(0.2).add(0.9)), color));
     material.colorNode = shaded;
-    material.opacityNode = clamp(splinterA.add(pickupA).add(streakA).add(puffA).add(dustA).add(memoryA).add(slamA), 0, 1);
+    material.opacityNode = clamp(splinterA.add(pickupA).add(streakA).add(puffA).add(dustA).add(slamA), 0, 1);
     return material;
   };
 }
@@ -530,15 +524,15 @@ export function badgeShade(lit: Lit, time: Level, accent: number, maxPips: numbe
   };
 }
 
-export interface Fog { material: THREE.MeshBasicNodeMaterial; rect: THREE.UniformNode<'vec4', THREE.Vector4>; strength: Level; veil: Level }
+export interface Fog { material: THREE.MeshBasicNodeMaterial; rect: THREE.UniformNode<'vec4', THREE.Vector4>; strength: Level }
 
 export function fogShade(accent: number, time: Level): Fog {
-  const material = sheet(), rect = uniform(new THREE.Vector4()), strength = uniform(0), veil = uniform(0);
+  const material = sheet(), rect = uniform(new THREE.Vector4()), strength = uniform(0);
   const q = positionWorld.xz, window = sdBox(q.sub(rect.xy.add(rect.zw).mul(0.5)), rect.zw.sub(rect.xy).mul(0.5), 0.1);
   const dark = smoothstep(-0.04, 0.2, window).mul(strength);
   const edge = coverage(abs(window).sub(0.016)).mul(strength).mul(sin(time.mul(2.2)).mul(0.15).add(0.55));
-  const alpha = max(max(dark, veil), edge);
+  const alpha = max(dark, edge);
   material.colorNode = mix(rgb(0x04060b), rgb(accent).mul(1.4), edge.div(max(alpha, 1e-4)));
   material.opacityNode = alpha;
-  return { material, rect, strength, veil };
+  return { material, rect, strength };
 }

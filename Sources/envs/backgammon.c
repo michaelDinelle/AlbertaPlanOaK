@@ -271,25 +271,20 @@ static const uint16_t BACKGAMMON_CHOOSE[21][7] = {
 };
 
 enum { BACKGAMMON_RANDOM, BACKGAMMON_PUBEVAL, BACKGAMMON_LEAGUE };
-enum { BACKGAMMON_DOWN, BACKGAMMON_UP, BACKGAMMON_HIGH, BACKGAMMON_LOW, BACKGAMMON_JUMP, BACKGAMMON_ACTIONS };
-enum { BACKGAMMON_AGENT_THINK, BACKGAMMON_AGENT_MOVE, BACKGAMMON_OPPONENT_THINK, BACKGAMMON_OPPONENT_PLAY };
-enum { BACKGAMMON_MINE = 0, BACKGAMMON_THEIRS = 4, BACKGAMMON_DICE = 8, BACKGAMMON_HIGH_LEGAL, BACKGAMMON_LOW_LEGAL, BACKGAMMON_CURSOR, BACKGAMMON_PHASE,
-       BACKGAMMON_GAME, BACKGAMMON_TURN, BACKGAMMON_LAST, BACKGAMMON_HITS, BACKGAMMON_MEMBER, BACKGAMMON_WORDS };
+enum { BACKGAMMON_PLAY, BACKGAMMON_NEXT, BACKGAMMON_ACTIONS };
+enum { BACKGAMMON_MINE = 0, BACKGAMMON_THEIRS = 4, BACKGAMMON_DICE = 8, BACKGAMMON_PATH, BACKGAMMON_PROPOSAL, BACKGAMMON_PROPOSALS, BACKGAMMON_GAME, BACKGAMMON_TURN,
+       BACKGAMMON_REPLY, BACKGAMMON_REPLY_DICE, BACKGAMMON_MEMBER, BACKGAMMON_WORDS };
+enum { BACKGAMMON_ROLLS, BACKGAMMON_PICKS, BACKGAMMON_OPENINGS, BACKGAMMON_SHUFFLES };
 enum { BACKGAMMON_POINTS = 24, BACKGAMMON_BAR = 25, BACKGAMMON_MEN = 15, BACKGAMMON_INPUTS = 122, BACKGAMMON_THETA = 2 * BACKGAMMON_INPUTS, BACKGAMMON_LEVELS = 17 };
 enum { BACKGAMMON_BAR_TERMS = 4 * BACKGAMMON_POINTS * BACKGAMMON_LEVELS, BACKGAMMON_OFF_TERMS = BACKGAMMON_BAR_TERMS + 32, BACKGAMMON_TERMS = BACKGAMMON_OFF_TERMS + 32 };
-enum { BACKGAMMON_BEAROFF = 54264, BACKGAMMON_EXPECT = BACKGAMMON_TERMS, BACKGAMMON_SHARED = BACKGAMMON_EXPECT + BACKGAMMON_BEAROFF };
-enum { BACKGAMMON_SLOTS = 8192, BACKGAMMON_LEAVES = 4096, BACKGAMMON_DEPTH = 4, BACKGAMMON_NODES = 1, BACKGAMMON_CANDIDATES = 3 };
+enum { BACKGAMMON_BEAROFF = 54264, BACKGAMMON_ASIDE = BACKGAMMON_POINTS, BACKGAMMON_CLOCK = BACKGAMMON_ASIDE + 4, BACKGAMMON_OBS = BACKGAMMON_CLOCK + 1 };
+enum { BACKGAMMON_SLOTS = 8192, BACKGAMMON_LEAVES = 4096, BACKGAMMON_CANDIDATES = 3 };
 enum { BACKGAMMON_HIDDEN = 40, BACKGAMMON_LANES = BACKGAMMON_HIDDEN / 4, BACKGAMMON_BIAS = 196, BACKGAMMON_OUTPUT = 197, BACKGAMMON_OUTPUT_BIAS = 202 };
-enum { BACKGAMMON_HIT = 99, BACKGAMMON_STATE = 124, BACKGAMMON_OPPONENT = 1 << 10, BACKGAMMON_NONE = 0xFFFF, BACKGAMMON_BOARD = 0x1FFFFFE, BACKGAMMON_SOURCES = 0x3FFFFFE };
+enum { BACKGAMMON_HIT = 99, BACKGAMMON_STATE = 124, BACKGAMMON_OPPONENT = 1 << 10, BACKGAMMON_BOARD = 0x1FFFFFE, BACKGAMMON_SLOT = 0xFFFF, BACKGAMMON_HOP = 1 << 24 };
 
 typedef unsigned __int128 backgammonKey;
 
-typedef struct { uint64_t lo, hi, info; uint32_t epoch, spare; } backgammonEntry;
-
-typedef struct {
-    backgammonKey key;
-    uint32_t occ, slot, move, best, top, path, pend[2], mask[2];
-} backgammonFrame;
+typedef struct { uint64_t lo, hi; uint32_t epoch; } backgammonEntry;
 
 typedef struct {
     float prefix[BACKGAMMON_POINTS + 1];
@@ -299,18 +294,17 @@ typedef struct {
 typedef struct {
     backgammonEntry table[BACKGAMMON_SLOTS];
     uint64_t leaf[BACKGAMMON_LEAVES];
-    backgammonFrame frame[BACKGAMMON_DEPTH];
     backgammonJudge judge;
     float terms[BACKGAMMON_TERMS], winRate[LEAGUE_MEMBERS], theta[LEAGUE_MEMBERS * BACKGAMMON_THETA], low[BACKGAMMON_THETA], high[BACKGAMMON_THETA];
-    float score, view[18];
-    uint32_t epoch, sp, agent, die[2], count, rank, path, played;
+    float score, view[BACKGAMMON_OBS];
+    uint32_t epoch, die[2], count, rank, pick;
 } backgammonLane;
 
-typedef struct { uint32_t game, turn, path; } backgammonOracle;
+typedef struct { uint32_t game, turn, slot; } backgammonOracle;
 
 typedef struct {
     backgammonJudge judge;
-    backgammonKey key;
+    backgammonKey other;
     uint32_t die[2], rank;
     float best;
 } backgammonReply;
@@ -385,11 +379,26 @@ static inline uint32_t backgammon_class(uint32_t occ, uint32_t state, uint32_t d
     return doubles || state != 1u ? state : 3u;
 }
 
-static inline uint32_t backgammon_remaining(uint32_t state, uint32_t doubles) { return doubles ? 4u - state : 2u - (uint32_t)__builtin_popcount(state); }
-
 static inline uint32_t backgammon_changed(uint32_t source, uint32_t die, uint32_t top) {
     uint32_t at = source < BACKGAMMON_BAR ? source : BACKGAMMON_BAR - die;
     return at > top ? at : top;
+}
+
+static inline uint32_t backgammon_extend(uint32_t path, uint32_t source, uint32_t which) {
+    return (path + BACKGAMMON_HOP) | (source | which << 5) << (6u * (path / BACKGAMMON_HOP));
+}
+
+static backgammonKey backgammon_board(backgammonKey key) { return key & (((backgammonKey)1 << (4u * BACKGAMMON_BAR)) - 1u); }
+
+static backgammonKey backgammon_hurt(backgammonKey other, backgammonKey leaf) {
+    for (uint32_t hits = (uint32_t)(leaf >> BACKGAMMON_HIT) & BACKGAMMON_BOARD; hits; hits &= hits - 1u)
+        other += backgammon_one(BACKGAMMON_BAR) - backgammon_one(BACKGAMMON_BAR - (uint32_t)__builtin_ctz(hits));
+    return other;
+}
+
+static backgammonKey backgammon_final(const backgammonLane *l, uint64_t leaf) {
+    const backgammonEntry *e = &l->table[leaf & BACKGAMMON_SLOT];
+    return (backgammonKey)e->lo | (backgammonKey)e->hi << 64;
 }
 
 static void backgammon_weigh(float *terms, const float *race, const float *contact) {
@@ -454,7 +463,6 @@ static uint32_t backgammon_slot(backgammonLane *l, backgammonKey key, uint32_t *
         if (e->epoch != l->epoch) {
             e->lo = lo;
             e->hi = hi;
-            e->info = 0u;
             e->epoch = l->epoch;
             *found = 0u;
             return i;
@@ -466,79 +474,24 @@ static uint32_t backgammon_slot(backgammonLane *l, backgammonKey key, uint32_t *
     }
 }
 
-static void backgammon_begin(backgammonLane *l, backgammonKey mover, backgammonKey other, uint32_t dice, uint32_t agent, const float *terms) {
-    backgammonFrame *f = &l->frame[0];
-    uint32_t found;
-    backgammon_judge(&l->judge, mover, other, terms);
-    l->die[0] = dice & 7u;
-    l->die[1] = (dice >> 3) & 7u;
-    l->agent = agent;
-    l->epoch++;
-    l->count = l->rank = l->path = l->played = 0u;
-    l->score = -INFINITY;
-    f->key = mover;
-    f->occ = backgammon_occupied(mover, 1u);
-    f->move = f->best = f->top = f->path = f->mask[0] = f->mask[1] = 0u;
-    uint64_t pend = backgammon_options(f->occ, 0u, l->die, l->judge.blocked);
-    f->pend[0] = (uint32_t)pend;
-    f->pend[1] = (uint32_t)(pend >> 32);
-    f->slot = agent ? backgammon_slot(l, mover, &found) : 0u;
-    l->sp = (f->pend[0] | f->pend[1]) != 0u;
-}
-
-static inline void backgammon_credit(backgammonFrame *f, uint32_t value, uint32_t move) {
-    if (value > f->best) {
-        f->best = value;
-        f->mask[0] = f->mask[1] = 0u;
-    }
-    if (value == f->best) f->mask[move >> 5] |= 1u << (move & 31u);
-}
-
-static void backgammon_close(backgammonLane *l) {
-    backgammonFrame *f = &l->frame[--l->sp];
-    if (!l->agent) return;
-    l->table[f->slot].info = f->mask[0] | (uint64_t)f->mask[1] << 26 | (uint64_t)f->best << 52;
-    if (l->sp) backgammon_credit(&l->frame[l->sp - 1u], f->best + 1u, f->move);
-}
-
-static void backgammon_expand(backgammonLane *l, const float *terms) {
-    backgammonFrame *f = &l->frame[l->sp - 1u];
-    uint32_t which = f->pend[0] ? 0u : 1u, source = 31u - (uint32_t)__builtin_clz(f->pend[which]), die = l->die[which], doubles = l->die[0] == l->die[1];
-    uint32_t occ = f->occ, depth = f->path >> 24, move = source | which << 5, found;
-    f->pend[which] ^= 1u << source;
-    backgammonKey key = backgammon_spend(backgammon_apply(f->key, &occ, source, die, l->judge.blots), doubles, which);
-    uint32_t state = (uint32_t)(key >> BACKGAMMON_STATE), top = backgammon_changed(source, die, f->top);
-    uint32_t path = (f->path & 0xFFFFFFu) | move << (6u * depth) | (depth + 1u) << 24;
+static void backgammon_gather(backgammonLane *l, const float *terms, backgammonKey key, uint32_t occ, uint32_t last, uint32_t top, uint32_t path) {
+    uint32_t state = (uint32_t)(key >> BACKGAMMON_STATE), doubles = l->die[0] == l->die[1], found;
     uint64_t pend = backgammon_options(occ, state, l->die, l->judge.blocked);
-    if (doubles && !l->agent) pend &= (2u << source) - 1u;
+    if (doubles) pend &= (2u << last) - 1u;
     if (pend) {
-        uint32_t slot = 0u;
-        if (l->agent) {
-            slot = backgammon_slot(l, key, &found);
-            if (found) {
-                backgammon_credit(f, (uint32_t)((l->table[slot].info >> 52) & 7u) + 1u, move);
-                return;
+        for (uint32_t which = 0u; which < 2u; which++)
+            for (uint32_t sources = (uint32_t)(pend >> (32u * which)); sources;) {
+                uint32_t source = 31u - (uint32_t)__builtin_clz(sources), die = l->die[which], child = occ;
+                sources ^= 1u << source;
+                backgammonKey next = backgammon_spend(backgammon_apply(key, &child, source, die, l->judge.blots), doubles, which);
+                backgammon_gather(l, terms, next, child, source, backgammon_changed(source, die, top), backgammon_extend(path, source, which));
             }
-        }
-        backgammonFrame *c = &l->frame[l->sp++];
-        c->key = key;
-        c->occ = occ;
-        c->slot = slot;
-        c->move = move;
-        c->best = 0u;
-        c->top = top;
-        c->path = path;
-        c->pend[0] = (uint32_t)pend;
-        c->pend[1] = (uint32_t)(pend >> 32);
-        c->mask[0] = c->mask[1] = 0u;
         return;
     }
+    if (!path) return;
     if (!occ) key = (key & (((backgammonKey)1 << BACKGAMMON_STATE) - 1u)) | (backgammonKey)(doubles ? 4u : 3u) << BACKGAMMON_STATE;
-    uint32_t slot = backgammon_slot(l, key, &found), rem = occ ? 0u : backgammon_remaining(state, doubles), rank = backgammon_class(occ, state, doubles);
-    if (l->agent) backgammon_credit(f, rem + 1u, move);
-    if (found) return;
-    if (l->agent) l->table[slot].info = (uint64_t)rem << 52;
-    if (rank < l->rank) return;
+    uint32_t slot = backgammon_slot(l, key, &found), rank = backgammon_class(occ, state, doubles);
+    if (found || rank < l->rank) return;
     if (rank > l->rank) {
         l->rank = rank;
         l->count = 0u;
@@ -549,62 +502,75 @@ static void backgammon_expand(backgammonLane *l, const float *terms) {
     float score = backgammon_pubeval(&l->judge, terms, key, occ, top);
     if (score > l->score) {
         l->score = score;
-        l->path = path;
+        l->pick = l->count - 1u;
     }
 }
 
-static uint32_t backgammon_think(backgammonLane *l, const float *terms, uint32_t quota) {
-    while (l->sp) {
-        backgammonFrame *f = &l->frame[l->sp - 1u];
-        if (!(f->pend[0] | f->pend[1])) {
-            backgammon_close(l);
-            continue;
-        }
-        if (!quota) return 0u;
-        quota--;
-        backgammon_expand(l, terms);
-    }
-    return 1u;
+static uint32_t backgammon_enumerate(backgammonLane *l, backgammonKey mover, backgammonKey other, uint32_t dice, const float *terms) {
+    backgammon_judge(&l->judge, mover, other, terms);
+    l->die[0] = dice & 7u;
+    l->die[1] = (dice >> 3) & 7u;
+    l->epoch++;
+    l->count = l->rank = l->pick = 0u;
+    l->score = -INFINITY;
+    backgammon_gather(l, terms, mover, backgammon_occupied(mover, 1u), BACKGAMMON_BAR, 0u, 0u);
+    return l->count;
 }
 
 static uint32_t backgammon_roll(uint32_t seed, uint32_t *words) {
-    uint32_t r = (uint32_t)(((uint64_t)philox4x32(seed, ENV_RNG_STREAM, words[BACKGAMMON_GAME], words[BACKGAMMON_TURN]++, 0u, 0u).x * 36u) >> 32);
+    uint32_t r = (uint32_t)(((uint64_t)philox4x32(seed, ENV_RNG_STREAM, words[BACKGAMMON_GAME], words[BACKGAMMON_TURN]++, BACKGAMMON_ROLLS, 0u).x * 36u) >> 32);
     uint32_t a = r / 6u + 1u, b = r % 6u + 1u;
     return a > b ? a | b << 3 : b | a << 3;
 }
 
 static const float *backgammon_terms(const backgammonKnobs *k, const backgammonLane *l) { return k->opponent == BACKGAMMON_RANDOM ? 0 : l->terms; }
 
-static void backgammon_agentTurn(backgammonLane *l, uint32_t *words, uint32_t dice) {
+static void backgammon_view(backgammonLane *l, const uint32_t *words) {
+    backgammonKey final = backgammon_final(l, l->leaf[words[BACKGAMMON_PROPOSAL]]);
+    backgammonKey mine = backgammon_board(final), theirs = backgammon_hurt(backgammon_load(words + BACKGAMMON_THEIRS), final);
+    for (uint32_t p = 1u; p <= BACKGAMMON_POINTS; p++)
+        l->view[p - 1u] = (float)((int)backgammon_men(mine, p) - (int)backgammon_men(theirs, BACKGAMMON_BAR - p)) / 15.0f;
+    l->view[BACKGAMMON_ASIDE] = (float)backgammon_men(mine, BACKGAMMON_BAR) / 15.0f;
+    l->view[BACKGAMMON_ASIDE + 1u] = (float)backgammon_men(theirs, BACKGAMMON_BAR) / 15.0f;
+    l->view[BACKGAMMON_ASIDE + 2u] = (float)(BACKGAMMON_MEN - backgammon_aboard(mine)) / 15.0f;
+    l->view[BACKGAMMON_ASIDE + 3u] = (float)(BACKGAMMON_MEN - backgammon_aboard(theirs)) / 15.0f;
+    l->view[BACKGAMMON_CLOCK] = (float)(words[BACKGAMMON_PROPOSALS] - 1u - words[BACKGAMMON_PROPOSAL]) / (float)words[BACKGAMMON_PROPOSALS];
+}
+
+static void backgammon_reveal(backgammonLane *l, uint32_t seed, uint32_t *words) {
+    uint32_t at = words[BACKGAMMON_PROPOSAL], left = words[BACKGAMMON_PROPOSALS] - at;
+    uint32_t draw = philox4x32(seed, ENV_RNG_STREAM, words[BACKGAMMON_GAME], words[BACKGAMMON_TURN], BACKGAMMON_SHUFFLES, at).x;
+    uint32_t swap = at + (uint32_t)(((uint64_t)draw * left) >> 32);
+    uint64_t shown = l->leaf[swap];
+    l->leaf[swap] = l->leaf[at];
+    l->leaf[at] = shown;
+    words[BACKGAMMON_PATH] = (uint32_t)(shown >> 16);
+    backgammon_view(l, words);
+}
+
+static uint32_t backgammon_propose(backgammonLane *l, uint32_t seed, uint32_t *words, uint32_t dice) {
     words[BACKGAMMON_DICE] = dice;
-    words[BACKGAMMON_HITS] = words[BACKGAMMON_HIGH_LEGAL] = words[BACKGAMMON_LOW_LEGAL] = 0u;
-    words[BACKGAMMON_PHASE] = BACKGAMMON_AGENT_THINK;
-    backgammon_begin(l, backgammon_load(words + BACKGAMMON_MINE), backgammon_load(words + BACKGAMMON_THEIRS), dice, 1u, 0);
+    words[BACKGAMMON_PROPOSAL] = 0u;
+    words[BACKGAMMON_PROPOSALS] = backgammon_enumerate(l, backgammon_load(words + BACKGAMMON_MINE), backgammon_load(words + BACKGAMMON_THEIRS), dice, 0);
+    if (!words[BACKGAMMON_PROPOSALS]) return 0u;
+    backgammon_reveal(l, seed, words);
+    return 1u;
 }
 
-static void backgammon_opponentTurn(backgammonLane *l, const backgammonKnobs *k, uint32_t *words, uint32_t dice) {
-    words[BACKGAMMON_DICE] = dice | BACKGAMMON_OPPONENT;
-    words[BACKGAMMON_HITS] = words[BACKGAMMON_HIGH_LEGAL] = words[BACKGAMMON_LOW_LEGAL] = 0u;
-    words[BACKGAMMON_PHASE] = BACKGAMMON_OPPONENT_THINK;
-    backgammon_begin(l, backgammon_load(words + BACKGAMMON_THEIRS), backgammon_load(words + BACKGAMMON_MINE), dice, 0u, backgammon_terms(k, l));
-}
-
-static void backgammon_start(backgammonLane *l, const backgammonKnobs *k, uint32_t seed, uint32_t *words) {
-    backgammonKey start = backgammon_one(24u) * 2u + backgammon_one(13u) * 5u + backgammon_one(8u) * 3u + backgammon_one(6u) * 5u;
-    backgammon_store(words + BACKGAMMON_MINE, start);
-    backgammon_store(words + BACKGAMMON_THEIRS, start);
-    words[BACKGAMMON_TURN] = 0u;
-    words[BACKGAMMON_LAST] = BACKGAMMON_NONE;
-    if (k->opponent == BACKGAMMON_LEAGUE) {
-        uint32_t member = leaguePick(l->winRate, philox4x32(seed, LEAGUE_RNG_STREAM, words[BACKGAMMON_GAME], 0x5049434Bu, 0u, 0u).x);
-        words[BACKGAMMON_MEMBER] = member;
-        backgammon_weigh(l->terms, l->theta + member * BACKGAMMON_THETA, l->theta + member * BACKGAMMON_THETA + BACKGAMMON_INPUTS);
-    }
-    uint32_t r = (uint32_t)(((uint64_t)philox4x32(seed, ENV_RNG_STREAM, words[BACKGAMMON_GAME], 0u, 2u, 0u).x * 30u) >> 32);
-    uint32_t mine = r / 5u + 1u, theirs = r % 5u + 1u;
-    theirs += theirs >= mine;
-    if (mine > theirs) backgammon_agentTurn(l, words, mine | theirs << 3);
-    else backgammon_opponentTurn(l, k, words, theirs | mine << 3);
+static uint32_t backgammon_reply(backgammonLane *l, const backgammonKnobs *k, uint32_t seed, uint32_t *words, uint32_t dice) {
+    backgammonKey mine = backgammon_load(words + BACKGAMMON_MINE), theirs = backgammon_load(words + BACKGAMMON_THEIRS);
+    words[BACKGAMMON_REPLY_DICE] = dice;
+    words[BACKGAMMON_REPLY] = 0u;
+    if (!backgammon_enumerate(l, theirs, mine, dice, backgammon_terms(k, l))) return 0u;
+    uint32_t pick = l->pick;
+    if (k->opponent == BACKGAMMON_RANDOM)
+        pick = (uint32_t)(((uint64_t)philox4x32(seed, ENV_RNG_STREAM, words[BACKGAMMON_GAME], words[BACKGAMMON_TURN], BACKGAMMON_PICKS, 0u).x * l->count) >> 32);
+    backgammonKey final = backgammon_final(l, l->leaf[pick]);
+    theirs = backgammon_board(final);
+    backgammon_store(words + BACKGAMMON_MINE, backgammon_hurt(mine, final));
+    backgammon_store(words + BACKGAMMON_THEIRS, theirs);
+    words[BACKGAMMON_REPLY] = (uint32_t)(l->leaf[pick] >> 16);
+    return !backgammon_aboard(theirs);
 }
 
 static void backgammon_league(backgammonLane *l, uint32_t seed) {
@@ -626,6 +592,22 @@ static void backgammon_league(backgammonLane *l, uint32_t seed) {
         }
 }
 
+static uint32_t backgammon_start(backgammonLane *l, const backgammonKnobs *k, uint32_t seed, uint32_t *words) {
+    backgammonKey start = backgammon_one(24u) * 2u + backgammon_one(13u) * 5u + backgammon_one(8u) * 3u + backgammon_one(6u) * 5u;
+    backgammon_store(words + BACKGAMMON_MINE, start);
+    backgammon_store(words + BACKGAMMON_THEIRS, start);
+    words[BACKGAMMON_TURN] = words[BACKGAMMON_REPLY] = words[BACKGAMMON_REPLY_DICE] = 0u;
+    if (k->opponent == BACKGAMMON_LEAGUE) {
+        uint32_t member = leaguePick(l->winRate, philox4x32(seed, LEAGUE_RNG_STREAM, words[BACKGAMMON_GAME], 0x5049434Bu, 0u, 0u).x);
+        words[BACKGAMMON_MEMBER] = member;
+        backgammon_weigh(l->terms, l->theta + member * BACKGAMMON_THETA, l->theta + member * BACKGAMMON_THETA + BACKGAMMON_INPUTS);
+    }
+    uint32_t r = (uint32_t)(((uint64_t)philox4x32(seed, ENV_RNG_STREAM, words[BACKGAMMON_GAME], 0u, BACKGAMMON_OPENINGS, 0u).x * 30u) >> 32);
+    uint32_t mine = r / 5u + 1u, theirs = r % 5u + 1u;
+    theirs += theirs >= mine;
+    return mine > theirs ? mine | theirs << 3 : (theirs | mine << 3) | BACKGAMMON_OPPONENT;
+}
+
 static float backgammon_points(backgammonKey loser) {
     return backgammon_aboard(loser) < BACKGAMMON_MEN ? 1.0f : backgammon_men(loser, BACKGAMMON_BAR) || ((uint32_t)(loser >> 72) & 0xFFFFFFu) ? 3.0f : 2.0f;
 }
@@ -637,144 +619,49 @@ static __attribute__((noinline)) float backgammon_over(backgammonLane *l, const 
         leagueRenew(l->winRate, l->theta, BACKGAMMON_THETA, l->low, l->high, seed, words[BACKGAMMON_GAME]);
     }
     words[BACKGAMMON_GAME]++;
-    backgammon_start(l, k, seed, words);
     *done = 1u;
     return won ? points : -points;
 }
 
-static void backgammon_ready(backgammonLane *l, const backgammonKnobs *k, uint32_t seed, uint32_t *words) {
-    const backgammonFrame *root = &l->frame[0];
-    if (!root->best) {
-        backgammon_opponentTurn(l, k, words, backgammon_roll(seed, words));
-        return;
+static float backgammon_run(backgammonLane *l, const backgammonKnobs *k, uint32_t seed, uint32_t *words, uint32_t dice, uint32_t *done) {
+    float reward = 0.0f;
+    for (;;) {
+        if (!(dice & BACKGAMMON_OPPONENT)) {
+            if (backgammon_propose(l, seed, words, dice)) return reward;
+            dice = backgammon_roll(seed, words) | BACKGAMMON_OPPONENT;
+        } else if (backgammon_reply(l, k, seed, words, dice & ~(uint32_t)BACKGAMMON_OPPONENT)) {
+            reward += backgammon_over(l, k, seed, words, 0u, done);
+            dice = backgammon_start(l, k, seed, words);
+        } else dice = backgammon_roll(seed, words);
     }
-    words[BACKGAMMON_HIGH_LEGAL] = root->mask[0];
-    words[BACKGAMMON_LOW_LEGAL] = root->best == 1u && l->die[0] != l->die[1] && root->mask[0] ? 0u : root->mask[1];
-    words[BACKGAMMON_PHASE] = BACKGAMMON_AGENT_MOVE;
 }
 
-static void backgammon_decide(backgammonLane *l, const backgammonKnobs *k, uint32_t seed, uint32_t *words) {
-    if (!l->count) {
-        backgammon_agentTurn(l, words, backgammon_roll(seed, words));
-        return;
-    }
-    if (k->opponent == BACKGAMMON_RANDOM) {
-        uint32_t draw = philox4x32(seed, ENV_RNG_STREAM, words[BACKGAMMON_GAME], words[BACKGAMMON_TURN], 1u, 0u).x;
-        l->path = (uint32_t)(l->leaf[((uint64_t)draw * l->count) >> 32] >> 16);
-    }
-    l->played = 0u;
-    words[BACKGAMMON_PHASE] = BACKGAMMON_OPPONENT_PLAY;
-}
-
-static uint32_t backgammon_which(uint32_t dice, uint32_t action) {
-    uint32_t state = (dice >> 6) & 15u;
-    if ((dice & 7u) == ((dice >> 3) & 7u)) return 0u;
-    return action == BACKGAMMON_HIGH ? state & 1u : !(state & 2u);
-}
-
-static float backgammon_play(backgammonLane *l, const backgammonKnobs *k, uint32_t seed, uint32_t *words, uint32_t action, uint32_t *done) {
-    uint32_t dice = words[BACKGAMMON_DICE], which = backgammon_which(dice, action), source = words[BACKGAMMON_CURSOR], state = (dice >> 6) & 15u, found;
-    if (!((words[BACKGAMMON_HIGH_LEGAL + which] >> source) & 1u)) return 0.0f;
-    uint32_t die = (dice >> (3u * which)) & 7u, to = source > die ? source - die : 0u, doubles = (dice & 7u) == ((dice >> 3) & 7u);
-    backgammonKey mine = backgammon_load(words + BACKGAMMON_MINE) - backgammon_one(source), theirs = backgammon_load(words + BACKGAMMON_THEIRS);
-    if (to) {
-        mine += backgammon_one(to);
-        if (backgammon_men(theirs, BACKGAMMON_BAR - to) == 1u) {
-            theirs += backgammon_one(BACKGAMMON_BAR) - backgammon_one(BACKGAMMON_BAR - to);
-            words[BACKGAMMON_HITS] |= 1u << to;
-        }
-    }
-    state = doubles ? state + 1u : state | 1u << which;
-    words[BACKGAMMON_DICE] = (dice & 63u) | state << 6;
+static float backgammon_play(backgammonLane *l, const backgammonKnobs *k, uint32_t seed, uint32_t *words, uint32_t *done) {
+    backgammonKey final = backgammon_final(l, l->leaf[words[BACKGAMMON_PROPOSAL]]), mine = backgammon_board(final);
+    backgammon_store(words + BACKGAMMON_THEIRS, backgammon_hurt(backgammon_load(words + BACKGAMMON_THEIRS), final));
     backgammon_store(words + BACKGAMMON_MINE, mine);
-    backgammon_store(words + BACKGAMMON_THEIRS, theirs);
-    if (!backgammon_aboard(mine)) return backgammon_over(l, k, seed, words, 1u, done);
-    uint32_t slot = backgammon_slot(l, mine | (backgammonKey)words[BACKGAMMON_HITS] << BACKGAMMON_HIT | (backgammonKey)state << BACKGAMMON_STATE, &found);
-    uint64_t info = l->table[slot].info;
-    if (!found) __builtin_trap();
-    if (!((info >> 52) & 7u)) {
-        backgammon_opponentTurn(l, k, words, backgammon_roll(seed, words));
-        return 0.0f;
-    }
-    words[BACKGAMMON_HIGH_LEGAL] = (uint32_t)info & BACKGAMMON_SOURCES;
-    words[BACKGAMMON_LOW_LEGAL] = (uint32_t)(info >> 26) & BACKGAMMON_SOURCES;
-    return 0.0f;
-}
-
-static float backgammon_advance(backgammonLane *l, const backgammonKnobs *k, uint32_t seed, uint32_t *words, uint32_t *done) {
-    uint32_t move = (l->path >> (6u * l->played++)) & 63u, source = move & 31u, which = move >> 5, die = l->die[which];
-    uint32_t to = source > die ? source - die : 0u, dice = words[BACKGAMMON_DICE], state = (dice >> 6) & 15u;
-    backgammonKey theirs = backgammon_load(words + BACKGAMMON_THEIRS) - backgammon_one(source), mine = backgammon_load(words + BACKGAMMON_MINE);
-    if (to) {
-        theirs += backgammon_one(to);
-        if (backgammon_men(mine, BACKGAMMON_BAR - to) == 1u) mine += backgammon_one(BACKGAMMON_BAR) - backgammon_one(BACKGAMMON_BAR - to);
-    }
-    state = l->die[0] == l->die[1] ? state + 1u : state | 1u << which;
-    words[BACKGAMMON_DICE] = (dice & ~(15u << 6)) | state << 6;
-    words[BACKGAMMON_LAST] = (source < BACKGAMMON_BAR ? BACKGAMMON_BAR - source : 0u) | (to ? BACKGAMMON_BAR - to : BACKGAMMON_BAR) << 8;
-    backgammon_store(words + BACKGAMMON_MINE, mine);
-    backgammon_store(words + BACKGAMMON_THEIRS, theirs);
-    if (!backgammon_aboard(theirs)) return backgammon_over(l, k, seed, words, 0u, done);
-    if (l->played == l->path >> 24) backgammon_agentTurn(l, words, backgammon_roll(seed, words));
-    return 0.0f;
-}
-
-static void backgammon_steer(uint32_t *words, uint32_t action) {
-    uint32_t cursor = words[BACKGAMMON_CURSOR];
-    if (action == BACKGAMMON_DOWN) cursor -= cursor > 1u;
-    else if (action == BACKGAMMON_UP) cursor += cursor < BACKGAMMON_BAR;
-    else {
-        uint32_t playable = words[BACKGAMMON_HIGH_LEGAL] | words[BACKGAMMON_LOW_LEGAL], below = playable & ((1u << cursor) - 1u);
-        cursor = 31u - (uint32_t)__builtin_clz(below ? below : playable);
-    }
-    words[BACKGAMMON_CURSOR] = cursor;
-}
-
-static inline uint32_t backgammon_nibble(const uint32_t *side, uint32_t point) { return (side[(point - 1u) >> 3] >> (4u * ((point - 1u) & 7u))) & 15u; }
-
-static void backgammon_view(backgammonLane *l, const uint32_t *words) {
-    float *obs = l->view;
-    const uint32_t *mine = words + BACKGAMMON_MINE, *theirs = words + BACKGAMMON_THEIRS;
-    uint32_t cursor = words[BACKGAMMON_CURSOR], dice = words[BACKGAMMON_DICE], phase = words[BACKGAMMON_PHASE], last = words[BACKGAMMON_LAST];
-    uint32_t high = dice & 7u, low = (dice >> 3) & 7u, state = (dice >> 6) & 15u, doubles = high == low, mover = phase <= BACKGAMMON_AGENT_MOVE;
-    uint32_t left = mover ? backgammon_remaining(state, doubles) : 0u, move = phase == BACKGAMMON_AGENT_MOVE;
-    for (uint32_t i = 0u; i < 5u; i++) {
-        uint32_t p = cursor + i - 2u;
-        obs[i] = p - 1u < BACKGAMMON_POINTS ? (float)((int)backgammon_nibble(mine, p) - (int)backgammon_nibble(theirs, BACKGAMMON_BAR - p)) / 15.0f : 0.0f;
-    }
-    obs[5] = (float)cursor / 25.0f;
-    obs[6] = left ? (float)(doubles || !(state & 1u) ? high : low) / 6.0f : 0.0f;
-    obs[7] = left ? (float)(doubles || !(state & 2u) ? low : high) / 6.0f : 0.0f;
-    obs[8] = (float)left / 4.0f;
-    obs[9] = move && ((words[BACKGAMMON_HIGH_LEGAL + backgammon_which(dice, BACKGAMMON_HIGH)] >> cursor) & 1u) ? 1.0f : 0.0f;
-    obs[10] = move && ((words[BACKGAMMON_HIGH_LEGAL + backgammon_which(dice, BACKGAMMON_LOW)] >> cursor) & 1u) ? 1.0f : 0.0f;
-    obs[11] = (float)backgammon_nibble(mine, BACKGAMMON_BAR) / 15.0f;
-    obs[12] = (float)backgammon_nibble(theirs, BACKGAMMON_BAR) / 15.0f;
-    obs[13] = (float)(BACKGAMMON_MEN - backgammon_aboard(backgammon_load(mine))) / 15.0f;
-    obs[14] = (float)(BACKGAMMON_MEN - backgammon_aboard(backgammon_load(theirs))) / 15.0f;
-    obs[15] = last == BACKGAMMON_NONE ? -1.0f / 25.0f : (float)(last & 255u) / 25.0f;
-    obs[16] = last == BACKGAMMON_NONE ? -1.0f / 25.0f : (float)(last >> 8) / 25.0f;
-    obs[17] = move ? 0.0f : 1.0f;
+    if (backgammon_aboard(mine)) return backgammon_run(l, k, seed, words, backgammon_roll(seed, words) | BACKGAMMON_OPPONENT, done);
+    float reward = backgammon_over(l, k, seed, words, 1u, done);
+    return reward + backgammon_run(l, k, seed, words, backgammon_start(l, k, seed, words), done);
 }
 
 static uint32_t backgammon_action(const float *ctrl) {
     float c = ctrl[0];
-    return c >= 0.0f && c < (float)BACKGAMMON_ACTIONS ? (uint32_t)c : 0u;
+    return c >= 0.0f && c < (float)BACKGAMMON_ACTIONS ? (uint32_t)c : BACKGAMMON_PLAY;
 }
 
 void backgammon_reset(uint32_t instance, uint32_t seed, uint32_t *words, uint32_t *extra, uint32_t steps) {
     (void)steps;
     const backgammonKnobs *k = &BACKGAMMON_KNOBS[instance];
     backgammonLane *l = backgammon_lane(extra);
+    uint32_t done = 0u;
     for (uint32_t i = 0u; i < BACKGAMMON_WORDS; i++) words[i] = 0u;
     __builtin_memset(l->table, 0, sizeof l->table);
     l->epoch = 0u;
     backgammon_oracleOf(l)->game = 0xFFFFFFFFu;
     backgammon_weigh(l->terms, BACKGAMMON_PUBEVAL_RACE, BACKGAMMON_PUBEVAL_CONTACT);
     if (k->opponent == BACKGAMMON_LEAGUE) backgammon_league(l, seed);
-    words[BACKGAMMON_CURSOR] = 24u;
-    backgammon_start(l, k, seed, words);
-    backgammon_view(l, words);
+    backgammon_run(l, k, seed, words, backgammon_start(l, k, seed, words), &done);
 }
 
 float backgammon_step(uint32_t instance, uint32_t seed, uint32_t step, const float *ctrl, uint32_t *words, uint32_t *extra, float *obs, uint32_t *done, const float *shared) {
@@ -782,27 +669,11 @@ float backgammon_step(uint32_t instance, uint32_t seed, uint32_t step, const flo
     const backgammonKnobs *k = &BACKGAMMON_KNOBS[instance];
     backgammonLane *l = backgammon_lane(extra);
     float reward = 0.0f;
-    uint32_t changed = 1u;
     *done = 0u;
-    switch (words[BACKGAMMON_PHASE]) {
-        case BACKGAMMON_AGENT_THINK:
-            changed = backgammon_think(l, 0, BACKGAMMON_NODES);
-            if (changed) backgammon_ready(l, k, seed, words);
-            break;
-        case BACKGAMMON_AGENT_MOVE: {
-            uint32_t action = backgammon_action(ctrl);
-            if (action == BACKGAMMON_HIGH || action == BACKGAMMON_LOW) reward = backgammon_play(l, k, seed, words, action, done);
-            else backgammon_steer(words, action);
-            break;
-        }
-        case BACKGAMMON_OPPONENT_THINK:
-            changed = backgammon_think(l, backgammon_terms(k, l), BACKGAMMON_NODES);
-            if (changed) backgammon_decide(l, k, seed, words);
-            break;
-        default:
-            reward = backgammon_advance(l, k, seed, words, done);
-    }
-    if (changed) backgammon_view(l, words);
+    if (backgammon_action(ctrl) == BACKGAMMON_NEXT && words[BACKGAMMON_PROPOSAL] + 1u < words[BACKGAMMON_PROPOSALS]) {
+        words[BACKGAMMON_PROPOSAL]++;
+        backgammon_reveal(l, seed, words);
+    } else reward = backgammon_play(l, k, seed, words, done);
     __builtin_memcpy(obs, l->view, sizeof l->view);
     return reward;
 }
@@ -883,16 +754,8 @@ static void backgammon_bearoff(float *expect) {
 }
 
 uint64_t backgammon_shared(float *table) {
-    if (table) {
-        backgammon_weigh(table, BACKGAMMON_PUBEVAL_RACE, BACKGAMMON_PUBEVAL_CONTACT);
-        backgammon_bearoff(table + BACKGAMMON_EXPECT);
-    }
-    return BACKGAMMON_SHARED;
-}
-
-static backgammonKey backgammon_final(const backgammonLane *l, uint64_t leaf) {
-    const backgammonEntry *e = &l->table[leaf & 0xFFFFu];
-    return (backgammonKey)e->lo | (backgammonKey)e->hi << 64;
+    if (table) backgammon_bearoff(table);
+    return BACKGAMMON_BEAROFF;
 }
 
 static float backgammon_expect(const float *shared, backgammonKey men) {
@@ -901,15 +764,7 @@ static float backgammon_expect(const float *shared, backgammonKey men) {
         total += backgammon_men(men, j);
         rank += BACKGAMMON_CHOOSE[total + j - 1u][j];
     }
-    return shared[BACKGAMMON_EXPECT + rank];
-}
-
-static backgammonKey backgammon_board(backgammonKey key) { return key & (((backgammonKey)1 << (4u * BACKGAMMON_BAR)) - 1u); }
-
-static backgammonKey backgammon_hurt(backgammonKey other, backgammonKey leaf) {
-    for (uint32_t hits = (uint32_t)(leaf >> BACKGAMMON_HIT) & BACKGAMMON_BOARD; hits; hits &= hits - 1u)
-        other += backgammon_one(BACKGAMMON_BAR) - backgammon_one(BACKGAMMON_BAR - (uint32_t)__builtin_ctz(hits));
-    return other;
+    return shared[rank];
 }
 
 static inline float4 backgammon_squash(float4 x) {
@@ -959,18 +814,21 @@ static float backgammon_equity(backgammonKey mover, backgammonKey other) {
     return 2.0f * out[0].x - 1.0f + out[0].y + out[0].z - out[0].w - out[1].x;
 }
 
-static void backgammon_explore(backgammonReply *r, const float *terms, backgammonKey key, uint32_t occ, uint32_t last, uint32_t top) {
+static float backgammon_outcome(backgammonKey mover, backgammonKey other) {
+    return backgammon_aboard(mover) ? backgammon_equity(mover, other) : backgammon_points(other);
+}
+
+static void backgammon_explore(backgammonReply *r, backgammonKey key, uint32_t occ, uint32_t last) {
     uint32_t state = (uint32_t)(key >> BACKGAMMON_STATE), doubles = r->die[0] == r->die[1];
     uint64_t pend = backgammon_options(occ, state, r->die, r->judge.blocked);
     if (doubles) pend &= (2u << last) - 1u;
     if (!pend) {
         uint32_t rank = backgammon_class(occ, state, doubles);
         if (rank < r->rank) return;
-        float score = backgammon_pubeval(&r->judge, terms, key, occ, top);
+        float score = backgammon_outcome(backgammon_board(key), backgammon_hurt(r->other, key));
         if (rank > r->rank || score > r->best) {
             r->rank = rank;
             r->best = score;
-            r->key = key;
         }
         return;
     }
@@ -979,14 +837,15 @@ static void backgammon_explore(backgammonReply *r, const float *terms, backgammo
             uint32_t source = 31u - (uint32_t)__builtin_clz(sources), die = r->die[which], child = occ;
             sources ^= 1u << source;
             backgammonKey next = backgammon_spend(backgammon_apply(key, &child, source, die, r->judge.blots), doubles, which);
-            backgammon_explore(r, terms, next, child, source, backgammon_changed(source, die, top));
+            backgammon_explore(r, next, child, source);
         }
 }
 
-static float backgammon_foresee(backgammonKey theirs, backgammonKey final, const float *terms) {
-    backgammonKey agent = backgammon_board(final), opponent = backgammon_hurt(theirs, final);
+static float backgammon_foresee(backgammonKey theirs, backgammonKey final) {
+    backgammonKey opponent = backgammon_hurt(theirs, final);
     backgammonReply r;
-    backgammon_judge(&r.judge, opponent, agent, terms);
+    r.other = backgammon_board(final);
+    backgammon_judge(&r.judge, opponent, r.other, 0);
     uint32_t occ = backgammon_occupied(opponent, 1u);
     float total = 0.0f;
     for (uint32_t a = 1u; a <= 6u; a++)
@@ -995,33 +854,33 @@ static float backgammon_foresee(backgammonKey theirs, backgammonKey final, const
             r.die[1] = b;
             r.rank = 0u;
             r.best = -INFINITY;
-            r.key = opponent;
-            backgammon_explore(&r, terms, opponent, occ, BACKGAMMON_BAR, 0u);
-            backgammonKey reply = backgammon_board(r.key), hurt = backgammon_hurt(agent, r.key);
-            total += (a == b ? 1.0f : 2.0f) * (backgammon_aboard(reply) ? -backgammon_equity(reply, hurt) : -backgammon_points(hurt));
+            backgammon_explore(&r, opponent, occ, BACKGAMMON_BAR);
+            total -= (a == b ? 1.0f : 2.0f) * r.best;
         }
     return total;
 }
 
 static uint32_t backgammon_plan(const backgammonLane *l, const uint32_t *words, const float *shared) {
     backgammonKey mine = backgammon_load(words + BACKGAMMON_MINE), theirs = backgammon_load(words + BACKGAMMON_THEIRS);
-    uint32_t pick[BACKGAMMON_CANDIDATES], picks = 0u, best = 0u;
+    uint32_t count = words[BACKGAMMON_PROPOSALS], pick[BACKGAMMON_CANDIDATES], picks = 0u, best = 0u;
     float value[BACKGAMMON_CANDIDATES], most = -INFINITY;
-    for (uint32_t i = 0u; i < l->count; i++)
-        if (!backgammon_aboard(backgammon_final(l, l->leaf[i]))) return (uint32_t)(l->leaf[i] >> 16);
-    if (l->count == 1u) return (uint32_t)(l->leaf[0] >> 16);
-    if (l->judge.race && !(backgammon_occupied(mine, 1u) >> 7)) {
+    backgammonJudge judge;
+    for (uint32_t i = 0u; i < count; i++)
+        if (!backgammon_aboard(backgammon_final(l, l->leaf[i]))) return (uint32_t)l->leaf[i] & BACKGAMMON_SLOT;
+    if (count == 1u) return (uint32_t)l->leaf[0] & BACKGAMMON_SLOT;
+    backgammon_judge(&judge, mine, theirs, 0);
+    if (judge.race && !(backgammon_occupied(mine, 1u) >> 7)) {
         float least = INFINITY;
-        for (uint32_t i = 0u; i < l->count; i++) {
+        for (uint32_t i = 0u; i < count; i++) {
             float e = backgammon_expect(shared, backgammon_final(l, l->leaf[i]));
             if (e < least) {
                 least = e;
                 best = i;
             }
         }
-        return (uint32_t)(l->leaf[best] >> 16);
+        return (uint32_t)l->leaf[best] & BACKGAMMON_SLOT;
     }
-    for (uint32_t i = 0u; i < l->count; i++) {
+    for (uint32_t i = 0u; i < count; i++) {
         backgammonKey final = backgammon_final(l, l->leaf[i]);
         float score = backgammon_equity(backgammon_board(final), backgammon_hurt(theirs, final));
         uint32_t at = picks < BACKGAMMON_CANDIDATES ? picks++ : BACKGAMMON_CANDIDATES;
@@ -1038,33 +897,23 @@ static uint32_t backgammon_plan(const backgammonLane *l, const uint32_t *words, 
         }
     }
     for (uint32_t c = 0u; c < picks; c++) {
-        float v = backgammon_foresee(theirs, backgammon_final(l, l->leaf[pick[c]]), l->terms);
+        float v = backgammon_foresee(theirs, backgammon_final(l, l->leaf[pick[c]]));
         if (v > most) {
             most = v;
             best = pick[c];
         }
     }
-    return (uint32_t)(l->leaf[best] >> 16);
+    return (uint32_t)l->leaf[best] & BACKGAMMON_SLOT;
 }
 
 void backgammon_oracle(uint32_t instance, uint32_t seed, uint32_t step, const uint32_t *words, uint32_t *extra, const float *obs, float *ctrl, const float *shared) {
     (void)instance; (void)seed; (void)step; (void)obs;
-    ctrl[0] = (float)BACKGAMMON_DOWN;
-    if (words[BACKGAMMON_PHASE] != BACKGAMMON_AGENT_MOVE) return;
     backgammonLane *l = backgammon_lane(extra);
     backgammonOracle *o = backgammon_oracleOf(l);
     if (o->game != words[BACKGAMMON_GAME] || o->turn != words[BACKGAMMON_TURN]) {
-        o->path = backgammon_plan(l, words, shared);
+        o->slot = backgammon_plan(l, words, shared);
         o->game = words[BACKGAMMON_GAME];
         o->turn = words[BACKGAMMON_TURN];
     }
-    uint32_t dice = words[BACKGAMMON_DICE], state = (dice >> 6) & 15u, doubles = (dice & 7u) == ((dice >> 3) & 7u);
-    uint32_t move = (o->path >> (6u * (doubles ? state : (uint32_t)__builtin_popcount(state)))) & 63u, source = move & 31u, cursor = words[BACKGAMMON_CURSOR];
-    if (cursor == source) {
-        ctrl[0] = (float)(move >> 5 ? BACKGAMMON_LOW : BACKGAMMON_HIGH);
-        return;
-    }
-    uint32_t playable = words[BACKGAMMON_HIGH_LEGAL] | words[BACKGAMMON_LOW_LEGAL], below = playable & ((1u << cursor) - 1u), above = playable & ~((2u << source) - 1u);
-    uint32_t between = source < cursor ? below & above : below | above, walk = source < cursor ? cursor - source : source - cursor;
-    ctrl[0] = (float)((uint32_t)__builtin_popcount(between) + 1u < walk ? BACKGAMMON_JUMP : source < cursor ? BACKGAMMON_DOWN : BACKGAMMON_UP);
+    ctrl[0] = (float)(((uint32_t)l->leaf[words[BACKGAMMON_PROPOSAL]] & BACKGAMMON_SLOT) == o->slot ? BACKGAMMON_PLAY : BACKGAMMON_NEXT);
 }

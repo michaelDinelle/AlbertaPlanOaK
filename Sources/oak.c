@@ -933,3 +933,58 @@ __attribute__((noinline)) void oak_act(uint32_t *state, uint32_t lane, uint32_t 
     learn(a);
     a->stepCount = step + 1u;
 }
+
+static uint32_t oak_nonfiniteRun(const float *p, uint32_t count, uint32_t stride, uint32_t skip) {
+    uint32_t bad = 0u;
+    for (uint32_t i = 0u; i < count; i++) bad += i % stride != skip && !isfinite(p[i]);
+    return bad;
+}
+
+uint32_t oak_nonfinite(const uint32_t *state) {
+    const OakAgent *a = (const OakAgent *)state;
+    const float scalars[] = { a->blockReward, a->td, a->tdNormalized, a->tdSquare, a->advantage, a->advantageCenter, a->averageReward, a->actorStep, a->betaFloor,
+                              a->rewardMean, a->rewardVariance, a->aspiration, a->rewardSquare, a->rewardMagnitude, a->qCellTaken, a->qCellGain, a->qCellNoise,
+                              a->memoryTaken, a->memoryGain, a->memoryNoise };
+    uint32_t bad = oak_nonfiniteRun(scalars, sizeof scalars / sizeof scalars[0], 1u, 1u);
+#define OAK_NONFINITE(field) bad += oak_nonfiniteRun((const float *)(const void *)a->field, (uint32_t)(sizeof a->field / (sizeof(float))), 1u, 1u)
+    OAK_NONFINITE(feature);
+    OAK_NONFINITE(valueWeight);
+    OAK_NONFINITE(valueTrace);
+    OAK_NONFINITE(policy);
+    OAK_NONFINITE(policyTrace);
+    OAK_NONFINITE(projection);
+    OAK_NONFINITE(unitInput);
+    OAK_NONFINITE(unitEnergy);
+    OAK_NONFINITE(traceLevel);
+    OAK_NONFINITE(traceMean);
+    OAK_NONFINITE(traceSecond);
+    OAK_NONFINITE(settledMean);
+    OAK_NONFINITE(settledSecond);
+    OAK_NONFINITE(cellValue);
+    OAK_NONFINITE(cellPolicy);
+    OAK_NONFINITE(headMean);
+    OAK_NONFINITE(headSquare);
+    OAK_NONFINITE(headWeight);
+    OAK_NONFINITE(control);
+    OAK_NONFINITE(actorMeta);
+    OAK_NONFINITE(channelMean);
+    OAK_NONFINITE(channelSecond);
+    OAK_NONFINITE(channelAlpha);
+    OAK_NONFINITE(channelBeta);
+    OAK_NONFINITE(channelTrace);
+    OAK_NONFINITE(channelEnergy);
+    OAK_NONFINITE(actionSignal);
+    OAK_NONFINITE(actorCredit);
+    OAK_NONFINITE(actorCreditStaging);
+    OAK_NONFINITE(logit);
+    OAK_NONFINITE(qSum);
+    OAK_NONFINITE(qNoise);
+    OAK_NONFINITE(modelReward);
+    OAK_NONFINITE(qCellWeight);
+    OAK_NONFINITE(qCellValue);
+    OAK_NONFINITE(memoryValue);
+#undef OAK_NONFINITE
+    bad += oak_nonfiniteRun(a->qTable, (uint32_t)(sizeof a->qTable / sizeof(float)), OAK_QROW, OAK_QROW - 1u);
+    bad += oak_nonfiniteRun(a->memoryQ, (uint32_t)(sizeof a->memoryQ / sizeof(float)), OAK_CELL_STRIDE, OAK_CELL_STRIDE - 1u);
+    return bad;
+}

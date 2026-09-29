@@ -7,13 +7,10 @@ const LC_AGENT_WORD = 16;
 const LC_RIVAL_WORD = 17;
 const LC_GAME_WORD = 18;
 const LC_TICK_WORD = 19;
-const LC_THINK_WORD = 20;
-const LC_LAST_WORD = 21;
-const LC_WORDS = 22;
+const LC_LAST_WORD = 20;
+const LC_WORDS = 21;
 const LC_SENSES = 16;
 const LC_BOARD = 16;
-
-export const LC_THINKING = LC_SENSES;
 
 export const LC_EMPTY = 0;
 export const LC_AGENT = 1;
@@ -35,8 +32,7 @@ export const LC_RIVAL_Y = 4;
 export const LC_RIVAL_HEADING = 5;
 const LC_GAME_SLOT = 6;
 const LC_TICK_SLOT = 7;
-const LC_THINK_SLOT = 8;
-const LC_RESULT_SLOT = 9;
+const LC_RESULT_SLOT = 8;
 
 export interface Head { x: number; y: number; heading: number }
 
@@ -45,7 +41,6 @@ const headOf = (word: number): Head => ({ x: word & 15, y: (word >>> 4) & 15, he
 export const lcHead = (words: ArrayLike<number>, who: number): Head => headOf(words[who === LC_AGENT ? LC_AGENT_WORD : LC_RIVAL_WORD]!);
 export const lcGame = (words: ArrayLike<number>): number => words[LC_GAME_WORD]!;
 export const lcTick = (words: ArrayLike<number>): number => words[LC_TICK_WORD]!;
-export const lcThink = (words: ArrayLike<number>): number => words[LC_THINK_WORD]!;
 export const lcResult = (words: ArrayLike<number>): number => words[LC_LAST_WORD]! & 3;
 
 export function lcTarget(words: ArrayLike<number>, who: number): { x: number; y: number } {
@@ -89,13 +84,12 @@ export const lightCyclesDecoder: EnvDecoder = {
     out[LC_RIVAL_HEADING] = rival.heading;
     out[LC_GAME_SLOT] = lcGame(words);
     out[LC_TICK_SLOT] = lcTick(words);
-    out[LC_THINK_SLOT] = lcThink(words);
     out[LC_RESULT_SLOT] = lcResult(words);
   },
   geometry(descriptor, initial) {
     const env = descriptor.environment, w = parameter(env, 'width'), h = parameter(env, 'height');
     if (env.words !== LC_WORDS) throw new Error(`${env.envId} records ${env.words} words where a light-cycle arena packs into ${LC_WORDS}`);
-    if (env.obs !== LC_SENSES + 1) throw new Error(`${env.envId} observes ${env.obs} values where a light cycle senses ${LC_SENSES + 1}`);
+    if (env.obs !== LC_SENSES) throw new Error(`${env.envId} observes ${env.obs} values where a light cycle senses ${LC_SENSES}`);
     if (w > LC_BOARD || h > LC_BOARD) throw new Error(`${env.envId} declares a ${w}×${h} arena, larger than the ${LC_BOARD}×${LC_BOARD} its walls pack into`);
     let claimed = 0;
     for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (lcOwner(initial.words, x, y) !== LC_EMPTY) claimed++;

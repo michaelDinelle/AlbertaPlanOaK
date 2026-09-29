@@ -1,7 +1,5 @@
 #include "../env.h"
 
-#define REVERSI_STEPS_PER_NODE 2u
-
 typedef struct { uint32_t size, opponent, oracleExact, oracleNodes; } reversiKnobs;
 
 static const reversiKnobs REVERSI_KNOBS[4] = {
@@ -16,30 +14,19 @@ static const float REVERSI_THETA_LOW[10] = { 0.75f, -0.5f, -0.15f, -0.2f, -0.5f,
 static const float REVERSI_THETA_HIGH[10] = { 1.25f, 0.0f, 0.35f, 0.3f, 0.0f, 0.26f, 0.26f, 0.3f, 0.27f, 0.26f };
 
 enum { REVERSI_GREEDY, REVERSI_WPC, REVERSI_ALPHABETA, REVERSI_LEAGUE };
-enum { REVERSI_UP, REVERSI_DOWN, REVERSI_LEFT, REVERSI_RIGHT, REVERSI_PLACE };
-enum { REVERSI_OWN = 0, REVERSI_OPP = 2, REVERSI_LEGAL = 4, REVERSI_CURSOR = 6, REVERSI_THINK, REVERSI_GAME, REVERSI_LAST, REVERSI_MEMBER, REVERSI_WORDS };
-enum { REVERSI_CLASSES = 10, REVERSI_PASS = 65, REVERSI_FINAL = 1024, REVERSI_INFINITY = 1 << 30, REVERSI_PICK = 0x5049434B };
+enum { REVERSI_PLAY, REVERSI_NEXT, REVERSI_ACTIONS };
+enum { REVERSI_OWN = 0, REVERSI_OPP = 2, REVERSI_LEGAL = 4, REVERSI_PROPOSAL = 6, REVERSI_SHOWN, REVERSI_GAME, REVERSI_LAST, REVERSI_MEMBER, REVERSI_WORDS };
+enum { REVERSI_CLASSES = 10, REVERSI_PASS = 65, REVERSI_FINAL = 1024, REVERSI_INFINITY = 1 << 30, REVERSI_PICK = 0x5049434B, REVERSI_SHUFFLE = 0x53485546 };
 
 static const uint64_t REVERSI_INNER = 0x7E7E7E7E7E7E7E7Eull;
-static const uint64_t REVERSI_NOT_A = 0xFEFEFEFEFEFEFEFEull;
-static const uint64_t REVERSI_NOT_H = 0x7F7F7F7F7F7F7F7Full;
-
-typedef struct {
-    uint64_t rest, replies, ties, bot, agent;
-    int32_t alpha, low;
-    uint32_t move;
-} reversiSearch;
 
 typedef struct {
     int8x16_t weight[4];
-    reversiSearch search;
     float winRate[LEAGUE_MEMBERS], theta[LEAGUE_MEMBERS * REVERSI_CLASSES];
+    uint8_t order[64];
 } reversiLane;
 
-typedef struct {
-    reversiSearch think;
-    uint32_t key, square, nodes, budget;
-} reversiOracle;
+typedef struct { uint32_t key, square, nodes, budget; } reversiOracle;
 
 static reversiLane *reversi_lane(uint32_t *extra) { return (reversiLane *)(((uintptr_t)extra + 15u) & ~(uintptr_t)15u); }
 static reversiOracle *reversi_oracleOf(reversiLane *l) { return (reversiOracle *)(l + 1); }
@@ -141,60 +128,38 @@ static uint32_t reversi_next(uint64_t moves) {
 
 static int32_t reversi_final(uint64_t me, uint64_t them) { return ((int32_t)reversi_count(me) - (int32_t)reversi_count(them)) * REVERSI_FINAL; }
 
-static void reversi_begin(reversiSearch *s, uint64_t moves) {
-    s->rest = moves;
-    s->replies = 0u;
-    s->ties = 0u;
-    s->alpha = -REVERSI_INFINITY;
-    if (!(moves & (moves - 1u))) {
-        s->ties = moves;
-        s->rest = 0u;
-    }
-}
-
-static void reversi_rank(reversiSearch *s, uint32_t move, int32_t value) {
-    if (value > s->alpha) {
-        s->alpha = value;
-        s->ties = 0u;
-    }
-    if (value == s->alpha) s->ties |= 1ull << move;
-}
-
-static uint32_t reversi_node(reversiSearch *s, uint64_t bot, uint64_t agent, uint64_t board, const int8x16_t *w) {
-    if (!s->replies) {
-        if (!s->rest) return 1u;
-        uint32_t move = reversi_next(s->rest);
-        s->rest &= ~(1ull << move);
-        uint64_t f = reversi_flips(bot, agent, move), b = bot | f | 1ull << move, a = agent ^ f, empty = board & ~(a | b);
-        uint64_t replies = reversi_moves(a, b, empty);
-        if (!replies) {
-            reversi_rank(s, move, reversi_moves(b, a, empty) ? reversi_wpc(b, a, w) : reversi_final(b, a));
-            return !s->rest;
+static uint32_t reversi_think(const reversiLane *l, uint32_t seed, uint32_t game, uint64_t bot, uint64_t agent, uint64_t board, uint64_t moves) {
+    int32_t alpha = -REVERSI_INFINITY;
+    uint64_t ties = moves & (moves - 1u) ? 0u : moves;
+    for (uint64_t rest = ties ? 0u : moves; rest;) {
+        uint32_t move = reversi_next(rest);
+        rest &= ~(1ull << move);
+        uint64_t f = reversi_flips(bot, agent, move), b = bot | f | 1ull << move, a = agent ^ f, empty = board & ~(a | b), replies = reversi_moves(a, b, empty);
+        int32_t low = replies ? REVERSI_INFINITY : reversi_moves(b, a, empty) ? reversi_wpc(b, a, l->weight) : reversi_final(b, a);
+        while (replies && low >= alpha) {
+            uint32_t reply = reversi_next(replies);
+            replies &= ~(1ull << reply);
+            uint64_t g = reversi_flips(a, b, reply), mine = b ^ g, theirs = a | g | 1ull << reply;
+            int32_t value = (mine | theirs) == board ? reversi_final(mine, theirs) : reversi_wpc(mine, theirs, l->weight);
+            low = value < low ? value : low;
         }
-        s->bot = b;
-        s->agent = a;
-        s->replies = replies;
-        s->low = REVERSI_INFINITY;
-        s->move = move;
-        return 0u;
+        if (low > alpha) {
+            alpha = low;
+            ties = 0u;
+        }
+        if (low == alpha) ties |= 1ull << move;
     }
-    uint32_t reply = reversi_next(s->replies);
-    s->replies &= ~(1ull << reply);
-    uint64_t f = reversi_flips(s->agent, s->bot, reply), a = s->agent | f | 1ull << reply, b = s->bot ^ f;
-    int32_t value = (a | b) == board ? reversi_final(b, a) : reversi_wpc(b, a, w);
-    s->low = value < s->low ? value : s->low;
-    if (s->low < s->alpha) s->replies = 0u;
-    else if (!s->replies) reversi_rank(s, s->move, s->low);
-    return !s->replies && !s->rest;
+    return reversi_break(ties, seed, game, bot | agent);
 }
 
-static uint32_t reversi_reply(const reversiLane *l, uint32_t opponent, uint32_t seed, uint32_t game, uint64_t bot, uint64_t agent, uint64_t moves) {
+static uint32_t reversi_reply(const reversiLane *l, const reversiKnobs *k, uint32_t seed, uint32_t game, uint64_t bot, uint64_t agent, uint64_t moves) {
+    if (k->opponent == REVERSI_ALPHABETA) return reversi_think(l, seed, game, bot, agent, reversi_board(k->size), moves);
     int32_t best = -REVERSI_INFINITY;
     uint64_t ties = 0u;
     for (uint64_t rest = moves; rest; rest &= rest - 1u) {
         uint32_t square = (uint32_t)__builtin_ctzll(rest);
         uint64_t f = reversi_flips(bot, agent, square);
-        int32_t value = opponent == REVERSI_GREEDY ? (int32_t)reversi_count(f) : reversi_wpc(bot | f | 1ull << square, agent ^ f, l->weight);
+        int32_t value = k->opponent == REVERSI_GREEDY ? (int32_t)reversi_count(f) : reversi_wpc(bot | f | 1ull << square, agent ^ f, l->weight);
         if (value > best) {
             best = value;
             ties = 0u;
@@ -202,12 +167,6 @@ static uint32_t reversi_reply(const reversiLane *l, uint32_t opponent, uint32_t 
         if (value == best) ties |= 1ull << square;
     }
     return reversi_break(ties, seed, game, bot | agent);
-}
-
-static uint32_t reversi_think(reversiSearch *s, const reversiLane *l, uint32_t seed, uint32_t game, uint64_t bot, uint64_t agent, uint64_t board, uint64_t moves) {
-    reversi_begin(s, moves);
-    while (!reversi_node(s, bot, agent, board, l->weight)) {}
-    return reversi_break(s->ties, seed, game, bot | agent);
 }
 
 static void reversi_league(reversiLane *l, uint32_t seed) {
@@ -224,32 +183,41 @@ static void reversi_league(reversiLane *l, uint32_t seed) {
         }
 }
 
+static void reversi_propose(reversiLane *l, uint32_t *words, uint32_t seed, uint64_t own, uint64_t opp, uint64_t legal) {
+    uint32_t n = 0u, discs = reversi_count(own | opp);
+    for (uint64_t rest = legal; rest; rest &= rest - 1u) l->order[n++] = (uint8_t)__builtin_ctzll(rest);
+    u4 r = { 0u, 0u, 0u, 0u };
+    for (uint32_t i = n - 1u; i > 0u; i--) {
+        if (i == n - 1u || (i & 3u) == 3u) r = philox4x32(seed, ENV_RNG_STREAM, words[REVERSI_GAME], discs, REVERSI_SHUFFLE, i >> 2);
+        uint32_t draws[4] = { r.x, r.y, r.z, r.w }, j = (uint32_t)(((uint64_t)draws[i & 3u] * (i + 1u)) >> 32);
+        uint8_t square = l->order[i];
+        l->order[i] = l->order[j];
+        l->order[j] = square;
+    }
+    reversi_put(words, REVERSI_OWN, own);
+    reversi_put(words, REVERSI_OPP, opp);
+    reversi_put(words, REVERSI_LEGAL, legal);
+    words[REVERSI_PROPOSAL] = l->order[0];
+    words[REVERSI_SHOWN] = 0u;
+}
+
 static void reversi_start(reversiLane *l, uint32_t *words, const reversiKnobs *k, uint32_t seed) {
     uint32_t game = words[REVERSI_GAME], c = k->size / 2u;
     uint64_t board = reversi_board(k->size), white = 1ull << 9u * (c - 1u) | 1ull << 9u * c, black = 1ull << (9u * c - 8u) | 1ull << (9u * c - 1u);
-    uint64_t own = game & 1u ? white : black, opp = game & 1u ? black : white, legal = 0u;
-    words[REVERSI_CURSOR] = 9u * (c - 1u);
-    words[REVERSI_THINK] = 0u;
+    uint64_t own = game & 1u ? white : black, opp = game & 1u ? black : white;
     words[REVERSI_LAST] = 0u;
     if (k->opponent == REVERSI_LEAGUE) {
         words[REVERSI_MEMBER] = leaguePick(l->winRate, philox4x32(seed, LEAGUE_RNG_STREAM, game, REVERSI_PICK, 0u, 0u).x);
         reversi_weigh(l->weight, l->theta + REVERSI_CLASSES * words[REVERSI_MEMBER]);
     }
-    if (!(game & 1u)) legal = reversi_moves(own, opp, board & ~(own | opp));
-    else if (k->opponent == REVERSI_ALPHABETA) {
-        reversi_begin(&l->search, reversi_moves(opp, own, board & ~(own | opp)));
-        words[REVERSI_THINK] = 1u;
-    } else {
-        uint32_t square = reversi_reply(l, k->opponent, seed, game, opp, own, reversi_moves(opp, own, board & ~(own | opp)));
+    if (game & 1u) {
+        uint32_t square = reversi_reply(l, k, seed, game, opp, own, reversi_moves(opp, own, board & ~(own | opp)));
         uint64_t f = reversi_flips(opp, own, square);
         opp |= f | 1ull << square;
         own ^= f;
         words[REVERSI_LAST] = square + 1u;
-        legal = reversi_moves(own, opp, board & ~(own | opp));
     }
-    reversi_put(words, REVERSI_OWN, own);
-    reversi_put(words, REVERSI_OPP, opp);
-    reversi_put(words, REVERSI_LEGAL, legal);
+    reversi_propose(l, words, seed, own, opp, reversi_moves(own, opp, board & ~(own | opp)));
 }
 
 static __attribute__((noinline)) float reversi_over(reversiLane *l, uint32_t *words, const reversiKnobs *k, uint32_t seed, uint32_t *done, uint64_t own, uint64_t opp) {
@@ -265,111 +233,61 @@ static __attribute__((noinline)) float reversi_over(reversiLane *l, uint32_t *wo
     return reward;
 }
 
-static float reversi_answered(reversiLane *l, uint32_t *words, const reversiKnobs *k, uint32_t seed, uint32_t *done, uint64_t own, uint64_t opp, uint32_t square) {
-    uint64_t board = reversi_board(k->size), f = reversi_flips(opp, own, square);
-    opp |= f | 1ull << square;
-    own ^= f;
-    reversi_put(words, REVERSI_OWN, own);
-    reversi_put(words, REVERSI_OPP, opp);
-    words[REVERSI_LAST] = square + 1u;
-    uint64_t empty = board & ~(own | opp), legal = reversi_moves(own, opp, empty);
-    reversi_put(words, REVERSI_LEGAL, legal);
-    words[REVERSI_THINK] = 0u;
-    if (legal) return 0.0f;
-    uint64_t moves = reversi_moves(opp, own, empty);
-    if (!moves) return reversi_over(l, words, k, seed, done, own, opp);
-    words[REVERSI_THINK] = 1u;
-    if (k->opponent == REVERSI_ALPHABETA) reversi_begin(&l->search, moves);
-    return 0.0f;
-}
-
 static __attribute__((noinline)) float reversi_place(reversiLane *l, uint32_t *words, const reversiKnobs *k, uint32_t seed, uint32_t *done) {
-    uint64_t own = reversi_get(words, REVERSI_OWN), opp = reversi_get(words, REVERSI_OPP), board = reversi_board(k->size);
-    uint32_t square = words[REVERSI_CURSOR];
+    uint64_t own = reversi_get(words, REVERSI_OWN), opp = reversi_get(words, REVERSI_OPP), board = reversi_board(k->size), legal;
+    uint32_t square = words[REVERSI_PROPOSAL];
     uint64_t f = reversi_flips(own, opp, square);
     own |= f | 1ull << square;
     opp ^= f;
-    uint64_t empty = board & ~(own | opp), moves = reversi_moves(opp, own, empty);
-    if (moves) {
-        if (k->opponent == REVERSI_ALPHABETA) {
-            reversi_put(words, REVERSI_OWN, own);
-            reversi_put(words, REVERSI_OPP, opp);
-            reversi_put(words, REVERSI_LEGAL, 0u);
-            reversi_begin(&l->search, moves);
-            words[REVERSI_THINK] = 1u;
-            return 0.0f;
-        }
-        return reversi_answered(l, words, k, seed, done, own, opp, reversi_reply(l, k->opponent, seed, words[REVERSI_GAME], opp, own, moves));
-    }
-    uint64_t legal = reversi_moves(own, opp, empty);
-    if (!legal) return reversi_over(l, words, k, seed, done, own, opp);
-    reversi_put(words, REVERSI_OWN, own);
-    reversi_put(words, REVERSI_OPP, opp);
-    reversi_put(words, REVERSI_LEGAL, legal);
+    uint64_t moves = reversi_moves(opp, own, board & ~(own | opp));
     words[REVERSI_LAST] = REVERSI_PASS;
+    do {
+        if (moves) {
+            uint32_t reply = reversi_reply(l, k, seed, words[REVERSI_GAME], opp, own, moves);
+            uint64_t g = reversi_flips(opp, own, reply);
+            opp |= g | 1ull << reply;
+            own ^= g;
+            words[REVERSI_LAST] = reply + 1u;
+        }
+        uint64_t empty = board & ~(own | opp);
+        legal = reversi_moves(own, opp, empty);
+        moves = legal || !moves ? 0u : reversi_moves(opp, own, empty);
+    } while (moves);
+    if (!legal) return reversi_over(l, words, k, seed, done, own, opp);
+    reversi_propose(l, words, seed, own, opp, legal);
     return 0.0f;
 }
 
-static __attribute__((noinline)) float reversi_wait(reversiLane *l, uint32_t *words, const reversiKnobs *k, uint32_t seed, uint32_t *done) {
-    uint64_t own = reversi_get(words, REVERSI_OWN), opp = reversi_get(words, REVERSI_OPP), board = reversi_board(k->size);
-    if (k->opponent != REVERSI_ALPHABETA)
-        return reversi_answered(l, words, k, seed, done, own, opp, reversi_reply(l, k->opponent, seed, words[REVERSI_GAME], opp, own, reversi_moves(opp, own, board & ~(own | opp))));
-    if (!reversi_node(&l->search, opp, own, board, l->weight)) return 0.0f;
-    return reversi_answered(l, words, k, seed, done, own, opp, reversi_break(l->search.ties, seed, words[REVERSI_GAME], own | opp));
-}
-
-static inline __attribute__((always_inline)) uint32_t reversi_window(uint64_t b, uint32_t cursor) {
-    return (uint32_t)(cursor >= 9u ? b >> (cursor - 9u) : b << (9u - cursor)) & 0x070707u;
-}
-
 static inline __attribute__((always_inline)) void reversi_obs(uint32_t size, const uint32_t *words, float *obs) {
-    uint64_t own = reversi_get(words, REVERSI_OWN), opp = reversi_get(words, REVERSI_OPP), legal = reversi_get(words, REVERSI_LEGAL);
-    uint32_t cursor = words[REVERSI_CURSOR], x = cursor & 7u, y = cursor >> 3, last = words[REVERSI_LAST] - 1u;
-    uint64_t keep = size == 8u && x == 0u ? REVERSI_NOT_H : size == 8u && x == 7u ? REVERSI_NOT_A : ~0ull;
-    lane4 mine = (lane4)reversi_window(own & keep, cursor), theirs = (lane4)reversi_window(opp & keep, cursor);
-    const lane4 low = { 0x1u, 0x2u, 0x4u, 0x100u }, high = { 0x200u, 0x400u, 0x10000u, 0x20000u };
-    float4 a = flag4(mine & low) - flag4(theirs & low), b = flag4(mine & high) - flag4(theirs & high);
-    __builtin_memcpy(obs, &a, sizeof a);
-    __builtin_memcpy(obs + 4, &b, sizeof b);
-    uint32_t corner = (uint32_t)(mine.x >> 18) - (uint32_t)(theirs.x >> 18);
-    float4 grid = (float4){ (float)x, (float)y, (float)(last & 7u), (float)(last >> 3) } / (float)(size - 1u);
-    uint32_t moved = last < 64u;
-    obs[8] = (float)(int32_t)corner;
-    obs[9] = grid.x;
-    obs[10] = grid.y;
-    obs[11] = (float)(uint32_t)(legal >> cursor & 1u);
-    obs[12] = moved ? grid.z : -1.0f;
-    obs[13] = moved ? grid.w : -1.0f;
-    obs[14] = (float)((int32_t)reversi_count(own) - (int32_t)reversi_count(opp)) / (float)(size * size);
-    obs[15] = words[REVERSI_GAME] & 1u ? 0.0f : 1.0f;
-    obs[16] = words[REVERSI_THINK] ? 1.0f : 0.0f;
+    uint64_t own = reversi_get(words, REVERSI_OWN), opp = reversi_get(words, REVERSI_OPP);
+    uint32_t square = words[REVERSI_PROPOSAL];
+    uint64_t f = reversi_flips(own, opp, square);
+    own |= f | 1ull << square;
+    opp ^= f;
+    const lane4 low = { 0x1u, 0x2u, 0x4u, 0x8u }, high = { 0x10u, 0x20u, 0x40u, 0x80u };
+    for (uint32_t y = 0u; y < size; y++) {
+        lane4 mine = (lane4)(uint32_t)(own >> 8u * y), theirs = (lane4)(uint32_t)(opp >> 8u * y);
+        float4 a = flag4(mine & low) - flag4(theirs & low), b = flag4(mine & high) - flag4(theirs & high);
+        __builtin_memcpy(obs + size * y, &a, sizeof a);
+        __builtin_memcpy(obs + size * y + 4u, &b, (size - 4u) * sizeof(float));
+    }
 }
 
 static inline __attribute__((always_inline)) uint32_t reversi_action(const float *ctrl) {
     float c = ctrl[0];
-    return c >= 0.0f && c < 5.0f ? (uint32_t)c : 0u;
+    return c >= 0.0f && c < (float)REVERSI_ACTIONS ? (uint32_t)c : REVERSI_PLAY;
 }
 
 static inline __attribute__((always_inline)) float reversi_advance(uint32_t instance, uint32_t seed, const float *ctrl, uint32_t *words, uint32_t *extra, float *obs, uint32_t *done) {
     const reversiKnobs *k = &REVERSI_KNOBS[instance];
+    reversiLane *l = reversi_lane(extra);
+    uint32_t shown = words[REVERSI_SHOWN] + 1u;
     float reward = 0.0f;
     *done = 0u;
-    uint32_t think = words[REVERSI_THINK];
-    if (think) {
-        words[REVERSI_THINK] = think + 1u;
-        if (k->opponent != REVERSI_ALPHABETA || (think - 1u) % REVERSI_STEPS_PER_NODE == 0u) reward = reversi_wait(reversi_lane(extra), words, k, seed, done);
-    } else {
-        uint32_t action = reversi_action(ctrl), cursor = words[REVERSI_CURSOR];
-        if (action == REVERSI_PLACE) {
-            if (reversi_get(words, REVERSI_LEGAL) >> cursor & 1u) reward = reversi_place(reversi_lane(extra), words, k, seed, done);
-        } else {
-            int dx, dy;
-            gridDelta(action, &dx, &dy);
-            int x = (int)(cursor & 7u) + dx, y = (int)(cursor >> 3) + dy, edge = (int)k->size - 1;
-            x = x < 0 ? 0 : x > edge ? edge : x;
-            y = y < 0 ? 0 : y > edge ? edge : y;
-            words[REVERSI_CURSOR] = (uint32_t)(8 * y + x);
-        }
+    if (reversi_action(ctrl) == REVERSI_PLAY || shown == reversi_count(reversi_get(words, REVERSI_LEGAL))) reward = reversi_place(l, words, k, seed, done);
+    else {
+        words[REVERSI_SHOWN] = shown;
+        words[REVERSI_PROPOSAL] = l->order[shown];
     }
     reversi_obs(k->size, words, obs);
     return reward;
@@ -401,11 +319,6 @@ void reversi_observe(uint32_t instance, uint32_t seed, const uint32_t *words, co
     reversi_obs(REVERSI_KNOBS[instance].size, words, obs);
 }
 
-static uint32_t reversi_bot(reversiOracle *o, const reversiLane *l, const reversiKnobs *k, uint32_t seed, uint32_t game, uint64_t bot, uint64_t agent, uint64_t board, uint64_t moves) {
-    if (k->opponent == REVERSI_ALPHABETA) return reversi_think(&o->think, l, seed, game, bot, agent, board, moves);
-    return reversi_reply(l, k->opponent, seed, game, bot, agent, moves);
-}
-
 static int32_t reversi_judge(uint64_t me, uint64_t them, uint32_t size) {
     uint64_t board = reversi_board(size), empty = board & ~(me | them), mine = reversi_moves(me, them, empty), theirs = reversi_moves(them, me, empty);
     uint64_t corners = 1ull | 1ull << (size - 1u) | 1ull << 8u * (size - 1u) | 1ull << 9u * (size - 1u);
@@ -416,62 +329,55 @@ static int32_t reversi_judge(uint64_t me, uint64_t them, uint32_t size) {
     return 16 * ((int32_t)reversi_count(me & corners) - (int32_t)reversi_count(them & corners)) + 2 * ((int32_t)reversi_count(mine) - (int32_t)reversi_count(theirs));
 }
 
-static int32_t reversi_solve(reversiOracle *o, const reversiLane *l, const reversiKnobs *k, uint32_t seed, uint32_t game, uint64_t me, uint64_t them, uint64_t board, uint32_t *best) {
+static int32_t reversi_solve(reversiOracle *o, uint64_t me, uint64_t them, uint64_t board, int32_t alpha, int32_t beta) {
     uint64_t empty = board & ~(me | them), moves = reversi_moves(me, them, empty);
     if (!moves) {
-        uint64_t theirs = reversi_moves(them, me, empty);
-        if (!theirs) {
-            int32_t diff = (int32_t)reversi_count(me) - (int32_t)reversi_count(them);
-            return (diff > 0) - (diff < 0);
-        }
-        uint32_t square = reversi_bot(o, l, k, seed, game, them, me, board, theirs);
-        uint64_t f = reversi_flips(them, me, square);
-        return reversi_solve(o, l, k, seed, game, me ^ f, them | f | 1ull << square, board, 0);
+        if (reversi_moves(them, me, empty)) return -reversi_solve(o, them, me, board, -beta, -alpha);
+        int32_t diff = (int32_t)reversi_count(me) - (int32_t)reversi_count(them);
+        return (diff > 0) - (diff < 0);
     }
-    int32_t value = -2;
-    for (uint64_t rest = moves; rest; rest &= rest - 1u) {
-        if (o->nodes >= o->budget) return -3;
-        o->nodes++;
-        uint32_t square = (uint32_t)__builtin_ctzll(rest);
-        uint64_t f = reversi_flips(me, them, square), m = me | f | 1ull << square, t = them ^ f, open = board & ~(m | t), theirs = reversi_moves(t, m, open);
-        if (theirs) {
-            uint32_t reply = reversi_bot(o, l, k, seed, game, t, m, board, theirs);
-            uint64_t g = reversi_flips(t, m, reply);
-            t |= g | 1ull << reply;
-            m ^= g;
-        }
-        int32_t v = reversi_solve(o, l, k, seed, game, m, t, board, 0);
-        if (v == -3) return -3;
-        if (v > value) {
-            value = v;
-            if (best) *best = square;
-        }
-        if (value > 0) return value;
+    for (uint64_t rest = moves; rest && alpha < beta;) {
+        if (++o->nodes > o->budget) return alpha;
+        uint32_t square = reversi_next(rest);
+        rest &= ~(1ull << square);
+        uint64_t f = reversi_flips(me, them, square);
+        int32_t value = -reversi_solve(o, them ^ f, me | f | 1ull << square, board, -beta, -alpha);
+        alpha = value > alpha ? value : alpha;
     }
-    return value;
+    return alpha;
 }
 
-static uint32_t reversi_decide(reversiOracle *o, const reversiLane *l, const reversiKnobs *k, uint32_t seed, uint32_t game, uint64_t me, uint64_t them) {
+static uint32_t reversi_decide(reversiOracle *o, const reversiKnobs *k, uint64_t me, uint64_t them) {
     uint64_t board = reversi_board(k->size), empty = board & ~(me | them), moves = reversi_moves(me, them, empty);
     uint32_t choice = (uint32_t)__builtin_ctzll(moves);
     if (!(moves & (moves - 1u))) return choice;
     if (reversi_count(empty) <= k->oracleExact) {
         o->nodes = 0u;
         o->budget = k->oracleNodes;
-        uint32_t best = choice;
-        if (reversi_solve(o, l, k, seed, game, me, them, board, &best) >= 0) return best;
+        int32_t best = -2;
+        for (uint64_t rest = moves; rest && best < 1 && o->nodes <= o->budget;) {
+            uint32_t square = reversi_next(rest);
+            rest &= ~(1ull << square);
+            uint64_t f = reversi_flips(me, them, square);
+            int32_t value = -reversi_solve(o, them ^ f, me | f | 1ull << square, board, -1, -best);
+            if (value > best) {
+                best = value;
+                choice = square;
+            }
+        }
+        if (o->nodes <= o->budget && best >= 0) return choice;
     }
     int32_t top = -REVERSI_INFINITY;
     for (uint64_t rest = moves; rest; rest &= rest - 1u) {
         uint32_t square = (uint32_t)__builtin_ctzll(rest);
-        uint64_t f = reversi_flips(me, them, square), m = me | f | 1ull << square, t = them ^ f, open = board & ~(m | t), theirs = reversi_moves(t, m, open);
-        if (theirs) {
-            uint32_t reply = reversi_bot(o, l, k, seed, game, t, m, board, theirs);
+        uint64_t f = reversi_flips(me, them, square), m = me | f | 1ull << square, t = them ^ f, theirs = reversi_moves(t, m, board & ~(m | t));
+        int32_t value = theirs ? REVERSI_INFINITY : reversi_judge(m, t, k->size);
+        for (uint64_t replies = theirs; replies && value > top; replies &= replies - 1u) {
+            uint32_t reply = (uint32_t)__builtin_ctzll(replies);
             uint64_t g = reversi_flips(t, m, reply);
-            t |= g | 1ull << reply;
-            m ^= g;
+            int32_t v = reversi_judge(m ^ g, t | g | 1ull << reply, k->size);
+            value = v < value ? v : value;
         }
-        int32_t value = reversi_judge(m, t, k->size);
         if (value > top) {
             top = value;
             choice = square;
@@ -481,20 +387,13 @@ static uint32_t reversi_decide(reversiOracle *o, const reversiLane *l, const rev
 }
 
 void reversi_oracle(uint32_t instance, uint32_t seed, uint32_t step, const uint32_t *words, uint32_t *extra, const float *obs, float *ctrl, const float *shared) {
-    (void)step; (void)obs; (void)shared;
-    if (words[REVERSI_THINK]) {
-        ctrl[0] = (float)REVERSI_UP;
-        return;
-    }
-    const reversiKnobs *k = &REVERSI_KNOBS[instance];
-    reversiLane *l = reversi_lane(extra);
-    reversiOracle *o = reversi_oracleOf(l);
+    (void)seed; (void)step; (void)obs; (void)shared;
+    reversiOracle *o = reversi_oracleOf(reversi_lane(extra));
     uint64_t own = reversi_get(words, REVERSI_OWN), opp = reversi_get(words, REVERSI_OPP);
     uint32_t key = words[REVERSI_GAME] << 7 | reversi_count(own | opp);
     if (o->key != key) {
-        o->square = reversi_decide(o, l, k, seed, words[REVERSI_GAME], own, opp);
+        o->square = reversi_decide(o, &REVERSI_KNOBS[instance], own, opp);
         o->key = key;
     }
-    uint32_t cursor = words[REVERSI_CURSOR], x = cursor & 7u, y = cursor >> 3, tx = o->square & 7u, ty = o->square >> 3;
-    ctrl[0] = (float)(x < tx ? REVERSI_RIGHT : x > tx ? REVERSI_LEFT : y < ty ? REVERSI_DOWN : y > ty ? REVERSI_UP : REVERSI_PLACE);
+    ctrl[0] = (float)(words[REVERSI_PROPOSAL] == o->square ? REVERSI_PLAY : REVERSI_NEXT);
 }

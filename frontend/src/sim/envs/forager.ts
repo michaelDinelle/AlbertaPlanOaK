@@ -15,22 +15,25 @@ export interface ForagerShape {
   switching: boolean;
   period: number;
   values: readonly (readonly number[])[];
+  kinds: readonly number[];
   target: number;
 }
 
 export function foragerShape(env: EnvDescriptor): ForagerShape {
-  const side = parameter(env, 'side'), fov = parameter(env, 'fov'), span = 2 * fov + 1, flat = constantList(env, 'FORAGER_VALUES');
+  const side = parameter(env, 'side'), fov = parameter(env, 'fov'), span = 2 * fov + 1, flat = constantList(env, 'FORAGER_VALUES'), kinds = constantList(env, 'FORAGER_KINDS');
   if (side < 4 || side > 64 || side % 4 !== 0) throw new Error(`${env.envId} lays a ${side}-cell torus`);
   if (env.words !== 3 || env.view !== side * side / 16) throw new Error(`${env.envId} records ${env.words} words and ${env.view} view words where the forager layout reads 3 and ${side * side / 16}`);
   if (env.actions !== KEYS) throw new Error(`${env.envId} offers ${env.actions} actions where the forager reads ${KEYS}`);
   if (env.obs !== span * span + 1) throw new Error(`${env.envId} observes ${env.obs} values where a ${span}x${span} window and a bias show ${span * span + 1}`);
   if (flat.length !== 6) throw new Error(`${env.envId} lists ${flat.length} item values where two phases of three read 6`);
-  return { side, fov, span, switching: parameter(env, 'switching') !== 0, period: constant(env, 'FORAGER_SWITCH_PERIOD'), values: [flat.slice(0, 3), flat.slice(3, 6)], target: side * side / 16 };
+  if (kinds.length !== 3 || new Set(kinds).size !== 3) throw new Error(`${env.envId} lists ${kinds.length} kind codes where empty and two species read 3 distinct`);
+  return { side, fov, span, switching: parameter(env, 'switching') !== 0, period: constant(env, 'FORAGER_SWITCH_PERIOD'), values: [flat.slice(0, 3), flat.slice(3, 6)], kinds, target: side * side / 16 };
 }
 
 export const itemAt = (view: ArrayLike<number>, cell: number): number => (view[cell >>> 4]! >>> (2 * (cell & 15))) & 3;
 export const phaseOf = (shape: ForagerShape, step: number): number => (shape.switching && Math.floor(step / shape.period) % 2 === 1 ? 1 : 0);
 export const valueOf = (shape: ForagerShape, step: number, item: number): number => shape.values[phaseOf(shape, step)]![item]!;
+export const kindOf = (shape: ForagerShape, code: number): number => shape.kinds.indexOf(code);
 export const wrapOf = (v: number, side: number): number => ((v % side) + side) % side;
 export const deltaOf = (from: number, to: number, side: number): number => wrapOf(to - from + side / 2, side) - side / 2;
 
@@ -50,7 +53,7 @@ export function checkFrame(shape: ForagerShape, frame: EnvFrame): void {
   }
   if (count !== frame.words[FW.COUNT]) throw new Error(`Forager step ${frame.step} counts ${frame.words[FW.COUNT]} items where its map holds ${count}`);
   for (let i = 0; i < span * span; i++) {
-    const seen = frame.observations[i]!, drawn = valueOf(shape, frame.step, itemAt(frame.view, windowCell(shape, frame, i)));
+    const seen = frame.observations[i]!, drawn = shape.kinds[itemAt(frame.view, windowCell(shape, frame, i))]!;
     if (seen !== drawn) throw new Error(`Forager step ${frame.step} observes ${seen} at window cell ${i} where its map shows ${drawn}`);
   }
 }

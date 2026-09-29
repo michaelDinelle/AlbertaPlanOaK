@@ -32,7 +32,8 @@ class WinterCandyScene extends StageScene<ParklandWorld> {
   private readonly to = { x: 0, y: 0, heading: 0 };
   private step = 0;
   private period = 1;
-  private polarity(): number { return (Math.floor(this.step / this.period) & 1) === 0 ? 1 : -1; }
+  private shifted(): number { return this.step + this.period / 2; }
+  private polarity(): number { return (Math.floor(this.shifted() / this.period) & 1) === 0 ? 1 : -1; }
   override legend: LegendSpec = {
     title: 'REWARD',
     rows: [
@@ -41,8 +42,8 @@ class WinterCandyScene extends StageScene<ParklandWorld> {
       { key: 'banana', label: 'banana', tint: itemTint(JBW_BANANA), value: () => '0' },
       { key: 'truffle', label: 'truffle', tint: itemTint(JBW_TRUFFLE), value: () => 'scent only' },
     ],
-    note: () => `flips in ${formatCount(this.period - this.step % this.period)} steps`,
-    bar: () => (this.step % this.period) / this.period,
+    note: () => `flips in ${formatCount(this.period - this.shifted() % this.period)} steps`,
+    bar: () => (this.shifted() % this.period) / this.period,
   };
 
   protected buildWorld(ctx: SceneContext): ParklandWorld { return buildWorld(ctx, this.scene); }

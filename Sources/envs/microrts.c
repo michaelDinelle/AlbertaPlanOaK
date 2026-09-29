@@ -16,6 +16,7 @@ enum { MICRORTS_NONE, MICRORTS_MOVE, MICRORTS_HARVEST, MICRORTS_RETURN, MICRORTS
 enum { MICRORTS_AIM_NONE, MICRORTS_AIM_MOVE, MICRORTS_AIM_ATTACK, MICRORTS_AIM_HARVEST, MICRORTS_AIM_BUILD, MICRORTS_AIM_TRAIN };
 enum { MICRORTS_RANDOM_BIASED, MICRORTS_WORKER_RUSH, MICRORTS_LIGHT_RUSH, MICRORTS_HEAVY_RUSH, MICRORTS_RANGED_RUSH, MICRORTS_DOCTRINE };
 enum { MICRORTS_SLOTS = 128, MICRORTS_EMPTY = 255, MICRORTS_NEUTRAL = 2, MICRORTS_WAIT = 10 };
+enum { MICRORTS_WORLD_DRAWS = 0x52424149, MICRORTS_ORACLE_DRAWS = 0x4F52434C };
 
 typedef struct {
     uint8_t cost, hp, damage, range, sight, move, attack, harvest, mobile, fighter, harvester, stockpile, makes;
@@ -78,7 +79,7 @@ typedef struct {
 } micrortsMind;
 
 typedef struct {
-    uint32_t player, script, fog, stage, index, count, head, spare, used, workers, orders, seed, game, draws, army, threat;
+    uint32_t player, script, fog, stage, index, count, head, spare, used, workers, orders, seed, game, draws, tag, army, threat;
     uint32_t troops[3];
     int32_t reservedGold, spent;
     uint32_t foes, mines, homes, forts, ranked, owned;
@@ -143,12 +144,29 @@ static uint32_t microrts_reserved(const micrortsWorld *w, uint32_t slot, uint32_
     return next;
 }
 
+static int32_t microrts_committed(const micrortsWorld *w, uint32_t owner) {
+    int32_t cost = 0;
+    for (uint32_t q = 0u; q < w->pending; q++) {
+        uint32_t e = w->queue[q];
+        if (w->act[e] == MICRORTS_PRODUCE && w->owner[e] == owner) cost += MICRORTS_TYPES[w->make[e]].cost;
+    }
+    return cost;
+}
+
+static int microrts_claimed(const micrortsWorld *w, uint32_t owner, uint32_t cell) {
+    for (uint32_t q = 0u; q < w->pending; q++) {
+        uint32_t e = w->queue[q];
+        if (w->owner[e] == owner && microrts_reserves(w->act[e]) && microrts_reserved(w, e, w->arg[e]) == cell) return 1;
+    }
+    return 0;
+}
+
 static int microrts_valid(const micrortsWorld *w, const micrortsOrder *o) {
     uint32_t slot = o->slot, next;
     const micrortsType *t = &MICRORTS_TYPES[w->kind[slot]];
     switch (o->act) {
         case MICRORTS_NONE: return 1;
-        case MICRORTS_MOVE: return t->mobile && microrts_adjacent(w->width, w->cell[slot], o->arg, &next) && w->at[next] == MICRORTS_EMPTY;
+        case MICRORTS_MOVE: return t->mobile && microrts_adjacent(w->width, w->cell[slot], o->arg, &next) && w->at[next] == MICRORTS_EMPTY && !microrts_claimed(w, w->owner[slot], next);
         case MICRORTS_HARVEST:
             if (!t->harvester || w->carry[slot] != 0 || !microrts_adjacent(w->width, w->cell[slot], o->arg, &next) || w->at[next] == MICRORTS_EMPTY) return 0;
             return w->kind[w->at[next]] == MICRORTS_RESOURCE;
@@ -156,8 +174,8 @@ static int microrts_valid(const micrortsWorld *w, const micrortsOrder *o) {
             if (w->carry[slot] <= 0 || !microrts_adjacent(w->width, w->cell[slot], o->arg, &next) || w->at[next] == MICRORTS_EMPTY) return 0;
             return MICRORTS_TYPES[w->kind[w->at[next]]].stockpile && w->owner[w->at[next]] == w->owner[slot];
         case MICRORTS_PRODUCE:
-            if (!((t->makes >> o->make) & 1u) || !microrts_adjacent(w->width, w->cell[slot], o->arg, &next) || w->at[next] != MICRORTS_EMPTY) return 0;
-            return w->gold[w->owner[slot]] >= (int32_t)MICRORTS_TYPES[o->make].cost;
+            if (!((t->makes >> o->make) & 1u) || !microrts_adjacent(w->width, w->cell[slot], o->arg, &next) || w->at[next] != MICRORTS_EMPTY || microrts_claimed(w, w->owner[slot], next)) return 0;
+            return microrts_committed(w, w->owner[slot]) + (int32_t)MICRORTS_TYPES[o->make].cost <= w->gold[w->owner[slot]];
         default: {
             uint32_t target = o->arg, other = w->at[target];
             if (!t->fighter || microrts_square(w->width, w->cell[slot], target) > (uint32_t)t->range * t->range || other == MICRORTS_EMPTY) return 0;
@@ -179,34 +197,25 @@ static void microrts_issue(micrortsWorld *w, const micrortsOrder *orders, uint32
     for (uint32_t i = 0u; i < count; i++) {
         micrortsOrder o = orders[i];
         if (!microrts_valid(w, &o)) {
-            o.act = MICRORTS_NONE;
             if (rejected) rejected[i] = 1u;
+            continue;
         }
         if (microrts_reserves(o.act)) {
-            uint32_t cell = microrts_reserved(w, o.slot, o.arg), owner = w->owner[o.slot];
-            int32_t cost = o.act == MICRORTS_PRODUCE ? (int32_t)MICRORTS_TYPES[o.make].cost : 0;
-            micrortsOrder issued = o;
+            uint32_t cell = microrts_reserved(w, o.slot, o.arg);
             for (uint32_t q = 0u; q < w->pending; q++) {
                 uint32_t e = w->queue[q];
-                if (e == o.slot || !microrts_reserves(w->act[e])) continue;
-                int clash = microrts_reserved(w, e, w->arg[e]) == cell;
-                if (!clash && cost > 0 && w->act[e] == MICRORTS_PRODUCE && w->owner[e] == owner)
-                    clash = (int32_t)MICRORTS_TYPES[w->make[e]].cost + cost > w->gold[owner];
-                if (!clash) continue;
+                if (e == o.slot || !microrts_reserves(w->act[e]) || microrts_reserved(w, e, w->arg[e]) != cell) continue;
                 if (rejected) rejected[i] = 1u;
                 if (w->start[e] == w->time) {
-                    int32_t eta = issued.eta < w->eta[e] ? issued.eta : w->eta[e];
+                    int32_t eta = o.eta < w->eta[e] ? o.eta : w->eta[e];
                     w->act[e] = MICRORTS_NONE;
                     w->eta[e] = eta;
-                    issued.act = MICRORTS_NONE;
-                    issued.eta = eta;
-                } else {
-                    issued.act = MICRORTS_NONE;
-                    issued.eta = -1;
-                }
+                    o.eta = eta;
+                } else o.eta = -1;
+                o.act = MICRORTS_NONE;
             }
-            microrts_enqueue(w, o.slot, &issued);
-        } else microrts_enqueue(w, o.slot, &o);
+        }
+        microrts_enqueue(w, o.slot, &o);
     }
 }
 
@@ -362,6 +371,11 @@ static int microrts_standing(const micrortsWorld *w, uint32_t player) {
     return 0;
 }
 
+static const micrortsPlacement *microrts_map(uint32_t width, uint32_t *count) {
+    *count = width == 8u ? 6u : 8u;
+    return width == 8u ? MICRORTS_MAP8 : MICRORTS_MAP16;
+}
+
 static void microrts_load(micrortsWorld *w, uint32_t width, uint32_t fog) {
     memset(w, 0, sizeof *w);
     memset(w->at, MICRORTS_EMPTY, sizeof w->at);
@@ -369,8 +383,8 @@ static void microrts_load(micrortsWorld *w, uint32_t width, uint32_t fog) {
     w->fog = fog;
     w->gold[0] = 5;
     w->gold[1] = 5;
-    const micrortsPlacement *map = width == 8u ? MICRORTS_MAP8 : MICRORTS_MAP16;
-    uint32_t count = width == 8u ? 6u : 8u;
+    uint32_t count;
+    const micrortsPlacement *map = microrts_map(width, &count);
     for (uint32_t i = 0u; i < count; i++) microrts_spawn(w, map[i].kind, map[i].owner, map[i].cell, map[i].id, map[i].carry);
     w->nextId = map[count - 1u].id + 1u;
 }
@@ -649,7 +663,7 @@ static __attribute__((noinline)) void microrts_gamble(const micrortsWorld *w, mi
     micrortsOrder options[MICRORTS_SLOTS + 64u];
     uint32_t weights[MICRORTS_SLOTS + 64u], n = microrts_options(w, slot, options, weights), total = 0u;
     for (uint32_t i = 0u; i < n; i++) total += weights[i];
-    uint64_t draw = (uint64_t)(philox4x32(t->seed, ENV_RNG_STREAM, t->game, w->time, t->draws++, 0x52424149u).x >> 8) * total;
+    uint64_t draw = (uint64_t)(philox4x32(t->seed, ENV_RNG_STREAM, t->game, w->time, t->draws++, t->tag).x >> 8) * total;
     uint32_t pick = 0u;
     uint64_t sum = 0u;
     for (; pick + 1u < n; pick++) {
@@ -705,13 +719,14 @@ static void microrts_command(const micrortsWorld *w, micrortsMind *m, micrortsTh
 
 enum { MICRORTS_THINK_SCAN, MICRORTS_THINK_BASES, MICRORTS_THINK_BARRACKS, MICRORTS_THINK_MELEE, MICRORTS_THINK_BUILD, MICRORTS_THINK_WORKERS, MICRORTS_THINK_REST, MICRORTS_THINK_TRANSLATE, MICRORTS_THINK_FILL, MICRORTS_THINK_RANDOM, MICRORTS_THINK_DONE };
 
-static void microrts_begin(micrortsThought *t, uint32_t player, uint32_t script, uint32_t seed, uint32_t game, const micrortsCells *view) {
+static void microrts_begin(micrortsThought *t, uint32_t player, uint32_t script, uint32_t seed, uint32_t game, uint32_t tag, const micrortsCells *view) {
     t->player = player;
     t->script = script;
     t->fog = view != 0;
     if (view) t->view = *view;
     t->seed = seed;
     t->game = game;
+    t->tag = tag;
     t->stage = MICRORTS_THINK_SCAN;
     t->index = 0u;
     t->orders = 0u;
@@ -764,10 +779,8 @@ static void microrts_harvester(const micrortsWorld *w, micrortsMind *m, microrts
     else t->rest[t->spare++] = (uint8_t)slot;
 }
 
-static int microrts_ponder(const micrortsWorld *w, micrortsMind *m, micrortsThought *t, uint32_t jobs) {
+static void microrts_ponder(const micrortsWorld *w, micrortsMind *m, micrortsThought *t) {
     while (t->stage != MICRORTS_THINK_DONE) {
-        if (jobs == 0u) return 0;
-        jobs--;
         switch (t->stage) {
             case MICRORTS_THINK_SCAN:
                 microrts_scan(w, t);
@@ -860,7 +873,6 @@ static int microrts_ponder(const micrortsWorld *w, micrortsMind *m, micrortsThou
             default: t->stage = MICRORTS_THINK_DONE; break;
         }
     }
-    return 1;
 }
 
 typedef struct { float theta[12]; } micrortsDoctrine;
@@ -875,8 +887,9 @@ static const micrortsDoctrine MICRORTS_PRESETS[4] = {
 static const micrortsDoctrine MICRORTS_LOW = { { 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 5.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f } };
 static const micrortsDoctrine MICRORTS_HIGH = { { 1.0f, 1.0f, 1.0f, 1.0f, 4.0f, 12.0f, 12.0f, 1.0f, 1.0f, 1.0f, 1.0f, 0.5f } };
 
-enum { MICRORTS_GAME, MICRORTS_SIDE, MICRORTS_PHASE, MICRORTS_LENGTH, MICRORTS_SELECTED, MICRORTS_MODE, MICRORTS_SWEEP, MICRORTS_CURSOR, MICRORTS_FIFO, MICRORTS_QUEUED, MICRORTS_EVENT, MICRORTS_FOE, MICRORTS_MEMBER, MICRORTS_JOBS, MICRORTS_WORDS };
+enum { MICRORTS_GAME, MICRORTS_SIDE, MICRORTS_PHASE, MICRORTS_LENGTH, MICRORTS_SELECTED, MICRORTS_MODE, MICRORTS_SWEEP, MICRORTS_CURSOR, MICRORTS_FIFO, MICRORTS_QUEUED, MICRORTS_EVENT, MICRORTS_FOE, MICRORTS_MEMBER, MICRORTS_WORDS };
 enum { MICRORTS_LOST = 1, MICRORTS_KILLED, MICRORTS_PRODUCED, MICRORTS_REJECTED, MICRORTS_RETURNED };
+enum { MICRORTS_REACH = 2, MICRORTS_SPAN = 2 * MICRORTS_REACH + 1, MICRORTS_PATCH = 5, MICRORTS_NEAREST = MICRORTS_PATCH + MICRORTS_SPAN * MICRORTS_SPAN, MICRORTS_CARD = MICRORTS_NEAREST + 2 };
 
 typedef struct {
     micrortsWorld world;
@@ -884,7 +897,7 @@ typedef struct {
     micrortsThought thought;
     micrortsOrder plan[MICRORTS_SLOTS];
     uint32_t planned, idles, pick, foes;
-    float card[9];
+    float card[MICRORTS_CARD];
     uint8_t addressed[MICRORTS_SLOTS], idle[MICRORTS_SLOTS], seen[MICRORTS_SLOTS], foe[MICRORTS_SLOTS];
     float winRate[LEAGUE_MEMBERS], theta[LEAGUE_MEMBERS * 12u];
 } micrortsLane;
@@ -957,19 +970,19 @@ static void microrts_push(uint32_t *words, uint32_t code) {
     words[MICRORTS_QUEUED]++;
 }
 
-static float microrts_cellCode(const micrortsLane *l, const micrortsKnobs *k, uint32_t side, uint32_t cell, uint32_t direction) {
-    const micrortsWorld *w = &l->world;
-    uint32_t next;
-    if (!microrts_adjacent(w->width, cell, direction, &next)) return -0.5f;
-    if (k->partial && !microrts_has(&w->views[side], next)) return 0.25f;
-    uint32_t s = w->at[next];
-    if (s == MICRORTS_EMPTY) return 0.0f;
-    if (w->kind[s] == MICRORTS_RESOURCE) return 0.5f;
-    return w->owner[s] == side ? 1.0f : -1.0f;
-}
-
 static uint32_t microrts_code(const micrortsWorld *w, uint32_t slot) {
     return (0x5431760u >> (4u * w->kind[slot]) & 15u) + (w->kind[slot] == MICRORTS_WORKER && w->carry[slot] > 0);
+}
+
+static float microrts_badge(const micrortsWorld *w, uint32_t side, uint32_t slot) {
+    return w->kind[slot] == MICRORTS_RESOURCE ? 1.0f : (w->owner[slot] == side ? 0.125f : -0.125f) * (float)microrts_code(w, slot);
+}
+
+static float microrts_glyph(const micrortsWorld *w, const micrortsKnobs *k, uint32_t side, int x, int y) {
+    if (x < 0 || y < 0 || x >= (int)w->width || y >= (int)w->width) return 1.5f;
+    uint32_t cell = (uint32_t)x + (uint32_t)y * w->width;
+    if (k->partial && !microrts_has(&w->views[side], cell)) return 1.25f;
+    return w->at[cell] == MICRORTS_EMPTY ? 0.0f : microrts_badge(w, side, w->at[cell]);
 }
 
 static void microrts_select(micrortsLane *l, uint32_t *words, const micrortsKnobs *k, uint32_t slot) {
@@ -980,23 +993,33 @@ static void microrts_select(micrortsLane *l, uint32_t *words, const micrortsKnob
     memset(l->card, 0, sizeof l->card);
     if (slot == MICRORTS_EMPTY) return;
     uint32_t here = w->cell[slot];
+    int x = (int)microrts_x(w->width, here), y = (int)microrts_y(w->width, here);
     words[MICRORTS_CURSOR] = here;
-    l->card[0] = (float)microrts_code(w, slot) * 0.125f;
+    l->card[0] = microrts_badge(w, side, slot);
     l->card[1] = (float)w->hp[slot] * 0.1f;
-    for (uint32_t d = 0u; d < 4u; d++) l->card[3u + d] = microrts_cellCode(l, k, side, here, d);
+    l->card[3] = (float)x * 0.0625f;
+    l->card[4] = (float)y * 0.0625f;
+    for (int dy = -MICRORTS_REACH; dy <= MICRORTS_REACH; dy++)
+        for (int dx = -MICRORTS_REACH; dx <= MICRORTS_REACH; dx++)
+            l->card[MICRORTS_PATCH + (dy + MICRORTS_REACH) * MICRORTS_SPAN + dx + MICRORTS_REACH] = microrts_glyph(w, k, side, x + dx, y + dy);
     for (uint32_t i = l->foes; i-- > 0u;) {
         uint32_t s = l->foe[i], d = microrts_manhattan(w->width, here, w->cell[s]);
         if (d >= far) continue;
         far = d;
-        l->card[7] = (float)((int32_t)microrts_x(w->width, w->cell[s]) - (int32_t)microrts_x(w->width, here)) * 0.0625f;
-        l->card[8] = (float)((int32_t)microrts_y(w->width, w->cell[s]) - (int32_t)microrts_y(w->width, here)) * 0.0625f;
+        l->card[MICRORTS_NEAREST] = (float)((int32_t)microrts_x(w->width, w->cell[s]) - x) * 0.0625f;
+        l->card[MICRORTS_NEAREST + 1] = (float)((int32_t)microrts_y(w->width, w->cell[s]) - y) * 0.0625f;
     }
 }
 
 static void microrts_obey(micrortsLane *l, uint32_t *words, const micrortsKnobs *k, uint32_t action) {
     uint32_t sel = words[MICRORTS_SELECTED];
     if (sel == MICRORTS_EMPTY) return;
-    if (action == 5u) { words[MICRORTS_MODE] = (words[MICRORTS_MODE] + 1u) % microrts_modes(&l->world, sel); return; }
+    if (action == 5u) {
+        uint32_t modes = microrts_modes(&l->world, sel);
+        if (modes == 1u) microrts_push(words, MICRORTS_REJECTED);
+        words[MICRORTS_MODE] = (words[MICRORTS_MODE] + 1u) % modes;
+        return;
+    }
     if (action >= 1u) {
         micrortsOrder o;
         if (!microrts_smart(&l->world, sel, action - 1u, words[MICRORTS_MODE], &o)) { microrts_push(words, MICRORTS_REJECTED); return; }
@@ -1014,11 +1037,6 @@ static uint32_t microrts_script(const micrortsKnobs *k, uint32_t seed, uint32_t 
         case 3u: return MICRORTS_WORKER_RUSH + philox4x32(seed, ENV_RNG_STREAM, game, 0x464F4553u, 0u, 0u).x % 4u;
         default: return MICRORTS_DOCTRINE;
     }
-}
-
-static uint32_t microrts_jobs(const micrortsLane *l) {
-    const micrortsWorld *w = &l->world;
-    return 4u + 5u * w->units + l->mind[0].count + l->mind[1].count;
 }
 
 static void microrts_open(micrortsLane *l, uint32_t *words, const micrortsKnobs *k, uint32_t seed) {
@@ -1045,10 +1063,9 @@ static void microrts_open(micrortsLane *l, uint32_t *words, const micrortsKnobs 
     }
     words[MICRORTS_PHASE] = 0u;
     words[MICRORTS_LENGTH] = k->substeps + l->idles;
-    words[MICRORTS_JOBS] = (microrts_jobs(l) + k->substeps + l->idles - 2u) / (k->substeps + l->idles - 1u);
     l->pick = l->idles ? l->idles - 1u : 0u;
     microrts_select(l, words, k, l->idles ? microrts_next(l) : MICRORTS_EMPTY);
-    microrts_begin(&l->thought, 1u - side, words[MICRORTS_FOE], seed, words[MICRORTS_GAME], k->partial ? &w->views[1u - side] : 0);
+    microrts_begin(&l->thought, 1u - side, words[MICRORTS_FOE], seed, words[MICRORTS_GAME], MICRORTS_WORLD_DRAWS, k->partial ? &w->views[1u - side] : 0);
     if (words[MICRORTS_FOE] == MICRORTS_DOCTRINE) memcpy(l->thought.theta, &l->theta[12u * words[MICRORTS_MEMBER]], sizeof l->thought.theta);
 }
 
@@ -1081,21 +1098,22 @@ static void microrts_league(micrortsLane *l, uint32_t seed) {
 static void microrts_obs(const micrortsLane *l, const micrortsKnobs *k, const uint32_t *words, float *obs) {
     const micrortsWorld *w = &l->world;
     uint32_t side = words[MICRORTS_SIDE], cursor = words[MICRORTS_CURSOR], at = words[MICRORTS_SWEEP];
+    float *tail = obs + MICRORTS_CARD;
     memcpy(obs, l->card, sizeof l->card);
     obs[2] = (float)words[MICRORTS_MODE] * (1.0f / 3.0f);
-    obs[9] = obs[10] = obs[11] = obs[12] = 0.0f;
+    tail[0] = tail[1] = tail[2] = tail[3] = 0.0f;
     if (at < w->units && microrts_seen(l, k, side, w->list[at])) {
         uint32_t s = w->list[at];
-        obs[9] = w->kind[s] == MICRORTS_RESOURCE ? 1.0f : (w->owner[s] == side ? 0.125f : -0.125f) * (float)microrts_code(w, s);
-        obs[10] = (float)((int)microrts_x(w->width, w->cell[s]) - (int)microrts_x(w->width, cursor)) * 0.0625f;
-        obs[11] = (float)((int)microrts_y(w->width, w->cell[s]) - (int)microrts_y(w->width, cursor)) * 0.0625f;
-        obs[12] = (float)(w->kind[s] == MICRORTS_RESOURCE ? w->carry[s] : w->hp[s]) * 0.1f;
+        tail[0] = microrts_badge(w, side, s);
+        tail[1] = (float)((int)microrts_x(w->width, w->cell[s]) - (int)microrts_x(w->width, cursor)) * 0.0625f;
+        tail[2] = (float)((int)microrts_y(w->width, w->cell[s]) - (int)microrts_y(w->width, cursor)) * 0.0625f;
+        tail[3] = (float)(w->kind[s] == MICRORTS_RESOURCE ? w->carry[s] : w->hp[s]) * 0.1f;
     }
-    obs[13] = (float)w->gold[side] * 0.1f;
-    obs[14] = (float)w->gold[1u - side] * 0.1f;
-    obs[15] = (float)w->time / (float)k->maxCycles;
-    obs[16] = (float)words[MICRORTS_PHASE] / (float)words[MICRORTS_LENGTH];
-    obs[17] = (float)words[MICRORTS_EVENT] * 0.2f;
+    tail[4] = (float)w->gold[side] * 0.1f;
+    tail[5] = (float)w->gold[1u - side] * 0.1f;
+    tail[6] = (float)w->time / (float)k->maxCycles;
+    tail[7] = (float)words[MICRORTS_PHASE] / (float)words[MICRORTS_LENGTH];
+    tail[8] = (float)words[MICRORTS_EVENT] * 0.2f;
 }
 
 static void microrts_sweep(const micrortsLane *l, uint32_t *words) {
@@ -1143,7 +1161,7 @@ static void microrts_finish(micrortsLane *l, uint32_t *words, const micrortsKnob
 }
 
 static __attribute__((noinline)) float microrts_turn(micrortsLane *l, uint32_t *words, const micrortsKnobs *k, uint32_t seed, uint32_t *done) {
-    microrts_ponder(&l->world, &l->mind[1u - words[MICRORTS_SIDE]], &l->thought, 0xFFFFFFFFu);
+    microrts_ponder(&l->world, &l->mind[1u - words[MICRORTS_SIDE]], &l->thought);
     uint32_t over;
     float reward = microrts_tick(l, words, k, &over);
     if (over) { *done = 1u; microrts_finish(l, words, k, seed, reward); }
@@ -1156,12 +1174,11 @@ float microrts_step(uint32_t instance, uint32_t seed, uint32_t step, const float
     const micrortsKnobs *k = &MICRORTS_KNOBS[instance];
     micrortsLane *l = microrts_lane(extra);
     microrts_obey(l, words, k, microrts_action(ctrl));
-    uint32_t phase = ++words[MICRORTS_PHASE], length = words[MICRORTS_LENGTH];
+    uint32_t phase = ++words[MICRORTS_PHASE];
     float reward = 0.0f;
     *done = 0u;
-    if (phase < length) {
-        if (l->thought.stage != MICRORTS_THINK_DONE) microrts_ponder(&l->world, &l->mind[1u - words[MICRORTS_SIDE]], &l->thought, words[MICRORTS_JOBS]);
-    } else reward = microrts_turn(l, words, k, seed, done);
+    if (words[MICRORTS_SELECTED] == MICRORTS_EMPTY || phase >= words[MICRORTS_LENGTH])
+        do reward = microrts_turn(l, words, k, seed, done); while (!*done && l->idles == 0u);
     microrts_sweep(l, words);
     words[MICRORTS_EVENT] = words[MICRORTS_FIFO] & 7u;
     if (words[MICRORTS_QUEUED]) { words[MICRORTS_FIFO] >>= 3u; words[MICRORTS_QUEUED]--; }
@@ -1263,9 +1280,9 @@ static uint32_t microrts_idle(const micrortsWorld *w, uint32_t side) {
 static void microrts_foresee(micrortsOracle *o, micrortsLane *l, const micrortsKnobs *k, uint32_t seed, uint32_t candidate, uint32_t *ordered) {
     micrortsWorld *w = &l->world;
     uint32_t side = o->words[MICRORTS_SIDE];
-    microrts_begin(&o->mine, side, candidate < 4u ? MICRORTS_WORKER_RUSH + candidate : MICRORTS_DOCTRINE, seed, o->words[MICRORTS_GAME], 0);
+    microrts_begin(&o->mine, side, candidate < 4u ? MICRORTS_WORKER_RUSH + candidate : MICRORTS_DOCTRINE, seed, o->words[MICRORTS_GAME], MICRORTS_ORACLE_DRAWS, k->partial ? &w->views[side] : 0);
     if (candidate >= 4u) memcpy(o->mine.theta, MICRORTS_GAMBITS[candidate - 4u].theta, sizeof o->mine.theta);
-    microrts_ponder(w, &l->mind[side], &o->mine, 0xFFFFFFFFu);
+    microrts_ponder(w, &l->mind[side], &o->mine);
     o->count = microrts_realize(w, &o->mine, side, k->substeps + microrts_idle(w, side), o->presses, o->orders, ordered);
 }
 
@@ -1276,9 +1293,9 @@ static float microrts_rollout(micrortsOracle *o, const micrortsKnobs *k, uint32_
     for (;;) {
         uint32_t ordered;
         microrts_foresee(o, l, k, seed, candidate, &ordered);
-        microrts_begin(&l->thought, 1u - side, foe, seed, o->words[MICRORTS_GAME], k->partial ? &w->views[1u - side] : 0);
+        microrts_begin(&l->thought, 1u - side, foe, seed, o->words[MICRORTS_GAME], MICRORTS_ORACLE_DRAWS, k->partial ? &w->views[1u - side] : 0);
         if (foe == MICRORTS_DOCTRINE) memcpy(l->thought.theta, &l->theta[12u * o->words[MICRORTS_MEMBER]], sizeof l->thought.theta);
-        microrts_ponder(w, &l->mind[1u - side], &l->thought, 0xFFFFFFFFu);
+        microrts_ponder(w, &l->mind[1u - side], &l->thought);
         for (uint32_t p = 0u; p < 2u; p++) {
             if (p == side) microrts_issue(w, o->orders, ordered, 0);
             else microrts_issue(w, l->thought.out, l->thought.orders, 0);
@@ -1292,12 +1309,31 @@ static float microrts_rollout(micrortsOracle *o, const micrortsKnobs *k, uint32_
     }
 }
 
+static void microrts_veil(micrortsLane *l, uint32_t side) {
+    micrortsWorld *w = &l->world;
+    uint32_t count, home = 256u;
+    const micrortsPlacement *map = microrts_map(w->width, &count);
+    for (uint32_t i = 0u; i < count; i++)
+        if (map[i].kind == MICRORTS_BASE && map[i].owner == 1u - side) home = map[i].cell;
+    for (uint32_t i = w->units; i-- > 0u;) {
+        uint32_t s = w->list[i];
+        if (w->owner[s] != 1u - side || microrts_has(&w->views[side], w->cell[s])) continue;
+        if (w->kind[s] != MICRORTS_BASE || w->cell[s] != home) microrts_remove(w, l->mind, s);
+        else if (w->act[s] != MICRORTS_IDLE) microrts_unqueue(w, s);
+    }
+    memset(&l->mind[1u - side], 0, sizeof l->mind[1u - side]);
+}
+
 static void microrts_plan(micrortsOracle *o, const micrortsLane *l, const micrortsKnobs *k, const uint32_t *words, uint32_t seed) {
     memcpy(o->words, words, sizeof o->words);
+    uint32_t guess = philox4x32(seed, ENV_RNG_STREAM, words[MICRORTS_GAME], l->world.time, 0x464F4553u, MICRORTS_ORACLE_DRAWS).x;
+    if (k->opponent == 3u) o->words[MICRORTS_FOE] = MICRORTS_WORKER_RUSH + guess % 4u;
+    if (k->opponent == 4u) o->words[MICRORTS_MEMBER] = leaguePick(l->winRate, guess);
     float top = -3.0f;
     for (uint32_t i = 0u; i < MICRORTS_CANDIDATES; i++) {
         uint32_t candidate = (o->favorite + i) % MICRORTS_CANDIDATES, end;
         o->sim = *l;
+        if (k->partial) microrts_veil(&o->sim, words[MICRORTS_SIDE]);
         float outcome = microrts_rollout(o, k, seed, candidate, &end);
         float value = outcome * 2.0f + (outcome < 0.0f ? (float)end / (float)k->maxCycles : 0.0f);
         if (value > top) { top = value; o->candidate = candidate; o->outcome = outcome; o->end = end; }

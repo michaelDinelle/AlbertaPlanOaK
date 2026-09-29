@@ -1,7 +1,7 @@
 import { constantList, constantRecords, parameter, type CatalogRecord, type EnvDescriptor } from '../../data/envs';
 import { NO_EVENTS, type EnvDecoder, type EnvFrame, type SimEvent } from '../types';
 
-export const MW = { GAME: 0, SIDE: 1, PHASE: 2, LENGTH: 3, SELECTED: 4, MODE: 5, SWEEP: 6, CURSOR: 7, FIFO: 8, QUEUED: 9, EVENT: 10, FOE: 11, MEMBER: 12, JOBS: 13, COUNT: 14 } as const;
+export const MW = { GAME: 0, SIDE: 1, PHASE: 2, LENGTH: 3, SELECTED: 4, MODE: 5, SWEEP: 6, CURSOR: 7, FIFO: 8, QUEUED: 9, EVENT: 10, FOE: 11, MEMBER: 12, COUNT: 13 } as const;
 
 export const RESOURCE = 0;
 export const BASE = 1;
@@ -36,7 +36,16 @@ export const STEP_Y = [-1, 0, 1, 0] as const;
 
 export const MRTS_CURSOR = 0;
 
-const OBSERVED = 18;
+export const REACH = 2;
+export const SPAN = 2 * REACH + 1;
+export const PATCH_AT = 5;
+export const NEAREST_AT = PATCH_AT + SPAN * SPAN;
+export const SWEEP_AT = NEAREST_AT + 2;
+export const ORE_GLYPH = 1;
+export const UNSEEN_GLYPH = 1.25;
+export const OFF_MAP_GLYPH = 1.5;
+
+const OBSERVED = SWEEP_AT + 9;
 const HEADER = 2;
 const DISC_ROWS = 11;
 const MAPS: Record<number, string> = { 8: 'MICRORTS_MAP8', 16: 'MICRORTS_MAP16' };
