@@ -4,7 +4,7 @@
 <rect width="1250" height="1040" fill="#ffffff"/>
 <g font-family="Arial, Helvetica, sans-serif" fill="#243044">
 <text x="54.0" y="55.0" font-size="30" fill="#243044" text-anchor="start" font-weight="600">Policy comparison</text>
-<text x="54.0" y="86.0" font-size="17" fill="#637084" text-anchor="start" font-weight="400">Mean normalized reward per step · 245 environments · best recording b5f51c4fb</text>
+<text x="54.0" y="86.0" font-size="17" fill="#637084" text-anchor="start" font-weight="400">Mean normalized reward per step · 245 environments · best recording 2d6e2ec10</text>
 <path d="M 430 390 L 430.00 150.00" stroke="#d0d6df" stroke-width="1"/>
 <path d="M 430 390 L 599.71 220.29" stroke="#d0d6df" stroke-width="1"/>
 <path d="M 430 390 L 670.00 390.00" stroke="#d0d6df" stroke-width="1"/>
@@ -97,7 +97,7 @@
 <text x="920.0" y="356.0" font-size="20" fill="#5548b4" text-anchor="start" font-weight="600">2. OaK</text>
 <text x="1180.0" y="356.0" font-size="20" fill="#243044" text-anchor="end" font-weight="400">0.492</text>
 <rect x="1036.11" y="383" width="70.84" height="13" fill="#5548b4"/>
-<text x="920.0" y="375.0" font-size="13" fill="#637084" text-anchor="start" font-weight="400">6,544,701 steps/s</text>
+<text x="920.0" y="375.0" font-size="13" fill="#637084" text-anchor="start" font-weight="400">6,146,915 steps/s</text>
 <rect x="902.00" y="412.00" width="8" height="8" fill="#68a8cc"/>
 <text x="920.0" y="422.0" font-size="20" fill="#68a8cc" text-anchor="start" font-weight="600">3. PPO</text>
 <text x="1180.0" y="422.0" font-size="20" fill="#243044" text-anchor="end" font-weight="400">0.345</text>

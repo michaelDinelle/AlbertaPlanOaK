@@ -740,13 +740,31 @@ static __attribute__((noinline)) void learn(OakAgent *a) {
     const float *x = features(a, 1u - a->slot);
     float4 decay = splat4(OAK_ELIGIBILITY_DECAY);
     float4 e0 = splat4(0.0f), e1 = e0;
+    float4 credit[OAK_POLICY_MAX], c0[OAK_POLICY_MAX], c1[OAK_POLICY_MAX];
+    for (uint32_t d = 0u; d < OAK_POLICY_MAX; d++) {
+        credit[d] = splat4(a->actorCredit[d]);
+        c0[d] = splat4(0.0f);
+        c1[d] = c0[d];
+    }
     for (uint32_t k = 0u; k < count; k += 8u) {
-        float4 z0 = __builtin_elementwise_fma(oak_load4(a->valueTrace + k), decay, oak_load4(x + k));
-        float4 z1 = __builtin_elementwise_fma(oak_load4(a->valueTrace + k + 4u), decay, oak_load4(x + k + 4u));
+        float4 x0 = oak_load4(x + k), x1 = oak_load4(x + k + 4u);
+        float4 z0 = __builtin_elementwise_fma(oak_load4(a->valueTrace + k), decay, x0);
+        float4 z1 = __builtin_elementwise_fma(oak_load4(a->valueTrace + k + 4u), decay, x1);
         oak_store4(a->valueTrace + k, z0);
         oak_store4(a->valueTrace + k + 4u, z1);
         e0 = __builtin_elementwise_fma(z0, z0, e0);
         e1 = __builtin_elementwise_fma(z1, z1, e1);
+        for (uint32_t d = 0u; d < OAK_POLICY_MAX; d++) {
+            if (d < actions) {
+                float *z = a->policyTrace + d * OAK_FEATURE_MAX;
+                float4 p0 = __builtin_elementwise_fma(oak_load4(z + k), decay, credit[d] * x0);
+                float4 p1 = __builtin_elementwise_fma(oak_load4(z + k + 4u), decay, credit[d] * x1);
+                oak_store4(z + k, p0);
+                oak_store4(z + k + 4u, p1);
+                c0[d] = __builtin_elementwise_fma(p0, x0, c0[d]);
+                c1[d] = __builtin_elementwise_fma(p1, x1, c1[d]);
+            }
+        }
     }
     const uint32_t *previousCells = a->cellActive + (1u - a->slot) * OAK_CELLS;
     uint32_t previousTuples = a->stepCount > 0u ? OAK_TUPLES + 2u * a->observationCount : 0u, policyTuples = a->stepCount == 0u ? 0u : a->box ? OAK_TUPLES : previousTuples;
@@ -766,18 +784,7 @@ static __attribute__((noinline)) void learn(OakAgent *a) {
     float change[OAK_POLICY_MAX];
     float changeSquare = 0.0f;
     for (uint32_t d = 0u; d < actions; d++) {
-        float *z = a->policyTrace + d * OAK_FEATURE_MAX;
-        float4 credit = splat4(a->actorCredit[d]), c0 = splat4(0.0f), c1 = c0;
-        for (uint32_t k = 0u; k < count; k += 8u) {
-            float4 x0 = oak_load4(x + k), x1 = oak_load4(x + k + 4u);
-            float4 z0 = __builtin_elementwise_fma(oak_load4(z + k), decay, credit * x0);
-            float4 z1 = __builtin_elementwise_fma(oak_load4(z + k + 4u), decay, credit * x1);
-            oak_store4(z + k, z0);
-            oak_store4(z + k + 4u, z1);
-            c0 = __builtin_elementwise_fma(z0, x0, c0);
-            c1 = __builtin_elementwise_fma(z1, x1, c1);
-        }
-        change[d] = oak_sum4(c0 + c1);
+        change[d] = oak_sum4(c0[d] + c1[d]);
         change[d] = fmaf((float)policyTuples, a->actorCredit[d], change[d]);
         changeSquare = fmaf(change[d], change[d], changeSquare);
     }
