@@ -1,5 +1,6 @@
 #include "geometry.h"
 #include "policy.h"
+#include <arm_neon.h>
 
 _Static_assert(OAK_LANES == 1u, "");
 _Static_assert(OAK_POLICY_MAX == 6u, "");
@@ -59,7 +60,7 @@ static inline float4 oak_tanh4(float4 x) {
     return select4((lane4)(x != x), x, t);
 }
 static inline void oak_store4(float *p, float4 v) { __builtin_memcpy(p, &v, sizeof v); }
-static inline lane4 oak_finite4(float4 v) { return (lane4)(((lane4)v & 0x7fffffffu) < 0x7f800000u); }
+static inline lane4 oak_finite4(float4 v) { return (lane4)vcaleq_f32((float32x4_t)v, vdupq_n_f32(__FLT_MAX__)); }
 static inline float oak_sum4(float4 v) { return (v.x + v.y) + (v.z + v.w); }
 
 typedef struct {
