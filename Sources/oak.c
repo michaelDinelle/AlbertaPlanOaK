@@ -3,7 +3,7 @@
 
 _Static_assert(OAK_LANES == 1u, "");
 _Static_assert(OAK_POLICY_MAX == 6u, "");
-_Static_assert(OAK_UNITS % 4u == 0u, "");
+_Static_assert(OAK_UNITS % 8u == 0u, "");
 _Static_assert(OAK_FEATURE_MAX % 8u == 0u, "");
 _Static_assert(OAK_TUPLES == 23u, "");
 
@@ -92,7 +92,7 @@ typedef struct {
     float permInput[2u * OAK_PERMS * OAK_PERM_STRIDE];
     float valueWeight[OAK_FEATURE_MAX], valueTrace[OAK_FEATURE_MAX];
     float policy[OAK_HEADS * OAK_POLICY_MAX * OAK_FEATURE_MAX], policyTrace[OAK_POLICY_MAX * OAK_FEATURE_MAX];
-    float projection[OAK_UNITS * OAK_FANIN], unitEnergy[2u * OAK_UNITS];
+    float projection[OAK_UNITS * OAK_FANIN], unitEnergy[2u * OAK_UNITS], unitGate[OAK_UNITS];
     uint16_t inputPerm[OAK_PERMS * OAK_SOURCES_MAX], unitBlock[OAK_UNITS * OAK_FANIN_BLOCKS];
     float traceLevel[OAK_TRACE_LEVELS * OAK_OBSERVATION_LIMIT], traceMean[OAK_TRACE_LEVELS * OAK_OBSERVATION_LIMIT], traceSecond[OAK_TRACE_LEVELS * OAK_OBSERVATION_LIMIT];
     float settledMean[OAK_TRACE_LEVELS * OAK_OBSERVATION_LIMIT], settledSecond[OAK_TRACE_LEVELS * OAK_OBSERVATION_LIMIT];
@@ -100,7 +100,7 @@ typedef struct {
     uint32_t cellActive[2u * OAK_CELLS];
     float chMean[OAK_OBSERVATION_LIMIT], chSecond[OAK_OBSERVATION_LIMIT], chAlpha[OAK_OBSERVATION_LIMIT], chBeta[OAK_OBSERVATION_LIMIT], chTrace[OAK_OBSERVATION_LIMIT], chEnergy[OAK_OBSERVATION_LIMIT], chCorr[OAK_OBSERVATION_LIMIT];
     Channel rewardChannel, actorMeta[OAK_HEADS];
-    float headMean[OAK_ARMS], headSquare[OAK_ARMS], headWeight[OAK_ARMS], blockReward, obsCorr;
+    float headMean[OAK_ARMS], headSquare[OAK_ARMS], headWeight[OAK_ARMS], blockReward, obsCorr, prevCorr;
     uint32_t headBlocks[OAK_ARMS], activeHead, learner, blockSteps, blockCount, self;
     float actionSignal[OAK_ACTION_PARAMS];
     float actorCredit[OAK_POLICY_MAX], actorCreditStaging[OAK_POLICY_MAX], logit[OAK_POLICY_MAX];
@@ -500,6 +500,7 @@ static __attribute__((noinline)) void encode(OakAgent *a, const float *x, const 
                 oak_store4(ctrl + 4u, oak_keepFinite4(c1, __builtin_elementwise_fma(vRate, __builtin_elementwise_fma(actHigh, ch, -c1), c1)));
             }
         }
+        a->prevCorr = a->obsCorr;
         a->obsCorr = maxCorr >= 1.0f ? 1.0f : maxCorr * maxCorr;
     }
     uint32_t selfBits;
@@ -661,6 +662,9 @@ static __attribute__((noinline)) void perceive(OakAgent *a, const float *obs) {
         dst[sources + 3u] = dst[3];
     }
     float *unit = x + inputs, *energies = a->unitEnergy + a->slot * OAK_UNITS;
+    uint32_t half = OAK_UNITS / 2u;
+    float *gates = a->unitGate + a->slot * half;
+    float4 vGate = splat4(a->obsCorr * a->obsCorr);
     for (uint32_t j = 0u; j < OAK_UNITS; j += 4u) {
         float4 ss[4], ee[4];
         for (uint32_t u = 0u; u < 4u; u++) {
@@ -685,7 +689,15 @@ static __attribute__((noinline)) void perceive(OakAgent *a, const float *obs) {
         }
         float4 sv = oak_hsum4(ss[0], ss[1], ss[2], ss[3]);
         float4 ev = oak_hsum4(ee[0], ee[1], ee[2], ee[3]);
-        oak_store4(unit + j, oak_tanh4(sv));
+        float4 tv = oak_tanh4(sv);
+        if (j < half) {
+            oak_store4(unit + j, tv);
+        } else {
+            uint32_t k = j - half;
+            oak_store4(gates + k, tv);
+            float4 m = __builtin_elementwise_fma(vGate, oak_load4(unit + k) - vOne, vOne);
+            oak_store4(unit + j, tv * m);
+        }
         oak_store4(energies + j, ev);
     }
 }
@@ -1552,18 +1564,30 @@ static __attribute__((noinline)) void learn(OakAgent *a) {
     float critic = a->tdNormalized * a->tdInv;
     if (actor == 0.0f && critic == 0.0f) return;
     const float *unit = x + inputs;
+    uint32_t half = OAK_UNITS / 2u;
+    const float *gates = a->unitGate + (1u - a->slot) * half;
     const float *energies = a->unitEnergy + (1u - a->slot) * OAK_UNITS;
     const float *px = permInputs(a, 1u - a->slot);
     float signals[OAK_UNITS];
     float4 vCritic = splat4(critic), vActor = splat4(actor), vTrack = splat4(fmaf(corrGate, sqrtf(g.trackingRate * g.ridgeFloor) - g.trackingRate, g.trackingRate)), vOne = splat4(1.0f), vZero = splat4(0.0f);
-    for (uint32_t j = 0u; j < OAK_UNITS; j += 4u) {
-        float4 cr = splat4(0.0f);
-        for (uint32_t aidx = 0u; aidx < actions; aidx++)
-            cr = __builtin_elementwise_fma(splat4(a->actorCredit[aidx]), oak_load4(policy + aidx * count + inputs + j), cr);
-        float4 u = oak_load4(unit + j);
-        float4 ev = oak_load4(energies + j);
-        float4 num = __builtin_elementwise_fma(vCritic, oak_load4(a->valueWeight + inputs + j), vActor * cr) * (vOne - u * u) * vTrack;
-        oak_store4(signals + j, select4((lane4)(ev > vZero), oak_finiteOrZero4(num * oak_rcp4_fast(ev)), vZero));
+    float4 vGate = splat4(a->prevCorr * a->prevCorr);
+    for (uint32_t k = 0u; k < half; k += 4u) {
+        float4 cr0 = splat4(0.0f), cr1 = cr0;
+        for (uint32_t aidx = 0u; aidx < actions; aidx++) {
+            float4 ac = splat4(a->actorCredit[aidx]);
+            const float *prow = policy + aidx * count + inputs;
+            cr0 = __builtin_elementwise_fma(ac, oak_load4(prow + k), cr0);
+            cr1 = __builtin_elementwise_fma(ac, oak_load4(prow + half + k), cr1);
+        }
+        float4 top0 = __builtin_elementwise_fma(vCritic, oak_load4(a->valueWeight + inputs + k), vActor * cr0);
+        float4 top1 = __builtin_elementwise_fma(vCritic, oak_load4(a->valueWeight + inputs + half + k), vActor * cr1);
+        float4 t = oak_load4(unit + k), gv = oak_load4(gates + k);
+        float4 ev0 = oak_load4(energies + k), ev1 = oak_load4(energies + half + k);
+        float4 m = __builtin_elementwise_fma(vGate, t - vOne, vOne);
+        float4 num0 = __builtin_elementwise_fma(top1 * vGate, gv, top0) * (vOne - t * t) * vTrack;
+        float4 num1 = (top1 * m) * (vOne - gv * gv) * vTrack;
+        oak_store4(signals + k, select4((lane4)(ev0 > vZero), oak_finiteOrZero4(num0 * oak_rcp4_fast(ev0)), vZero));
+        oak_store4(signals + half + k, select4((lane4)(ev1 > vZero), oak_finiteOrZero4(num1 * oak_rcp4_fast(ev1)), vZero));
     }
     for (uint32_t j = 0u; j < OAK_UNITS; j++) {
         float signal = signals[j];
