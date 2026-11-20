@@ -29,12 +29,25 @@ static inline float4 oak_rsqrt4_fast(float4 x) {
     return select4((lane4)(x > splat4(0.0f)), (float4)r, splat4(0.0f));
 }
 
+static inline float4 oak_rcp4_fast(float4 x) {
+    float32x4_t v = (float32x4_t)x;
+    float32x4_t r = vrecpeq_f32(v);
+    r = vmulq_f32(r, vrecpsq_f32(v, r));
+    return (float4)r;
+}
+
+static inline float4 oak_hsum4(float4 a, float4 b, float4 c, float4 d) {
+    float32x4_t p0 = vpaddq_f32((float32x4_t)a, (float32x4_t)b);
+    float32x4_t p1 = vpaddq_f32((float32x4_t)c, (float32x4_t)d);
+    return (float4)vpaddq_f32(p0, p1);
+}
+
 static inline float4 oak_tanh4(float4 x) {
     float4 a = __builtin_elementwise_abs(x);
     float4 x2 = a * a;
     float4 num = a * __builtin_elementwise_fma(x2, __builtin_elementwise_fma(x2, __builtin_elementwise_fma(x2, splat4(1.0f), splat4(378.0f)), splat4(17325.0f)), splat4(135135.0f));
     float4 den = __builtin_elementwise_fma(x2, __builtin_elementwise_fma(x2, __builtin_elementwise_fma(x2, splat4(28.0f), splat4(3150.0f)), splat4(62370.0f)), splat4(135135.0f));
-    float4 t = select4((lane4)(a > splat4(5.0f)), splat4(1.0f), num / den);
+    float4 t = select4((lane4)(a > splat4(5.0f)), splat4(1.0f), num * oak_rcp4_fast(den));
     float4 signedT = (float4)(((lane4)t) | (((lane4)x) & 0x80000000u));
     return select4((lane4)(x != x), x, signedT);
 }
@@ -85,9 +98,9 @@ typedef struct {
     float settledMean[OAK_TRACE_LEVELS * OAK_OBSERVATION_LIMIT], settledSecond[OAK_TRACE_LEVELS * OAK_OBSERVATION_LIMIT];
     float control[OAK_OBSERVATION_LIMIT * OAK_CELL_STRIDE];
     uint32_t cellActive[2u * OAK_CELLS];
-    float chMean[OAK_OBSERVATION_LIMIT], chSecond[OAK_OBSERVATION_LIMIT], chAlpha[OAK_OBSERVATION_LIMIT], chBeta[OAK_OBSERVATION_LIMIT], chTrace[OAK_OBSERVATION_LIMIT], chEnergy[OAK_OBSERVATION_LIMIT];
+    float chMean[OAK_OBSERVATION_LIMIT], chSecond[OAK_OBSERVATION_LIMIT], chAlpha[OAK_OBSERVATION_LIMIT], chBeta[OAK_OBSERVATION_LIMIT], chTrace[OAK_OBSERVATION_LIMIT], chEnergy[OAK_OBSERVATION_LIMIT], chCorr[OAK_OBSERVATION_LIMIT];
     Channel rewardChannel, actorMeta[OAK_HEADS];
-    float headMean[OAK_ARMS], headSquare[OAK_ARMS], headWeight[OAK_ARMS], blockReward;
+    float headMean[OAK_ARMS], headSquare[OAK_ARMS], headWeight[OAK_ARMS], blockReward, obsCorr;
     uint32_t headBlocks[OAK_ARMS], activeHead, learner, blockSteps, blockCount, self;
     float actionSignal[OAK_ACTION_PARAMS];
     float actorCredit[OAK_POLICY_MAX], actorCreditStaging[OAK_POLICY_MAX], logit[OAK_POLICY_MAX];
@@ -119,6 +132,7 @@ static const uint8_t HEAD_SCALE[OAK_HEADS] = { SCALE_TD, SCALE_RAW, SCALE_RAW };
 static const uint8_t HEAD_NATURAL[OAK_HEADS] = { 0u, 1u, 0u };
 static const uint8_t HEAD_ASPIRE[OAK_HEADS] = { 1u, 1u, 0u };
 static const uint8_t HEAD_TRUST[OAK_HEADS] = { 0u, 0u, 1u };
+static const float HEAD_DECAY[OAK_HEADS] = { 0.5f, 0.75f, 0.875f };
 static const uint8_t TABLE_KEY[OAK_TABLE_ARMS] = { 0u, 1u, 0u, 1u, 0u };
 enum { TABLE_GREEDY, TABLE_FRONTIER, TABLE_PLAN, TABLE_CELLQ };
 static const uint8_t TABLE_MODE[OAK_TABLE_ARMS] = { TABLE_GREEDY, TABLE_GREEDY, TABLE_PLAN, TABLE_FRONTIER, TABLE_CELLQ };
@@ -215,10 +229,11 @@ static inline void dotRows4(const float *r0, const float *r1, const float *r2, c
         c1 = __builtin_elementwise_fma(oak_load4(r2 + k + 4u), x1, c1);
         d1 = __builtin_elementwise_fma(oak_load4(r3 + k + 4u), x1, d1);
     }
-    *o0 = oak_sum4(a0 + a1);
-    *o1 = oak_sum4(b0 + b1);
-    *o2 = oak_sum4(c0 + c1);
-    *o3 = oak_sum4(d0 + d1);
+    float4 s = oak_hsum4(a0 + a1, b0 + b1, c0 + c1, d0 + d1);
+    *o0 = s.x;
+    *o1 = s.y;
+    *o2 = s.z;
+    *o3 = s.w;
 }
 
 static inline void metaStep(Channel *c, float signal, float inverseAge, float metaRate, float decay, float betaFloor) {
@@ -313,20 +328,20 @@ static __attribute__((noinline)) void encode(OakAgent *a, const float *x, const 
         float4 mean = oak_load4(a->traceMean + c), second = oak_load4(a->traceSecond + c);
         float4 center = oak_load4(a->settledMean + c), spread = oak_load4(a->settledSecond + c);
         float4 sq = value * value;
-        mean = oak_keepFinite4(mean, mean + vMoment * (value - mean));
-        second = oak_keepFinite4(second, second + vMoment * (sq - second));
-        center = oak_keepFinite4(center, center + vSettle * (value - center));
-        spread = oak_keepFinite4(spread, spread + vSettle * (sq - spread));
+        mean = oak_keepFinite4(mean, __builtin_elementwise_fma(vMoment, value - mean, mean));
+        second = oak_keepFinite4(second, __builtin_elementwise_fma(vMoment, sq - second, second));
+        center = oak_keepFinite4(center, __builtin_elementwise_fma(vSettle, value - center, center));
+        spread = oak_keepFinite4(spread, __builtin_elementwise_fma(vSettle, sq - spread, spread));
         oak_store4(a->traceMean + c, mean);
         oak_store4(a->traceSecond + c, second);
         oak_store4(a->settledMean + c, center);
         oak_store4(a->settledSecond + c, spread);
-        float4 norm = oak_finiteOrZero4((value - mean) * oak_rsqrt4_fast(__builtin_elementwise_max(second - mean * mean, vZero) + vRidge));
+        float4 norm = oak_finiteOrZero4((value - mean) * oak_rsqrt4_fast(__builtin_elementwise_max(__builtin_elementwise_fma(-mean, mean, second), vZero) + vRidge));
         lane4 fc = cellCode4(norm, 1u), cc = cellCode4(norm, 0u);
         __builtin_memcpy(fineCode + observationCount + c, &fc, sizeof fc);
         vst1q_u32(coarseCode + observationCount + c, vaddq_u32((uint32x4_t)cc, vEight));
         float4 sd = value - center;
-        float4 sv = __builtin_elementwise_max(spread - center * center, vZero) + vRidge;
+        float4 sv = __builtin_elementwise_max(__builtin_elementwise_fma(-center, center, spread), vZero) + vRidge;
         lane4 sfin = oak_finite4(sd) & oak_finite4(sv);
         float4 sd2 = sd * sd, sq4 = vQuarter * sv;
         lane4 slt = sfin & (lane4)(sd < vZero) & (lane4)(sd2 > sq4);
@@ -465,16 +480,23 @@ static __attribute__((noinline)) void encode(OakAgent *a, const float *x, const 
         float4 actLow = { a->actionSignal[0], a->actionSignal[1], a->actionSignal[2], a->actionSignal[3] };
         float4 actHigh = { a->actionSignal[4], a->actionSignal[5], 0.0f, 0.0f };
         uint32_t hiAct = a->actionCount > 4u;
+        float maxCorr = 0.0f;
         for (o = 0u; o < observationCount; o++) {
-            float4 ch = splat4(x[o] - previous[o]);
+            float xo = x[o], po = previous[o];
+            float cc = a->chCorr[o];
+            cc = keepFinite(cc, fmaf(g.trackingRate, xo * po - cc, cc));
+            a->chCorr[o] = cc;
+            maxCorr = fmaxf(maxCorr, cc);
+            float4 ch = splat4(xo - po);
             float *ctrl = a->control + o * OAK_CELL_STRIDE;
             float4 c0 = oak_load4(ctrl);
-            oak_store4(ctrl, oak_keepFinite4(c0, c0 + vRate * (actLow * ch - c0)));
+            oak_store4(ctrl, oak_keepFinite4(c0, __builtin_elementwise_fma(vRate, __builtin_elementwise_fma(actLow, ch, -c0), c0)));
             if (hiAct) {
                 float4 c1 = oak_load4(ctrl + 4u);
-                oak_store4(ctrl + 4u, oak_keepFinite4(c1, c1 + vRate * (actHigh * ch - c1)));
+                oak_store4(ctrl + 4u, oak_keepFinite4(c1, __builtin_elementwise_fma(vRate, __builtin_elementwise_fma(actHigh, ch, -c1), c1)));
             }
         }
+        a->obsCorr = maxCorr >= 1.0f ? 1.0f : maxCorr * maxCorr;
     }
     uint32_t selfBits;
     __builtin_memcpy(&selfBits, obs + a->self, sizeof selfBits);
@@ -551,24 +573,24 @@ static __attribute__((noinline)) void perceive(OakAgent *a, const float *obs) {
         float4 trace = oak_load4(a->chTrace + o), energy = oak_load4(a->chEnergy + o);
         float4 sig = vx - mean;
         float4 mg = sig * trace;
-        float4 ge = oak_keepFinite4(energy, energy + vInvAge * (mg * mg - energy));
+        float4 ge = oak_keepFinite4(energy, __builtin_elementwise_fma(vInvAge, __builtin_elementwise_fma(mg, mg, -energy), energy));
         float4 db = vMetaRate * mg * oak_rsqrt4_fast(__builtin_elementwise_max(ge, vZero) + vInvAge);
         float4 fac = __builtin_elementwise_fma(db, __builtin_elementwise_fma(db, vHalf, vOne), vOne);
         float4 na = oak_keepFinite4(alpha, __builtin_elementwise_min(__builtin_elementwise_max(alpha * fac, vAlphaFloor), vOne));
-        float4 nh = oak_keepFinite4(trace, vOneMinusDecay * __builtin_elementwise_max(vZero, vOne - alpha) * trace + alpha * sig);
+        float4 nh = oak_keepFinite4(trace, __builtin_elementwise_fma(vOneMinusDecay * __builtin_elementwise_max(vZero, vOne - alpha), trace, alpha * sig));
         lane4 updMeta = fin & oak_finite4(sig);
         alpha = select4(updMeta, na, alpha);
         trace = select4(updMeta, nh, trace);
         energy = select4(updMeta, ge, energy);
         float4 rate = __builtin_elementwise_max(vFloorRate, alpha);
-        mean = select4(fin, oak_keepFinite4(mean, mean + rate * (vx - mean)), mean);
-        second = select4(fin, oak_keepFinite4(second, second + rate * (vx * vx - second)), second);
+        mean = select4(fin, oak_keepFinite4(mean, __builtin_elementwise_fma(rate, vx - mean, mean)), mean);
+        second = select4(fin, oak_keepFinite4(second, __builtin_elementwise_fma(rate, __builtin_elementwise_fma(vx, vx, -second), second)), second);
         oak_store4(a->chMean + o, mean);
         oak_store4(a->chSecond + o, second);
         oak_store4(a->chAlpha + o, alpha);
         oak_store4(a->chTrace + o, trace);
         oak_store4(a->chEnergy + o, energy);
-        float4 stdv = (vx - mean) * oak_rsqrt4(__builtin_elementwise_max(second - mean * mean, vZero) + vRidgeFloor);
+        float4 stdv = (vx - mean) * oak_rsqrt4(__builtin_elementwise_max(__builtin_elementwise_fma(-mean, mean, second), vZero) + vRidgeFloor);
         oak_store4(standardized + o, stdv);
         oak_store4(x + o, oak_finiteOrZero4(stdv));
     }
@@ -597,7 +619,7 @@ static __attribute__((noinline)) void perceive(OakAgent *a, const float *obs) {
         uint32_t o = 0u;
         for (; o + 4u <= observationCount; o += 4u) {
             float4 lv = oak_load4(level + o), st = oak_load4(standardized + o), ob = oak_load4(obs + o);
-            float4 next = lv + vRate * (st - lv);
+            float4 next = __builtin_elementwise_fma(vRate, st - lv, lv);
             float4 updated = select4(oak_finite4(ob), next, lv);
             oak_store4(level + o, updated);
             oak_store4(dst + o, oak_finiteOrZero4(updated));
@@ -631,7 +653,7 @@ static __attribute__((noinline)) void perceive(OakAgent *a, const float *obs) {
     }
     float *unit = x + inputs, *energies = a->unitEnergy + a->slot * OAK_UNITS;
     for (uint32_t j = 0u; j < OAK_UNITS; j += 4u) {
-        float sums[4], ens[4];
+        float4 ss[4], ee[4];
         for (uint32_t u = 0u; u < 4u; u++) {
             const float *weight = a->projection + (j + u) * OAK_FANIN;
             const uint16_t *blk = a->unitBlock + (j + u) * OAK_FANIN_BLOCKS;
@@ -649,11 +671,11 @@ static __attribute__((noinline)) void perceive(OakAgent *a, const float *obs) {
                 e2 = __builtin_elementwise_fma(i2, i2, e2);
                 e3 = __builtin_elementwise_fma(i3, i3, e3);
             }
-            sums[u] = oak_sum4((s0 + s1) + (s2 + s3));
-            ens[u] = oak_sum4((e0 + e1) + (e2 + e3));
+            ss[u] = (s0 + s1) + (s2 + s3);
+            ee[u] = (e0 + e1) + (e2 + e3);
         }
-        float4 sv = { sums[0], sums[1], sums[2], sums[3] };
-        float4 ev = { ens[0], ens[1], ens[2], ens[3] };
+        float4 sv = oak_hsum4(ss[0], ss[1], ss[2], ss[3]);
+        float4 ev = oak_hsum4(ee[0], ee[1], ee[2], ee[3]);
         oak_store4(unit + j, oak_tanh4(sv));
         oak_store4(energies + j, ev);
     }
@@ -1273,7 +1295,7 @@ static __attribute__((noinline)) void learn(OakAgent *a) {
         }
     }
     float *policy = headPolicy(a);
-    float4 policyDecay = decay;
+    float4 policyDecay = splat4(fmaf(a->obsCorr, HEAD_DECAY[a->learner] - OAK_ELIGIBILITY_DECAY, OAK_ELIGIBILITY_DECAY));
     float change[OAK_POLICY_MAX];
     float changeSquare = 0.0f;
     uint32_t d = 0u;
@@ -1308,10 +1330,11 @@ static __attribute__((noinline)) void learn(OakAgent *a) {
             h0 = __builtin_elementwise_fma(zd0, x0, h0);
             h1 = __builtin_elementwise_fma(zd1, x1, h1);
         }
-        change[0] = fmaf((float)policyTuples, a->actorCredit[0], oak_sum4(a0 + a1));
-        change[1] = fmaf((float)policyTuples, a->actorCredit[1], oak_sum4(b0 + b1));
-        change[2] = fmaf((float)policyTuples, a->actorCredit[2], oak_sum4(g0 + g1));
-        change[3] = fmaf((float)policyTuples, a->actorCredit[3], oak_sum4(h0 + h1));
+        float4 hs = oak_hsum4(a0 + a1, b0 + b1, g0 + g1, h0 + h1);
+        change[0] = fmaf((float)policyTuples, a->actorCredit[0], hs.x);
+        change[1] = fmaf((float)policyTuples, a->actorCredit[1], hs.y);
+        change[2] = fmaf((float)policyTuples, a->actorCredit[2], hs.z);
+        change[3] = fmaf((float)policyTuples, a->actorCredit[3], hs.w);
         changeSquare = fmaf(change[0], change[0], changeSquare);
         changeSquare = fmaf(change[1], change[1], changeSquare);
         changeSquare = fmaf(change[2], change[2], changeSquare);
@@ -1369,29 +1392,69 @@ static __attribute__((noinline)) void learn(OakAgent *a) {
             float4 creditHigh = { a->actorCredit[4], a->actorCredit[5], 0.0f, 0.0f };
             float4 stepLow = creditLow * policyStep, stepHigh = creditHigh * policyStep;
             float *cp = headCellBase(a);
-            for (uint32_t t = 0u; t < policyTuples; t++) {
-                if (t + 4u < policyTuples) {
-                    uint32_t pIdx = previousCells[t + 4u];
-                    if (valueDelta != 0.0f || qStep != 0.0f) __builtin_prefetch(vq + pIdx, 1, 1);
-                    __builtin_prefetch(cp + pIdx * OAK_CELL_STRIDE, 1, 1);
+            if (valueDelta != 0.0f && qStep != 0.0f) {
+                if (actions <= 4u) {
+                    for (uint32_t t = 0u; t < policyTuples; t++) {
+                        if (t + 4u < policyTuples) {
+                            uint32_t pIdx = previousCells[t + 4u];
+                            __builtin_prefetch(vq + pIdx, 1, 1);
+                            __builtin_prefetch(cp + pIdx * OAK_CELL_STRIDE, 1, 1);
+                        }
+                        uint32_t idx = previousCells[t];
+                        CellVQ *s = vq + idx;
+                        float nv = s->value + valueDelta;
+                        s->value = isfinite(nv) ? nv : s->value;
+                        float nq = s->q[qAct] + qStep;
+                        s->q[qAct] = isfinite(nq) ? nq : s->q[qAct];
+                        float *c = cp + idx * OAK_CELL_STRIDE;
+                        float4 low = oak_load4(c), nextLow = low + stepLow;
+                        oak_store4(c, select4(oak_finite4(nextLow), nextLow, low));
+                    }
+                } else {
+                    for (uint32_t t = 0u; t < policyTuples; t++) {
+                        if (t + 4u < policyTuples) {
+                            uint32_t pIdx = previousCells[t + 4u];
+                            __builtin_prefetch(vq + pIdx, 1, 1);
+                            __builtin_prefetch(cp + pIdx * OAK_CELL_STRIDE, 1, 1);
+                        }
+                        uint32_t idx = previousCells[t];
+                        CellVQ *s = vq + idx;
+                        float nv = s->value + valueDelta;
+                        s->value = isfinite(nv) ? nv : s->value;
+                        float nq = s->q[qAct] + qStep;
+                        s->q[qAct] = isfinite(nq) ? nq : s->q[qAct];
+                        float *c = cp + idx * OAK_CELL_STRIDE;
+                        float4 low = oak_load4(c), nextLow = low + stepLow;
+                        float4 high = oak_load4(c + 4u), nextHigh = high + stepHigh;
+                        oak_store4(c, select4(oak_finite4(nextLow), nextLow, low));
+                        oak_store4(c + 4u, select4(oak_finite4(nextHigh), nextHigh, high));
+                    }
                 }
-                uint32_t idx = previousCells[t];
-                if (valueDelta != 0.0f) {
-                    float *v = &vq[idx].value;
-                    float next = *v + valueDelta;
-                    *v = isfinite(next) ? next : *v;
-                }
-                if (qStep != 0.0f) {
-                    float *q = &vq[idx].q[qAct];
-                    float next = *q + qStep;
-                    *q = isfinite(next) ? next : *q;
-                }
-                float *c = cp + idx * OAK_CELL_STRIDE;
-                float4 low = oak_load4(c), nextLow = low + stepLow;
-                oak_store4(c, select4(oak_finite4(nextLow), nextLow, low));
-                if (actions > 4u) {
-                    float4 high = oak_load4(c + 4u), nextHigh = high + stepHigh;
-                    oak_store4(c + 4u, select4(oak_finite4(nextHigh), nextHigh, high));
+            } else {
+                for (uint32_t t = 0u; t < policyTuples; t++) {
+                    if (t + 4u < policyTuples) {
+                        uint32_t pIdx = previousCells[t + 4u];
+                        if (valueDelta != 0.0f || qStep != 0.0f) __builtin_prefetch(vq + pIdx, 1, 1);
+                        __builtin_prefetch(cp + pIdx * OAK_CELL_STRIDE, 1, 1);
+                    }
+                    uint32_t idx = previousCells[t];
+                    if (valueDelta != 0.0f) {
+                        float *v = &vq[idx].value;
+                        float next = *v + valueDelta;
+                        *v = isfinite(next) ? next : *v;
+                    }
+                    if (qStep != 0.0f) {
+                        float *q = &vq[idx].q[qAct];
+                        float next = *q + qStep;
+                        *q = isfinite(next) ? next : *q;
+                    }
+                    float *c = cp + idx * OAK_CELL_STRIDE;
+                    float4 low = oak_load4(c), nextLow = low + stepLow;
+                    oak_store4(c, select4(oak_finite4(nextLow), nextLow, low));
+                    if (actions > 4u) {
+                        float4 high = oak_load4(c + 4u), nextHigh = high + stepHigh;
+                        oak_store4(c + 4u, select4(oak_finite4(nextHigh), nextHigh, high));
+                    }
                 }
             }
             if (valueDelta != 0.0f) {
@@ -1453,14 +1516,15 @@ static __attribute__((noinline)) void learn(OakAgent *a) {
     const float *energies = a->unitEnergy + (1u - a->slot) * OAK_UNITS;
     const float *px = permInputs(a, 1u - a->slot);
     float signals[OAK_UNITS];
-    float4 vCritic = splat4(critic), vActor = splat4(actor), vTrack = splat4(g.trackingRate), vOne = splat4(1.0f);
+    float4 vCritic = splat4(critic), vActor = splat4(actor), vTrack = splat4(g.trackingRate), vOne = splat4(1.0f), vZero = splat4(0.0f);
     for (uint32_t j = 0u; j < OAK_UNITS; j += 4u) {
         float4 cr = splat4(0.0f);
         for (uint32_t aidx = 0u; aidx < actions; aidx++)
             cr = __builtin_elementwise_fma(splat4(a->actorCredit[aidx]), oak_load4(policy + aidx * count + inputs + j), cr);
         float4 u = oak_load4(unit + j);
+        float4 ev = oak_load4(energies + j);
         float4 num = __builtin_elementwise_fma(vCritic, oak_load4(a->valueWeight + inputs + j), vActor * cr) * (vOne - u * u) * vTrack;
-        oak_store4(signals + j, oak_finiteOrZero4(num / oak_load4(energies + j)));
+        oak_store4(signals + j, select4((lane4)(ev > vZero), oak_finiteOrZero4(num * oak_rcp4_fast(ev)), vZero));
     }
     for (uint32_t j = 0u; j < OAK_UNITS; j++) {
         float signal = signals[j];
