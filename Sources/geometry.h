@@ -55,7 +55,7 @@ _Static_assert(OAK_CELL_STRIDE > OAK_POLICY_MAX, "");
 
 typedef struct {
     uint32_t projected, inputs, features;
-    float trackingRate, metaRate, ridgeFloor;
+    float trackingRate, metaRate, ridgeFloor, hiddenRate;
 } OakGeometry;
 
 static inline OakGeometry oak_geometry(uint32_t obs) {
@@ -66,6 +66,7 @@ static inline OakGeometry oak_geometry(uint32_t obs) {
     g.trackingRate = 1.0f / (float)OAK_FEATURE_TIMESCALE;
     g.metaRate = g.trackingRate / (float)(OAK_FEATURE_TIMESCALE + OAK_ACTION_PARAMS);
     g.ridgeFloor = 1.0f / (float)(2u * OAK_CAPACITY);
+    g.hiddenRate = sqrtf(g.trackingRate * g.ridgeFloor);
     return g;
 }
 

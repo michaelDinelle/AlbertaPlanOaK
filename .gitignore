@@ -1,4 +1,5 @@
 /.build/
+/fleet
 /.swiftpm/
 
 /.oak-benchmarks/
