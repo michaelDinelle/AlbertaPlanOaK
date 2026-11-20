@@ -18,9 +18,9 @@ Recorded on a binned M4 Max.
 
 ## Best recording
 
-Capacity 64, declared once in `Sources/geometry.h`: standardized observations on a seven-level trace ladder, 64 learned units of fan-in 32, and per step 23 hashed tuple cells plus two cells per observation channel on a 16,384-slot table, feeding three actor heads and five table arms that a Thompson-sampling bandit chooses among every 512 steps; 5,670,144 bytes of state per lane. 11,269,389 SPS on the 245-environment schedule.
+Capacity 64, declared once in `Sources/geometry.h`: standardized observations on a seven-level trace ladder, 64 learned units of fan-in 32, and per step 23 hashed tuple cells plus two cells per observation channel on a 16,384-slot table, feeding three actor heads and five table arms that a Thompson-sampling bandit chooses among every 512 steps; 5,670,144 bytes of state per lane. 11,725,835 SPS on the 245-environment schedule.
 
-Reward per step over the final 100,928 steps of the 1,000,000-step best recording (`8066eb64c33ba06e0c5da6ed21c11d878dbbf0d8`), all 245 environments with 32 seeds each (7,840 lanes), with the Oracle, Random and PPO baselines on the same seeds. Mean over seeds; Score = (OaK − Random) / (Oracle − Random), unclipped.
+Reward per step over the final 100,928 steps of the 1,000,000-step best recording (`a8e2e71057b22b8b874a5d68c4c2d4b4b2fd0243`), all 245 environments with 32 seeds each (7,840 lanes), with the Oracle, Random and PPO baselines on the same seeds. Mean over seeds; Score = (OaK − Random) / (Oracle − Random), unclipped.
 
 | Environment | Category | OaK | Oracle | Random | PPO | Score |
 |---|---|---:|---:|---:|---:|---:|
@@ -34,16 +34,16 @@ Reward per step over the final 100,928 steps of the 1,000,000-step best recordin
 | AliasedRing-8-cont-v0 | memory | 0.1495 | 0.1861 | -0.0056 | 0.0160 | 0.8088 |
 | AliasedRing-32-cont-v0 | memory | 0.0249 | 0.0573 | -0.0386 | -2.198e-06 | 0.6621 |
 | AliasedRing-128-cont-v0 | memory | 0.0029 | 0.0153 | -0.0471 | -6.533e-06 | 0.8009 |
-| Ancients-1v1-cont-v0 | games | -0.0001548 | 7.803e-05 | -0.000153 | -0.0001533 | -0.0080 |
-| Ancients-1v1-fog-cont-v0 | games | -0.0001356 | 5.295e-05 | -0.000135 | -0.0001328 | -0.0033 |
-| Ancients-3v3-cont-v0 | games | -2.663e-05 | 1.115e-05 | -2.415e-05 | -2.539e-05 | -0.0702 |
-| Ancients-5v5-cont-v0 | games | -1.084e-05 | 1.3e-05 | -9.289e-06 | -5.883e-06 | -0.0694 |
-| Ancients-5v5-league-cont-v0 | games | -1.765e-05 | 5.573e-06 | -1.362e-05 | -1.208e-05 | -0.2097 |
+| Ancients-1v1-cont-v0 | games | -0.0001536 | 7.803e-05 | -0.000153 | -0.0001533 | -0.0027 |
+| Ancients-1v1-fog-cont-v0 | games | -0.0001341 | 5.295e-05 | -0.000135 | -0.0001328 | 0.0049 |
+| Ancients-3v3-cont-v0 | games | -2.415e-05 | 1.115e-05 | -2.415e-05 | -2.539e-05 | 0 |
+| Ancients-5v5-cont-v0 | games | -9.598e-06 | 1.3e-05 | -9.289e-06 | -5.883e-06 | -0.0139 |
+| Ancients-5v5-league-cont-v0 | games | -1.455e-05 | 5.573e-06 | -1.362e-05 | -1.208e-05 | -0.0484 |
 | Backgammon-random-cont-v0 | games | 2.663e-05 | 0.0011 | 5.573e-05 | 1.889e-05 | -0.0273 |
 | Backgammon-pubeval-cont-v0 | games | -2.756e-05 | 0.0002263 | -0.0009221 | -1.858e-06 | 0.7789 |
 | Backgammon-league-cont-v0 | games | -3.158e-05 | 0.0002341 | -0.000936 | -2.787e-06 | 0.7730 |
-| Arm2-reach-cont-v0 | control | 0.0013 | 0.0722 | 7.732e-07 | 0.000626 | 0.0183 |
-| Arm2-payload-cont-v0 | control | 0.0009848 | 0.0576 | -1.959e-07 | 0.0007045 | 0.0171 |
+| Arm2-reach-cont-v0 | control | 0.0014 | 0.0722 | 7.732e-07 | 0.000626 | 0.0193 |
+| Arm2-payload-cont-v0 | control | 0.0011 | 0.0576 | -1.959e-07 | 0.0007045 | 0.0185 |
 | Bandit-3-cont-v0 | decision | 0.8290 | 0.8300 | -0.0862 | 0.8298 | 0.9990 |
 | Bandit-6-cont-v0 | decision | 1.1804 | 1.1810 | -0.0162 | 1.1802 | 0.9995 |
 | Bandit-3-drift-cont-v0 | decision | 0.9997 | 1.0084 | -0.0575 | 0.9926 | 0.9918 |
@@ -93,10 +93,10 @@ Reward per step over the final 100,928 steps of the 1,000,000-step best recordin
 | DeepSea-32-cont-v0 | navigation | 0.0251 | 0.0321 | -0.0001561 | -1.099e-07 | 0.7824 |
 | DeepSea-16-slip-cont-v0 | navigation | 0.0258 | 0.0306 | -0.0003114 | -3.302e-05 | 0.8449 |
 | Eleven-drill-cont-v0 | games | 0 | 0.0029 | 3.716e-06 | 2.632e-05 | -0.0013 |
-| Eleven-1v1-cont-v0 | games | -0.0002115 | 0.0009245 | -0.0003006 | -0.0002867 | 0.0728 |
-| Eleven-3v3-cont-v0 | games | -0.0001948 | 0.0007995 | -0.0001824 | -0.0002378 | -0.0126 |
-| Eleven-11v11-hard-cont-v0 | games | -5.233e-05 | 0.0003421 | -5.821e-05 | -4.087e-05 | 0.0147 |
-| Eleven-11v11-league-cont-v0 | games | -9.877e-05 | 0.0003409 | -4.737e-05 | -2.88e-05 | -0.1324 |
+| Eleven-1v1-cont-v0 | games | -0.0002496 | 0.0009245 | -0.0003006 | -0.0002867 | 0.0417 |
+| Eleven-3v3-cont-v0 | games | -0.0002177 | 0.0007995 | -0.0001824 | -0.0002378 | -0.0360 |
+| Eleven-11v11-hard-cont-v0 | games | -5.047e-05 | 0.0003421 | -5.821e-05 | -4.087e-05 | 0.0193 |
+| Eleven-11v11-league-cont-v0 | games | -7.462e-05 | 0.0003409 | -4.737e-05 | -2.88e-05 | -0.0702 |
 | Dungeon-6-lit-cont-v0 | world | 0.0172 | 1.3378 | 0.0068 | 0.0041 | 0.0078 |
 | Dungeon-6-dark-cont-v0 | world | 0.0150 | 1.3570 | 0.0072 | 0.0039 | 0.0058 |
 | Dungeon-6-shuffle-cont-v0 | world | 0.0140 | 1.3311 | 0.0073 | 0.0045 | 0.0051 |
@@ -189,16 +189,16 @@ Reward per step over the final 100,928 steps of the 1,000,000-step best recordin
 | Patience-5-cont-v0 | memory | 1.0000 | 1.0000 | 0.1306 | 0.9980 | 0.9999 |
 | Patience-50-cont-v0 | memory | 0.9927 | 1.0002 | 0.0500 | 0.7982 | 0.9921 |
 | Patience-500-cont-v0 | memory | 0.1000 | 1.0007 | 0.0500 | 0.2407 | 0.0526 |
-| Pendulum-cont-v0 | control | -0.0025 | 0 | -3.8890 | -0.5678 | 0.9994 |
-| Pendulum-slip-cont-v0 | control | -0.0039 | -0.0044 | -3.8906 | -0.0019 | 1.0001 |
-| Pendulum-position-cont-v0 | control | -0.0123 | 0 | -3.9155 | -2.7175 | 0.9968 |
+| Pendulum-cont-v0 | control | -0.0031 | 0 | -3.8890 | -0.5678 | 0.9992 |
+| Pendulum-slip-cont-v0 | control | -0.0046 | -0.0044 | -3.8906 | -0.0019 | 0.9999 |
+| Pendulum-position-cont-v0 | control | -0.0035 | 0 | -3.9155 | -2.7175 | 0.9991 |
 | Permuted-fixed-cont-v0 | prediction | 1.0000 | 1.0000 | 0.2500 | 0.9998 | 1.0000 |
 | Permuted-recode-cont-v0 | prediction | 0.9743 | 1.0000 | 0.2499 | 0.4462 | 0.9657 |
-| HalfCheetah-cont-v0 | control | 4.3398 | 5.7438 | -0.3103 | 4.6826 | 0.7681 |
-| HalfCheetah-friction-cont-v0 | control | 3.9427 | 4.1504 | -0.2726 | 4.1929 | 0.9531 |
-| Reacher-cont-v0 | control | -0.1841 | -0.0889 | -0.8574 | -0.3129 | 0.8761 |
-| InvertedDoublePendulum-cont-v0 | control | 8.4995 | 9.3600 | 7.5127 | 9.2823 | 0.5342 |
-| Hopper-cont-v0 | control | 1.7743 | 1.9359 | 0.7865 | 2.8700 | 0.8594 |
+| HalfCheetah-cont-v0 | control | 4.5730 | 5.7438 | -0.3103 | 4.6826 | 0.8066 |
+| HalfCheetah-friction-cont-v0 | control | 4.8913 | 4.1504 | -0.2726 | 4.1929 | 1.1675 |
+| Reacher-cont-v0 | control | -0.1833 | -0.0889 | -0.8574 | -0.3129 | 0.8772 |
+| InvertedDoublePendulum-cont-v0 | control | 8.6396 | 9.3600 | 7.5127 | 9.2823 | 0.6100 |
+| Hopper-cont-v0 | control | 1.8698 | 1.9359 | 0.7865 | 2.8700 | 0.9426 |
 | PocketCube-3-cont-v0 | puzzles | 0.3293 | 0.3333 | 0.0007654 | 0.1645 | 0.9880 |
 | PocketCube-random-cont-v0 | puzzles | 0 | 0.0937 | 3.096e-07 | 0 | -3.303e-06 |
 | KuhnPoker-random-cont-v0 | games | 0.4586 | 0.4217 | -0.0014 | 0.4588 | 1.0872 |
@@ -210,8 +210,8 @@ Reward per step over the final 100,928 steps of the 1,000,000-step best recordin
 | Pommerman-FFA-collapse-cont-v0 | games | -0.0007902 | 0.0006688 | -0.0087 | -0.0007443 | 0.8447 |
 | Pommerman-FFA-league-cont-v0 | games | -0.0005121 | 0.0002397 | -0.0086 | -0.0005093 | 0.9154 |
 | PuddleWorld-cont-v0 | control | 1.2919 | 3.7150 | -4.6625 | 2.5397 | 0.7108 |
-| Quadrotor2D-hover-cont-v0 | control | -9.9198 | -0.1508 | -16.5785 | -2.0091 | 0.4053 |
-| Quadrotor2D-gust-cont-v0 | control | -10.4475 | -0.1545 | -16.6909 | -3.6021 | 0.3776 |
+| Quadrotor2D-hover-cont-v0 | control | -9.1623 | -0.1508 | -16.5785 | -2.0091 | 0.4514 |
+| Quadrotor2D-gust-cont-v0 | control | -9.8678 | -0.1545 | -16.6909 | -3.6021 | 0.4126 |
 | Recite-4-cont-v0 | memory | 0.2832 | 0.5000 | 0.1251 | 0.1249 | 0.4218 |
 | Recite-16-cont-v0 | memory | 0.1701 | 0.5000 | 0.1249 | 0.1252 | 0.1205 |
 | Regression-8-cont-v0 | prediction | 0.7244 | 1.0000 | 0.1994 | 0.8064 | 0.6558 |
@@ -251,16 +251,16 @@ Reward per step over the final 100,928 steps of the 1,000,000-step best recordin
 | SubsetParity-16-1-cont-v0 | prediction | 1.0000 | 1.0000 | 0.4999 | 0.9999 | 1.0000 |
 | SubsetParity-8-2-cont-v0 | prediction | 0.9995 | 1.0000 | 0.5005 | 0.7814 | 0.9991 |
 | SubsetParity-16-2-cont-v0 | prediction | 0.9993 | 1.0000 | 0.4998 | 0.8277 | 0.9986 |
-| IDBD-20-5-cont-v0 | prediction | -7.1036 | 0 | -90.3129 | -7.7556 | 0.9213 |
-| SlowRegression-20-15-cont-v0 | prediction | -5.4098 | 0 | -195.7283 | -1.7308 | 0.9724 |
-| RateTracking-cont-v0 | prediction | -4.6624 | -3.5112 | -12.8362 | -5.4200 | 0.8765 |
+| IDBD-20-5-cont-v0 | prediction | -7.0128 | 0 | -90.3129 | -7.7556 | 0.9223 |
+| SlowRegression-20-15-cont-v0 | prediction | -5.0933 | 0 | -195.7283 | -1.7308 | 0.9740 |
+| RateTracking-cont-v0 | prediction | -4.6442 | -3.5112 | -12.8362 | -5.4200 | 0.8785 |
 | Taxi-cont-v0 | navigation | 0.5643 | 0.5714 | -3.9535 | -1.2143 | 0.9984 |
-| Tetris-NES-A0-cont-v0 | puzzles | 0.0086 | 11.2609 | 5.48e-05 | 7.803e-05 | 0.000757 |
-| Tetris-NES-A19-cont-v0 | puzzles | 0.0065 | 15.1577 | 0.0025 | 0.0020 | 0.0002622 |
+| Tetris-NES-A0-cont-v0 | puzzles | 0.0106 | 11.2609 | 5.48e-05 | 7.803e-05 | 0.0009369 |
+| Tetris-NES-A19-cont-v0 | puzzles | 0.0073 | 15.1577 | 0.0025 | 0.0020 | 0.0003201 |
 | Tiger-85-cont-v0 | decision | -0.0441 | 0.1078 | -3.0314 | -0.3725 | 0.9516 |
 | Tiger-60-cont-v0 | decision | -0.1005 | -0.0815 | -3.0324 | -1.7308 | 0.9936 |
-| Tracking-99-cont-v0 | control | -0.2706 | -0.0201 | -3.9838 | -0.4238 | 0.9368 |
-| Tracking-999-cont-v0 | control | -0.1537 | -0.0021 | -3.9729 | -1.7777 | 0.9618 |
+| Tracking-99-cont-v0 | control | -0.2793 | -0.0201 | -3.9838 | -0.4238 | 0.9346 |
+| Tracking-999-cont-v0 | control | -0.1525 | -0.0021 | -3.9729 | -1.7777 | 0.9621 |
 | Umbrella-4-cont-v0 | memory | 0.2503 | 0.2508 | 0.00067 | 0.2503 | 0.9979 |
 | Umbrella-16-cont-v0 | memory | 0.0603 | 0.0622 | -0.0003022 | 0.0572 | 0.9705 |
 | Umbrella-64-cont-v0 | memory | 3.839e-05 | 0.0149 | -0.0007375 | -0.0065 | 0.0496 |
