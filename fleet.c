@@ -66,6 +66,7 @@ static char *readAll(const char *p, size_t *len) {
     fseek(f, 0, SEEK_END); long sz = ftell(f); rewind(f); char *b = xmal((size_t)sz + 1u);
     if (sz > 0 && fread(b, 1u, (size_t)sz, f) != (size_t)sz) die("short read %s", p); b[sz] = '\0'; fclose(f); if (len) *len = (size_t)sz; return b;
 }
+static void preadAll(int fd, void *b, size_t n, off_t o, const char *p) { for (size_t g = 0u; g < n; ) { ssize_t r = pread(fd, (char *)b + g, n - g, o + (off_t)g); if (r <= 0) { if (r < 0 && errno == EINTR) continue; die("short read %s", p); } g += (size_t)r; } }
 static char *readLine(const char *p) { char *s = readAll(p, NULL), *nl = strpbrk(s, "\r\n"); if (nl) *nl = '\0'; return s; }
 static void writeAll(const char *p, const void *d, size_t n) { FILE *f = fopen(p, "wb"); if (!f) die("write %s: %s", p, strerror(errno)); if ((n && fwrite(d, 1u, n, f) != n) || fclose(f)) die("write %s", p); }
 static void copyFast(const char *s, const char *d) { unlink(d); if (!clonefile(s, d, 0)) return; size_t n = 0u; char *b = readAll(s, &n); writeAll(d, b, n); free(b); struct stat st; if (!stat(s, &st)) chmod(d, st.st_mode & 0777); }
@@ -255,10 +256,11 @@ static void genCatalog(const char *tree) {
 }
 
 static char *tcFingerprint(void) {
+    static char *TC_CACHE; if (TC_CACHE) return xdup(TC_CACHE);
     char *ca[] = { "clang","-###","-x","c","-c","/dev/null","-o","/dev/null",NULL }, *la[] = { "ld","-v",NULL }, *dr = NULL, *lv = NULL, *o = NULL; size_t l = 0u;
     if (runProc(ca, NULL, &dr, 2, true)) die("clang probe"); const char *is = strstr(dr, "\"-isysroot\" \""); if (!is) die("isysroot");
     is += 13; char *rs = xndup(is, (size_t)(strchr(is, '"') - is)), res[PATH_MAX]; if (!realpath(rs, res)) snprintf(res, sizeof res, "%s", rs); free(rs);
-    runProc(la, NULL, &lv, 2, true); FILE *m = open_memstream(&o, &l); fputs(dr, m); fputs(res, m); fputs(lv, m); fclose(m); free(dr); free(lv); return o;
+    runProc(la, NULL, &lv, 2, true); FILE *m = open_memstream(&o, &l); fputs(dr, m); fputs(res, m); fputs(lv, m); fclose(m); free(dr); free(lv); return xdup(TC_CACHE = o);
 }
 typedef struct { size_t sz; char *src, *dst; } CJob;
 typedef struct { CJob *j; size_t n; _Atomic size_t nxt; char **fl; size_t nf; const char *tree; pid_t pid; _Atomic int fail; } CPool;
@@ -268,30 +270,34 @@ static void *ccWork(void *arg) {
     for (;;) { size_t i = __c11_atomic_fetch_add(&p->nxt, 1u, __ATOMIC_RELAXED); if (i >= p->n || __c11_atomic_load(&p->fail, __ATOMIC_RELAXED)) break; char *tmp = pf("%s.%d.%zu", p->j[i].dst, (int)p->pid, i); av[2u + p->nf] = p->j[i].src; av[4u + p->nf] = tmp; if (runProc(av, p->tree, NULL, 0, false) || rename(tmp, p->j[i].dst)) { unlink(tmp); __c11_atomic_store(&p->fail, 1, __ATOMIC_RELAXED); break; } }
     free(av); return NULL;
 }
+static void runJobs(CJob *ms, size_t nm, char **fl, size_t nf, const char *tree) {
+    if (!nm) return; qsort(ms, nm, sizeof *ms, cmpJob); long nc = sysconf(_SC_NPROCESSORS_ONLN); size_t nt = (size_t)(nc < 1 ? 1 : nc); if (nt > nm) nt = nm;
+    CPool pool = { ms, nm, 0u, fl, nf, tree, getpid(), 0 }; pthread_t *ts = xcal(nt, sizeof *ts);
+    for (size_t t = 0u; t < nt; t++) pthread_create(&ts[t], NULL, ccWork, &pool); for (size_t t = 0u; t < nt; t++) pthread_join(ts[t], NULL); free(ts); if (pool.fail) die("compile failed");
+}
 static void hashGroup(const char *tree, const char *bk, size_t bl, const char *const *ps, size_t n, uint8_t o[32]) { CC_SHA256_CTX c; CC_SHA256_Init(&c); CC_SHA256_Update(&c, bk, (CC_LONG)bl); for (size_t i = 0u; i < n; i++) hashEntry(&c, tree, ps[i]); CC_SHA256_Final(o, &c); }
 static void buildTree(const char *tree, bool verb) {
-    mkdirP(pf("%s/.build", tree)); mkdirP(pf("%s/.build/cache/obj", REPO)); mkdirP(pf("%s/.build/cache/thinlto", REPO)); genCatalog(tree);
+    mkdirP(pf("%s/.build", tree)); mkdirP(pf("%s/.build/cache/obj", REPO)); mkdirP(pf("%s/.build/cache/thinlto", REPO)); mkdirP(pf("%s/.build/cache/cat", REPO));
     static const char ORD[] = "_oak_act\n_perceive\n_encode\n_evaluate\n_learn\n_learnTable\n_dynaSweep\n_sampleAction\n_planAction\n_rotate\n_worker\n_env_step\n";
     writeAll(pf("%s/.build/hot.order", tree), ORD, sizeof ORD - 1u); uint64_t cl = 128u; size_t cls = sizeof cl, bkl = 0u, nm = 0u; sysctlbyname("hw.cachelinesize", &cl, &cls, NULL, 0u);
-    char af[48], *tc = tcFingerprint(), *bk = NULL; snprintf(af, sizeof af, "-falign-functions=%llu", (unsigned long long)cl);
+    char af[48], *tc = tcFingerprint(), *bk = NULL, catDg[65], catKey[65], catH[PATH_MAX], catA[PATH_MAX]; snprintf(af, sizeof af, "-falign-functions=%llu", (unsigned long long)cl);
+    const char *ce[] = { "Sources/env.c","Sources/env.h","Sources/rng.h","Sources/portable.h","Sources/envs" }; digestEntries(tree, ce, 5u, catDg);
+    CC_SHA256_CTX khc; uint8_t khr[32]; CC_SHA256_Init(&khc); CC_SHA256_Update(&khc, catDg, 64u); CC_SHA256_Update(&khc, tc, (CC_LONG)strlen(tc)); CC_SHA256_Update(&khc, af, (CC_LONG)strlen(af)); CC_SHA256_Update(&khc, "lto-cat", 7u); CC_SHA256_Final(khr, &khc); hexEnc(khr, 32u, catKey); catKey[32] = '\0';
+    snprintf(catH, sizeof catH, "%s/.build/cache/cat/%s.h", REPO, catKey); snprintf(catA, sizeof catA, "%s/.build/cache/cat/%s.lst", REPO, catKey);
     char *fl[] = { "-O3","-mcpu=apple-m4","-flto=thin",af,"-fno-fast-math","-ffp-contract=off","-Werror=double-promotion","-Wall","-Wextra","-ISources" }; size_t nf = sizeof fl / sizeof fl[0];
+    SV objs = {0}; bool catOk = isKind(catH, S_IFREG) && isKind(catA, S_IFREG);
+    if (catOk) { copyFast(catH, pf("%s/.build/catalog.h", tree)); char *ls = readAll(catA, NULL); for (char *p = ls, *nl; *p; p = nl ? nl + 1 : p + strlen(p)) { nl = strchr(p, '\n'); if (nl) *nl = '\0'; if (*p) { if (!isKind(p, S_IFREG)) catOk = false; else svAdd(&objs, xdup(p)); } } free(ls); if (!catOk) svFree(&objs); }
+    if (!catOk) {
+        genCatalog(tree); SV tS = {0}; listExt(pf("%s/.build/catalog", tree), ".c", ".build/catalog", &tS); CJob *cj = xcal(tS.n, sizeof *cj); size_t ntj = 0u, ll = 0u; char *lb = NULL; FILE *lm = open_memstream(&lb, &ll);
+        for (size_t i = 0u; i < tS.n; i++) { size_t sz = 0u; char *d = readAll(pf("%s/%s", tree, tS.v[i]), &sz), hex[65]; uint8_t r[32]; CC_SHA256_CTX c; CC_SHA256_Init(&c); CC_SHA256_Update(&c, catKey, 32u); CC_SHA256_Update(&c, tS.v[i], (CC_LONG)strlen(tS.v[i])); CC_SHA256_Update(&c, d, (CC_LONG)sz); CC_SHA256_Final(r, &c); free(d); hexEnc(r, 32u, hex); hex[32] = '\0'; char *dst = xdup(pf("%s/.build/cache/obj/%s.o", REPO, hex)); svAdd(&objs, dst); fprintf(lm, "%s\n", dst); if (!isKind(dst, 0)) cj[ntj++] = (CJob){ sz, xdup(tS.v[i]), xdup(dst) }; }
+        fclose(lm); runJobs(cj, ntj, fl, nf, tree); for (size_t i = 0u; i < ntj; i++) { free(cj[i].src); free(cj[i].dst); } free(cj); svFree(&tS);
+        char *tmpL = xdup(pf("%s.%d", catA, (int)getpid())), *tmpH = xdup(pf("%s.%d", catH, (int)getpid())); copyFast(pf("%s/.build/catalog.h", tree), tmpH); writeAll(tmpL, lb, ll); free(lb); if (rename(tmpH, catH) || rename(tmpL, catA)) { unlink(tmpH); unlink(tmpL); die("cat cache"); } free(tmpL); free(tmpH);
+    }
     FILE *bm = open_memstream(&bk, &bkl); fputs(tc, bm); fputc('\0', bm); free(tc); for (size_t i = 0u; i < nf; i++) { fputs(fl[i], bm); fputc('\0', bm); } fclose(bm);
-    const char *ehp[] = { "Sources/env.h","Sources/rng.h","Sources/portable.h" }; uint8_t eh[32], ch[32]; hashGroup(tree, bk, bkl, ehp, 3u, eh);
-    SV cH = {0}, cS = {0}, tS = {0}, objs = {0}; listExt(pf("%s/Sources", tree), ".h", "Sources", &cH); svAdd(&cH, xdup(".build/catalog.h")); hashGroup(tree, bk, bkl, (const char *const *)cH.v, cH.n, ch); free(bk); svFree(&cH);
-    listExt(pf("%s/Sources", tree), ".c", "Sources", &cS); listExt(pf("%s/.build/catalog", tree), ".c", ".build/catalog", &tS); CJob *ms = xcal(cS.n + tS.n, sizeof *ms);
-    for (int pass = 0; pass < 2; pass++) for (size_t i = 0u; i < (pass ? tS.n : cS.n); i++) {
-        const char *rel = (pass ? tS.v : cS.v)[i]; size_t l = 0u, sz = 0u; char *d = readAll(pf("%s/%s", tree, rel), &l), z = '\0', hex[65]; sz = l;
-        CC_SHA256_CTX c; CC_SHA256_Init(&c); CC_SHA256_Update(&c, pass ? eh : ch, 32u); CC_SHA256_Update(&c, rel, (CC_LONG)strlen(rel)); CC_SHA256_Update(&c, &z, 1u); CC_SHA256_Update(&c, d, (CC_LONG)l);
-        if (pass) { const char *inc = strstr(d, "#include \"../../Sources/envs/") + 16; char *er = xndup(inc, (size_t)(strchr(inc, '"') - inc)), *ed = readAll(pf("%s/%s", tree, er), &sz); CC_SHA256_Update(&c, &z, 1u); CC_SHA256_Update(&c, ed, (CC_LONG)sz); free(er); free(ed); }
-        uint8_t r[32]; CC_SHA256_Final(r, &c); free(d); hexEnc(r, 32u, hex); hex[32] = '\0'; char *dst = xdup(pf("%s/.build/cache/obj/%s.o", REPO, hex)); svAdd(&objs, dst); if (!isKind(dst, 0)) ms[nm++] = (CJob){ sz, xdup(rel), xdup(dst) };
-    }
-    svFree(&cS); svFree(&tS);
-    if (nm) {
-        qsort(ms, nm, sizeof *ms, cmpJob); long nc = sysconf(_SC_NPROCESSORS_ONLN); size_t nt = (size_t)(nc < 1 ? 1 : nc); if (nt > nm) nt = nm;
-        CPool pool = { ms, nm, 0u, fl, nf, tree, getpid(), 0 }; pthread_t *ts = xcal(nt, sizeof *ts);
-        for (size_t t = 0u; t < nt; t++) pthread_create(&ts[t], NULL, ccWork, &pool); for (size_t t = 0u; t < nt; t++) pthread_join(ts[t], NULL); free(ts); if (pool.fail) die("compile failed");
-    }
-    for (size_t i = 0u; i < nm; i++) { free(ms[i].src); free(ms[i].dst); } free(ms);
+    uint8_t ch[32]; SV cH = {0}, cS = {0}; listExt(pf("%s/Sources", tree), ".h", "Sources", &cH); svAdd(&cH, xdup(".build/catalog.h")); hashGroup(tree, bk, bkl, (const char *const *)cH.v, cH.n, ch); free(bk); svFree(&cH);
+    listExt(pf("%s/Sources", tree), ".c", "Sources", &cS); CJob *ms = xcal(cS.n, sizeof *ms);
+    for (size_t i = 0u; i < cS.n; i++) { size_t l = 0u; char *d = readAll(pf("%s/%s", tree, cS.v[i]), &l), z = '\0', hex[65]; uint8_t r[32]; CC_SHA256_CTX c; CC_SHA256_Init(&c); CC_SHA256_Update(&c, ch, 32u); CC_SHA256_Update(&c, cS.v[i], (CC_LONG)strlen(cS.v[i])); CC_SHA256_Update(&c, &z, 1u); CC_SHA256_Update(&c, d, (CC_LONG)l); CC_SHA256_Final(r, &c); free(d); hexEnc(r, 32u, hex); hex[32] = '\0'; char *dst = xdup(pf("%s/.build/cache/obj/%s.o", REPO, hex)); svAdd(&objs, dst); if (!isKind(dst, 0)) ms[nm++] = (CJob){ l, xdup(cS.v[i]), xdup(dst) }; }
+    svFree(&cS); runJobs(ms, nm, fl, nf, tree); for (size_t i = 0u; i < nm; i++) { free(ms[i].src); free(ms[i].dst); } free(ms);
     char **la = xmal((nf + objs.n + 10u) * sizeof *la); size_t a = 0u; la[a++] = "clang"; for (size_t i = 0u; i < nf; i++) la[a++] = fl[i]; for (size_t i = 0u; i < objs.n; i++) la[a++] = objs.v[i];
     la[a++] = "-lm"; la[a++] = "-lpthread"; la[a++] = "-Wl,-order_file,.build/hot.order"; la[a++] = pf("-Wl,-cache_path_lto,%s/.build/cache/thinlto", REPO); la[a++] = "-o"; la[a++] = ".build/oak"; la[a++] = NULL;
     if (runProc(la, tree, NULL, 0, false)) die("link failed"); free(la); svFree(&objs);
@@ -309,11 +315,11 @@ static Rec *loadRec(const char *root) {
     JV *sj = jGet(m, "seeds"), *sc = jGet(m, "envSchedule"); r->nSeed = sj->n; r->seeds = xmal(sj->n * sizeof *r->seeds); for (size_t i = 0u; i < sj->n; i++) r->seeds[i] = (uint32_t)sj->a[i]->d;
     r->nBlk = sc->n; r->blks = xcal(sc->n, sizeof *r->blks);
     for (size_t i = 0u; i < sc->n; i++) { JV *e = sc->a[i]; uint32_t s0 = (uint32_t)jGet(e, "seedStart")->d, base = UINT32_MAX; for (size_t s = 0u; s < r->nSeed; s++) if (r->seeds[s] == s0) { base = (uint32_t)s; break; } if (base == UINT32_MAX) die("missing seedStart"); r->blks[i] = (EBlk){ xdup(jGet(e, "envId")->s), s0, (uint32_t)jGet(e, "seedEnd")->d, base }; }
-    jFree(m); size_t lE, lS, lH, lHe; r->ends = (uint32_t *)readAll(pf("%s/ends.u32", r->root), &lE); r->nEnd = (uint32_t)(lE / 4u); float *sums = (float *)readAll(pf("%s/series/rewardSum.f32", r->root), &lS); r->hash = (uint64_t *)readAll(pf("%s/hash.u64", r->root), &lH); r->health = (uint32_t *)readAll(pf("%s/health.u32", r->root), &lHe);
-    if (!r->nEnd || r->ends[r->nEnd - 1u] != r->steps || lS / 4u != (size_t)r->nEnd * r->lanes || lH / 8u != r->lanes || lHe / 4u != r->lanes) die("Incomplete: %s", r->root);
-    uint32_t si = 0u, cut = r->steps > OAK_TERMINAL ? r->steps - OAK_TERMINAL : 0u; for (uint32_t i = 0u; i < r->nEnd; i++) if (r->ends[i] <= cut) si = i;
-    double span = (double)(r->ends[r->nEnd - 1u] - r->ends[si]); size_t lr = (size_t)(r->nEnd - 1u) * r->lanes, fr = (size_t)si * r->lanes;
-    r->score = xmal(r->lanes * sizeof(double)); for (uint32_t l = 0u; l < r->lanes; l++) r->score[l] = ((double)sums[lr + l] - (double)sums[fr + l]) / span; free(sums); return r;
+    jFree(m); size_t lE, lH, lHe; struct stat st; const char *sp = pf("%s/series/rewardSum.f32", r->root); r->ends = (uint32_t *)readAll(pf("%s/ends.u32", r->root), &lE); r->nEnd = (uint32_t)(lE / 4u); r->hash = (uint64_t *)readAll(pf("%s/hash.u64", r->root), &lH); r->health = (uint32_t *)readAll(pf("%s/health.u32", r->root), &lHe);
+    if (!r->nEnd || r->ends[r->nEnd - 1u] != r->steps || stat(sp, &st) || (size_t)st.st_size != (size_t)r->nEnd * r->lanes * 4u || lH / 8u != r->lanes || lHe / 4u != r->lanes) die("Incomplete: %s", r->root);
+    uint32_t si = 0u, cut = r->steps > OAK_TERMINAL ? r->steps - OAK_TERMINAL : 0u; for (uint32_t i = 0u; i < r->nEnd; i++) if (r->ends[i] <= cut) si = i; double span = (double)(r->ends[r->nEnd - 1u] - r->ends[si]); size_t bytes = (size_t)r->lanes * sizeof(float);
+    float *r0 = xmal(bytes), *r1 = xmal(bytes); int sfd = open(sp, O_RDONLY); if (sfd < 0) die("read %s: %s", sp, strerror(errno)); preadAll(sfd, r0, bytes, (off_t)((size_t)si * bytes), sp); preadAll(sfd, r1, bytes, (off_t)((size_t)(r->nEnd - 1u) * bytes), sp); close(sfd);
+    r->score = xmal(r->lanes * sizeof(double)); for (uint32_t l = 0u; l < r->lanes; l++) r->score[l] = ((double)r1[l] - (double)r0[l]) / span; free(r0); free(r1); return r;
 }
 static void freeRec(Rec *r) { if (!r) return; free(r->ends); free(r->score); free(r->hash); free(r->health); free(r->seeds); for (size_t i = 0u; i < r->nBlk; i++) free(r->blks[i].id); free(r->blks); jFree(r->srcJ); free(r); }
 static const EBlk *rBlk(const Rec *r, const char *id) { for (size_t i = 0u; i < r->nBlk; i++) if (!strcmp(r->blks[i].id, id)) return &r->blks[i]; return NULL; }
@@ -376,12 +382,15 @@ static double rhoOf(const double *a, const double *b, size_t n) { double ma = me
 static double mdrOf(double rho, size_t tests, size_t n) { return (normInv(1.0 - OAK_ALPHA / (double)tests) + normInv(OAK_POWER)) * sqrt(2.0 * (1.0 - rho)) / (2.0 * normInv(0.75) * sqrt((double)n)); }
 static double signTail(size_t w, size_t l) { size_t n = w + l; if (!n) return 1.0; double l2 = (double)n * log(2.0), s = 0.0; for (size_t k = w; k <= n; k++) s += exp(lgamma((double)n + 1.0) - lgamma((double)k + 1.0) - lgamma((double)(n - k) + 1.0) - l2); return s > 1.0 ? 1.0 : s; }
 typedef struct { const double *const *g; const size_t *sz; size_t ng, tn; bool iqm; double *reps; size_t r0, r1; } BTask;
+static void qSelect(double *a, size_t n, size_t k) {
+    for (size_t l = 0u, r = n; l + 1u < r; ) { size_t m = l + ((r - l) >> 1u), lt = l, i = l, gt = r; double x = a[l], y = a[m], z = a[r - 1u], p = (x <= y) ? (y <= z ? y : (x <= z ? z : x)) : (x <= z ? x : (y <= z ? z : y)); while (i < gt) { double v = a[i]; if (v < p) { a[i++] = a[lt]; a[lt++] = v; } else if (v > p) { a[i] = a[--gt]; a[gt] = v; } else i++; } if (k < lt) r = lt; else if (k < gt) return; else l = gt; }
+}
 static void *bootWork(void *arg) {
     BTask *t = arg; double *p = t->iqm ? xmal(t->tn * sizeof *p) : NULL; size_t lo = t->tn / 4u, hi = t->tn - t->tn / 4u;
     for (size_t r = t->r0; r < t->r1; r++) {
         uint64_t rng = 0x243f6a8885a308d3ull ^ (uint64_t)r * 0x9e3779b97f4a7c15ull; size_t pos = 0u; double sm = 0.0;
         for (size_t g = 0u; g < t->ng; g++) for (size_t j = 0u; j < t->sz[g]; j++) { uint64_t z = (rng += 0x9e3779b97f4a7c15ull); z = (z ^ (z >> 30u)) * 0xbf58476d1ce4e5b9ull; z = (z ^ (z >> 27u)) * 0x94d049bb133111ebull; z ^= z >> 31u; double v = t->g[g][(size_t)(((__uint128_t)z * t->sz[g]) >> 64u)]; if (t->iqm) p[pos++] = v; else sm += v; }
-        if (t->iqm) { qsort(p, t->tn, sizeof *p, cmpD); double s = 0.0; for (size_t i = lo; i < hi; i++) s += p[i]; t->reps[r] = s / (double)(hi - lo); } else t->reps[r] = sm / (double)t->tn;
+        if (t->iqm) { if (lo < t->tn) qSelect(p, t->tn, lo); if (hi < t->tn && lo < hi) qSelect(p + lo, t->tn - lo, hi - lo); double s = 0.0; for (size_t i = lo; i < hi; i++) s += p[i]; t->reps[r] = s / (double)(hi - lo); } else t->reps[r] = sm / (double)t->tn;
     }
     free(p); return NULL;
 }
@@ -415,10 +424,10 @@ static double probeOnce(const char *eng, const char *tag, uint32_t idx, uint64_t
     char *av[] = { "caffeinate","-i",(char *)eng,"record","oak",pf("%u", OAK_PROBE_STEPS),root,NULL }; int rc = runProc(av, REPO, &o, 1, false); quietResume(pd, np); if (rc) die("probe %s", eng);
     uint64_t *hs = (uint64_t *)readAll(pf("%s/hash.u64", root), &hl); rmRf(root); double sps = strtod(strrchr(o, ':') + 1, NULL); free(o); if (st) { *st = hs; *sc = hl / 8u; } else free(hs); return sps;
 }
-static void refEngine(const Rec *ref, char out[PATH_MAX]) {
-    char sd[PATH_MAX], ss[PATH_MAX], dg[65], kh[65], tr[PATH_MAX]; snprintf(sd, sizeof sd, "%s/source", ref->root); snprintf(ss, sizeof ss, "%s/Sources", sd); if (!isKind(ss, S_IFDIR)) die("Reference lacks source snapshot: %s", baseOf(ref->root));
-    const char *en[] = { "Sources" }; digestEntries(sd, en, 1u, dg); char *tc = tcFingerprint(); CC_SHA256_CTX hc; uint8_t hr[32];
-    CC_SHA256_Init(&hc); CC_SHA256_Update(&hc, dg, (CC_LONG)strlen(dg)); CC_SHA256_Update(&hc, tc, (CC_LONG)strlen(tc)); CC_SHA256_Update(&hc, "thin90", 6u); CC_SHA256_Final(hr, &hc); free(tc); hexEnc(hr, 32u, kh); kh[16] = '\0';
+static void refEngine(const Rec *ref, bool requireSaved, char out[PATH_MAX]) {
+    char sd[PATH_MAX], ss[PATH_MAX], kh[65], tr[PATH_MAX]; snprintf(sd, sizeof sd, "%s/source", ref->root); snprintf(ss, sizeof ss, "%s/Sources", sd); if (!isKind(ss, S_IFDIR)) die("Reference lacks source snapshot: %s", baseOf(ref->root));
+    const char *saved = pf("%s/oak", ref->root); if (isKind(saved, S_IFREG)) { snprintf(out, PATH_MAX, "%s", saved); return; } if (requireSaved) die("Reference lacks frozen binary: %s/oak", baseOf(ref->root));
+    char *tc = tcFingerprint(); CC_SHA256_CTX hc; uint8_t hr[32]; const char *rn = baseOf(ref->root); CC_SHA256_Init(&hc); CC_SHA256_Update(&hc, rn, (CC_LONG)strlen(rn)); CC_SHA256_Update(&hc, tc, (CC_LONG)strlen(tc)); CC_SHA256_Update(&hc, "thin6a", 6u); CC_SHA256_Final(hr, &hc); free(tc); hexEnc(hr, 32u, kh); kh[16] = '\0';
     snprintf(tr, sizeof tr, "%s/.build/reference-%s", REPO, kh); if (!isKind(tr, S_IFDIR)) { char st[PATH_MAX]; snprintf(st, sizeof st, "%s.partial", tr); rmRf(st); copyTree(ss, pf("%s/Sources", st)); buildTree(st, false); if (rename(st, tr)) die("rename ref"); }
     snprintf(out, PATH_MAX, "%s/.build/oak", tr);
 }
@@ -428,7 +437,7 @@ static double speedStage(const char *eng, const char *oth, const Rec *ref, bool 
     if (isKind(p, S_IFREG)) { JV *j = jFile(p); ratio = jGet(j, "ratio")->d; div = (size_t)jGet(j, "diverged")->d; printf("speed stage already measured at %s for this binary pair\n", jGet(j, "at")->s); if (cmp && div) printf("reward streams diverge from recorded %.9s on %zu lanes within %u steps\n", rn, div, OAK_PROBE_STEPS); jFree(j); }
     else if (filesEq(eng, oth)) printf("binary identical to recorded %.9s; no probe\n", rn);
     else {
-        printf("timing against recorded %.9s\n", rn); fflush(stdout); double rs[OAK_PROBE_BLOCKS];
+        printf("timing against %s %.9s (%.9s)\n", !strcmp(oth, pf("%s/oak", ref->root)) ? "frozen" : "rebuilt", rn, d2); fflush(stdout); double rs[OAK_PROBE_BLOCKS];
         for (uint32_t b = 0u; b < OAK_PROBE_BLOCKS; b++) {
             uint64_t *sa = NULL, *sb = NULL; size_t na = 0u, nb = 0u; double a = probeOnce(eng, "candidate", 2u * b, cmp && !b ? &sa : NULL, &na), x = probeOnce(oth, "reference", 2u * b, cmp && !b ? &sb : NULL, &nb);
             if (cmp && !b) { for (size_t i = 0u; i < (na < nb ? na : nb); i++) if (sa[i] != sb[i]) div++; if (div) printf("reward streams diverge from recorded %.9s on %zu of %zu lanes within %u steps\n", rn, div, na, OAK_PROBE_STEPS); free(sa); free(sb); }
@@ -568,17 +577,12 @@ static void addCnt(TFunc *a, size_t *n, size_t cap, const char *nm, size_t v) { 
 static const char *xmlAttr(const char *s, const char *e, const char *k, size_t *len) { size_t kl = strlen(k); for (const char *p = s; p < e; p++) if ((size_t)(e - p) > kl + 2u && !memcmp(p, k, kl) && p[kl] == '=' && (p[kl + 1u] == '"' || p[kl + 1u] == '\'') && (p == s || p[-1] == ' ' || p[-1] == '\t')) { const char *v = p + kl + 2u, *q = memchr(v, p[kl + 1u], (size_t)(e - v)); if (q) { *len = (size_t)(q - v); return v; } } return NULL; }
 static uint32_t xmlId(const char *s, const char *e, bool *hi, bool *hr, uint32_t *rf) { size_t l = 0u; const char *a = xmlAttr(s, e, "id", &l), *b = xmlAttr(s, e, "ref", &l); *hi = a != NULL; *hr = b != NULL; *rf = b ? (uint32_t)strtoul(b, NULL, 10) : 0u; return a ? (uint32_t)strtoul(a, NULL, 10) : 0u; }
 static void traceEng(const char *eng) {
-    char rt[PATH_MAX], rp[PATH_MAX], *xml = NULL, *nmo = NULL; snprintf(rt, sizeof rt, "%s/probe-trace", BENCH); snprintf(rp, sizeof rp, "%s/trace.trace", BENCH); rmRf(rt); rmRf(rp);
-    pid_t pd[64]; size_t np = quietPause(pd), ns = 0u, cs = 0u, rows = 0u, nf = 0u, np2 = 0u;
-    char *ra[] = { (char *)eng,"record","oak",pf("%u", OAK_PROBE_STEPS),rt,NULL }; pid_t pid = spawnProc(ra, REPO, -1, -2, -1, false, true); while (!isKind(pf("%s/meta.json", rt), 0)) usleep(100000);
-    char *xa[] = { "xcrun","xctrace","record","--template","Time Profiler","--attach",pf("%d", (int)pid),"--time-limit",pf("%us", OAK_TRACE_SEC),"--output",rp,NULL };
-    int rc = runProc(xa, REPO, NULL, 0, true); waitpid(pid, NULL, 0); quietResume(pd, np); rmRf(rt); if (rc) { rmRf(rp); die("xctrace failed"); }
-    char *ea[] = { "xcrun","xctrace","export","--input",rp,"--xpath","/trace-toc/run[@number=\"1\"]/data/table[@schema=\"time-profile\"]",NULL }, *na[] = { "nm","-n",(char *)eng,NULL };
-    rc = runProc(ea, REPO, &xml, 1, true); rmRf(rp); if (rc) die("xctrace export");
-    typedef struct { uint64_t a; char nm[96]; } Sym; Sym *syms = NULL;
-    if (!runProc(na, REPO, &nmo, 1, false)) { for (char *p = nmo, *nl; *p; p = nl ? nl + 1 : p + strlen(p)) { nl = strchr(p, '\n'); char kd = 0, nm[96] = {0}; uint64_t a = 0u; if (nl) *nl = '\0'; if (sscanf(p, "%llx %c %95s", &a, &kd, nm) == 3 && (kd == 't' || kd == 'T')) { if (ns == cs) syms = xrea(syms, (cs = cs ? cs * 2u : 512u) * sizeof *syms); syms[ns].a = a; snprintf(syms[ns++].nm, 96u, "%s", nm); } } free(nmo); }
-    enum { IDMAX = 1u << 21 }; typedef struct { char nm[96]; uint64_t addr; uint32_t bin, cnt; } Fr;
-    Fr *fr = xcal(IDMAX, sizeof *fr); uint32_t *bt = xcal(IDMAX, sizeof *bt), curFr = 0u, curBt = 0u, rowBt = 0u; uint64_t *bLd = xcal(IDMAX, sizeof *bLd); uint8_t *bOak = xcal(IDMAX, 1u); bool inBt = false, inRow = false;
+    char rt[PATH_MAX], rp[PATH_MAX], *xml = NULL, *nmo = NULL; snprintf(rt, sizeof rt, "%s/probe-trace", BENCH); snprintf(rp, sizeof rp, "%s/trace.trace", BENCH); rmRf(rt); rmRf(rp); pid_t pd[64]; size_t np = quietPause(pd), ns = 0u, cs = 0u, rows = 0u, nf = 0u, np2 = 0u;
+    char *xa[] = { "xcrun","xctrace","record","--template","Time Profiler","--time-limit",pf("%us", OAK_TRACE_SEC),"--output",rp,"--target-stdout","/dev/null","--launch","--",(char *)eng,"record","oak",pf("%u", OAK_PROBE_STEPS),rt,NULL };
+    int rc = runProc(xa, REPO, NULL, 0, true); quietResume(pd, np); rmRf(rt); if ((rc && rc != 54) || !isKind(rp, S_IFDIR)) { rmRf(rp); die("xctrace failed"); }
+    char *ea[] = { "xcrun","xctrace","export","--input",rp,"--xpath","/trace-toc/run[@number=\"1\"]/data/table[@schema=\"time-profile\"]",NULL }, *na[] = { "nm","-n",(char *)eng,NULL }; rc = runProc(ea, REPO, &xml, 1, true); rmRf(rp); if (rc) die("xctrace export");
+    typedef struct { uint64_t a; char nm[96]; } Sym; Sym *syms = NULL; if (!runProc(na, REPO, &nmo, 1, false)) { for (char *p = nmo, *nl; *p; p = nl ? nl + 1 : p + strlen(p)) { nl = strchr(p, '\n'); char kd = 0, nm[96] = {0}; uint64_t a = 0u; if (nl) *nl = '\0'; if (sscanf(p, "%llx %c %95s", &a, &kd, nm) == 3 && (kd == 't' || kd == 'T')) { if (ns == cs) syms = xrea(syms, (cs = cs ? cs * 2u : 512u) * sizeof *syms); syms[ns].a = a; snprintf(syms[ns++].nm, 96u, "%s", nm); } } free(nmo); }
+    enum { IDMAX = 1u << 21 }; typedef struct { char nm[96]; uint64_t addr; uint32_t bin, cnt; } Fr; Fr *fr = xcal(IDMAX, sizeof *fr); uint32_t *bt = xcal(IDMAX, sizeof *bt), curFr = 0u, curBt = 0u, rowBt = 0u; uint64_t *bLd = xcal(IDMAX, sizeof *bLd); uint8_t *bOak = xcal(IDMAX, 1u); bool inBt = false, inRow = false;
     for (const char *p = xml; (p = strchr(p, '<')) != NULL; p++) {
         const char *gt = strchr(p, '>'); if (!gt) break; bool hi = false, hr = false; uint32_t rf = 0u; size_t nl = 0u, al = 0u;
         if (!strncmp(p, "<row>", 5) || !strncmp(p, "<row ", 5)) { inRow = true; rowBt = 0u; }
@@ -598,7 +602,9 @@ static void traceEng(const char *eng) {
 }
 
 static void execJob(const char *treeIn, const char *verb, char out[256]) {
-    char tree[PATH_MAX], bp[PATH_MAX], bestId[64], eng[PATH_MAX], td[65], tid[65]; snprintf(tree, sizeof tree, "%s", treeIn); snprintf(bp, sizeof bp, "%s/best", REPO);
+    char tree[PATH_MAX], bp[PATH_MAX], bestId[64], eng[PATH_MAX], td[65], tid[65]; snprintf(tree, sizeof tree, "%s", treeIn);
+    if (!strcmp(verb, "trace")) { buildTree(tree, false); snprintf(eng, sizeof eng, "%s/.build/oak", tree); traceEng(eng); snprintf(out, 256u, "trace: sampled %u s", OAK_TRACE_SEC); return; }
+    snprintf(bp, sizeof bp, "%s/best", REPO);
     if (!isKind(bp, S_IFREG)) die("No recorded best"); char *bt = readLine(bp); if (!bt[0]) { free(bt); die("No recorded best"); } snprintf(bestId, sizeof bestId, "%s", bt); free(bt);
     Rec *ref = loadRec(pf("%s/%s", BENCH, bestId)); buildTree(tree, false); snprintf(eng, sizeof eng, "%s/.build/oak", tree);
     const char *te[] = { "Sources","fleet.c" }; digestEntries(tree, te, isKind(pf("%s/fleet.c", tree), S_IFREG) ? 2u : 1u, td); shaHex(td, strlen(td), tid); tid[40] = '\0';
@@ -612,11 +618,10 @@ static void execJob(const char *treeIn, const char *verb, char out[256]) {
         if (nc && !strcmp(verb, "try")) { char msg[1024]; snprintf(msg, sizeof msg, "REFUSE: env sources changed (%s)", ch); free(ch); die("%s", msg); }
         if (nc) { printf("Environment sources changed (%zu): %s\n", nc, ch); fflush(stdout); } free(ch);
     }
-    if (!strcmp(verb, "trace")) { traceEng(eng); snprintf(out, 256u, "trace: sampled %u s", OAK_TRACE_SEC); goto done; }
     if (!strcmp(verb, "try")) { attemptTry(eng, tree, ms, ne, ref, out); goto done; }
-    char oth[PATH_MAX], tOth[PATH_MAX]; refEngine(ref, oth);
+    char oth[PATH_MAX], tOth[PATH_MAX]; refEngine(ref, judged, oth);
     if (judged && filesEq(eng, oth)) { if (!strcmp(verb, "probe")) { snprintf(out, 256u, "probe: binary identical to recorded %.9s", bestId); goto done; } die("REJECT: binary identical to recorded %.9s; nothing to judge", bestId); }
-    Rec *anc = NULL; const Rec *tRef = ref; strcpy(tOth, oth); if (!judged && strcmp(bestId, OAK_ANCHOR)) { tRef = anc = loadRec(pf("%s/%s", BENCH, OAK_ANCHOR)); refEngine(anc, tOth); }
+    Rec *anc = NULL; const Rec *tRef = ref; strcpy(tOth, oth); if (!judged && strcmp(bestId, OAK_ANCHOR)) { tRef = anc = loadRec(pf("%s/%s", BENCH, OAK_ANCHOR)); refEngine(anc, false, tOth); }
     double ratio = speedStage(eng, tOth, tRef, judged); const char *trn = baseOf(tRef->root); freeRec(anc);
     if (!strcmp(verb, "probe")) { snprintf(out, 256u, "probe: %.4fx against recorded %.9s", ratio, bestId); goto done; }
     if (ratio < 1.0) die("%s: paired speed %.4fx against recorded %.9s; best stays %s", judged ? "REJECT" : "REFUSE", ratio, trn, bestId);
@@ -674,7 +679,7 @@ static void followJob(const char *dir, const char *self) {
         if (f) { fseeko(f, off, SEEK_SET); char b[4096]; size_t n; while ((n = fread(b, 1u, sizeof b, f))) { fwrite(b, 1u, n, stdout); off += (off_t)n; } fflush(stdout); fclose(f); }
         if (done) return;
         if (monoSec() - chk > 10.0) { chk = monoSec(); int fd = open(pf("%s/runner.lock", BENCH), O_WRONLY | O_CREAT, 0644); if (fd >= 0) { if (!flock(fd, LOCK_EX | LOCK_NB)) { flock(fd, LOCK_UN); close(fd); wakeRunner(self); } else close(fd); } }
-        usleep(500000);
+        usleep(25000);
     }
 }
 
@@ -717,13 +722,12 @@ static void cmdRadar(void) {
     svgTxt(svg, 54, 827, 15, "#637084", "start", 400, "OaK ahead of PPO on"); for (int i = 0; i < 8; i++) svgTxt(svg, cols[i], 827, 15, "#637084", "middle", 400, "%zu of %zu", ah[i], ac[i]);
     svgTxt(svg, 54, 904, 15, "#637084", "start", 400, "Equal weight per environment \xc2\xb7 outlines, not areas \xc2\xb7 Random = 0 \xc2\xb7 Oracle = 1 \xc2\xb7 final %s of %s steps", wb, sb); fputs("</g></svg>\n", svg); fclose(svg);
     char rmP[PATH_MAX]; snprintf(rmP, sizeof rmP, "%s/README.md", REPO); char *rm = readAll(rmP, NULL);
-    const char *st = strstr(rm, " SPS on the"), *ss = st, *fl = strstr(rm, "Reward per step over the final"), *ll = strstr(rm, "Baseline throughput"), *al = strchr(ll, '\n');
-    while (ss > rm && (isdigit((unsigned char)ss[-1]) || ss[-1] == ',')) ss--; FILE *rf = fopen(rmP, "wb"); if (!rf) die("README");
-    fwrite(rm, 1u, (size_t)(ss - rm), rf); fputs(fmtCommas(sps[0]), rf); fwrite(st, 1u, (size_t)(fl - st), rf);
-    fprintf(rf, "Reward per step over the final %s steps of the %s-step best recording (`%s`), all %zu environments with %u seeds each (%s lanes), with the Oracle, Random and PPO baselines on the same seeds. Mean over seeds; Score = (OaK \xe2\x88\x92 Random) / (Oracle \xe2\x88\x92 Random), unclipped.\n\n| Environment | Category | OaK | Oracle | Random | PPO | Score |\n|---|---|---:|---:|---:|---:|---:|\n", wb, sb, best, ne, oak->lanes / (uint32_t)ne, fmtCommas((double)oak->lanes));
+    const char *mk = "## Best recording\n", *hd = strstr(rm, mk); if (!hd) die("README");
+    FILE *rf = fopen(rmP, "wb"); if (!rf) die("README");
+    fwrite(rm, 1u, (size_t)(hd - rm) + strlen(mk), rf);
+    fputs("\n| Environment | Category | OaK | Oracle | Random | PPO | Score |\n|---|---|---:|---:|---:|---:|---:|\n", rf);
     for (size_t e = 0u; e < ne; e++) fprintf(rf, "| %s | %s | %s | %s | %s | %s | %s |\n", rs[e].env, rs[e].cat, fmtVal(rs[e].m[0]), fmtVal(rs[e].m[1]), fmtVal(rs[e].m[3]), fmtVal(rs[e].m[2]), fmtVal((rs[e].m[0] - rs[e].m[3]) / (rs[e].m[1] - rs[e].m[3])));
-    fprintf(rf, "\nBaseline throughput, lane-weighted over the recordings that hold each environment's baseline: PPO %s steps/s, Random %s steps/s, Oracle %s steps/s.", fmtCommas(sps[2]), fmtCommas(sps[3]), fmtCommas(sps[1]));
-    if (al) fputs(al, rf); fclose(rf); free(rm); for (int g = 0; g < 9; g++) printf("%-11s n=%3zu  OaK %+.3f  Oracle %+.3f  PPO %+.3f  Random %+.3f\n", g < 8 ? CT[g] : "all", ac[g], ax[g][0], ax[g][1], ax[g][2], ax[g][3]);
+    fclose(rf); free(rm); for (int g = 0; g < 9; g++) printf("%-11s n=%3zu  OaK %+.3f  Oracle %+.3f  PPO %+.3f  Random %+.3f\n", g < 8 ? CT[g] : "all", ac[g], ax[g][0], ax[g][1], ax[g][2], ax[g][3]);
     free(best); free(rs); freeRec(oak);
 }
 

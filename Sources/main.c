@@ -19,7 +19,7 @@ typedef struct {
     size_t cacheLine;
     Lane *lanes;
     const EnvSpec **specs;
-    uint32_t *extra;
+    uint32_t *order, *extra;
     float *shared, *rewardSum;
     _Atomic uint32_t next;
 } Run;
@@ -115,9 +115,9 @@ static void *worker(void *arg) {
     uint32_t *state = laneState(run);
     flushToZero();
     for (;;) {
-        uint32_t lane = atomic_fetch_add(&run->next, 1u);
-        if (lane >= run->laneCount) break;
-        runLane(run, lane, state);
+        uint32_t slot = atomic_fetch_add(&run->next, 1u);
+        if (slot >= run->laneCount) break;
+        runLane(run, run->order[slot], state);
     }
     free(state);
     return 0;
@@ -160,17 +160,33 @@ static void writeFile(const char *root, const char *name, const void *data, size
     fclose(f);
 }
 
+typedef struct { uint32_t idx, cost; } LaneOrder;
+
+static int cmpLaneOrder(const void *a, const void *b) {
+    const LaneOrder *x = (const LaneOrder *)a, *y = (const LaneOrder *)b;
+    if (y->cost != x->cost) return y->cost > x->cost ? 1 : -1;
+    return x->idx < y->idx ? -1 : x->idx > y->idx ? 1 : 0;
+}
+
 static void scheduleLanes(Run *run, const EnvSpec *const *envs, uint32_t envCount) {
     run->laneCount = envCount * run->seeds;
     run->lanes = calloc(run->laneCount, sizeof(Lane));
     run->specs = calloc(run->laneCount, sizeof(const EnvSpec *));
+    run->order = calloc(run->laneCount, sizeof(uint32_t));
+    LaneOrder *ord = calloc(run->laneCount, sizeof(LaneOrder));
     uint32_t lane = 0u;
-    for (uint32_t e = 0u; e < envCount; e++)
+    for (uint32_t e = 0u; e < envCount; e++) {
+        uint32_t cost = (envs[e]->obs + 8u) * (envs[e]->actions + 2u) * (envs[e]->box ? 2u : 3u);
         for (uint32_t s = 0u; s < run->seeds; s++, lane++) {
             run->lanes[lane].env = envs[e]->id;
             run->lanes[lane].seed = envs[e]->seedStart + run->firstSeed + s;
             run->specs[lane] = envs[e];
+            ord[lane] = (LaneOrder){ lane, cost };
         }
+    }
+    qsort(ord, run->laneCount, sizeof(LaneOrder), cmpLaneOrder);
+    for (uint32_t i = 0u; i < run->laneCount; i++) run->order[i] = ord[i].idx;
+    free(ord);
 }
 
 static int record(int argc, char **argv, uint32_t firstSeed, uint32_t seeds, int rootArg) {
