@@ -12,16 +12,25 @@ _Static_assert(OAK_CAPACITY % 4u == 0u, "");
 #define OAK_OBSERVATION_LIMIT OAK_ENV_OBS_MAX
 #define OAK_UNITS (OAK_CAPACITY)
 #define OAK_FANIN (32u)
-_Static_assert(OAK_FANIN % 4u == 0u, "");
+#define OAK_FANIN_BLOCKS (OAK_FANIN / 4u)
+#define OAK_PERMS 4u
+_Static_assert(OAK_FANIN % 8u == 0u, "");
 _Static_assert(OAK_UNITS % 8u == 0u, "");
 #define OAK_PROJECTED_COUNT(obs) ((obs) + OAK_ACTION_PARAMS + 2u)
 #define OAK_PROJECTED(obs) (((OAK_PROJECTED_COUNT(obs) + 3u) / 4u) * 4u)
-#define OAK_INPUTS(obs) (((OAK_PROJECTED(obs) + (obs) * OAK_TRACE_LEVELS + 7u) / 8u) * 8u)
+#define OAK_INPUTS_RAW(obs) (((OAK_PROJECTED(obs) + (obs) * OAK_TRACE_LEVELS + 7u) / 8u) * 8u)
+#define OAK_INPUTS(obs) (OAK_INPUTS_RAW(obs) < OAK_FANIN ? OAK_FANIN : OAK_INPUTS_RAW(obs))
 #define OAK_PROJECTED_MAX OAK_PROJECTED(OAK_OBSERVATION_LIMIT)
 #define OAK_INPUT_MAX OAK_INPUTS(OAK_OBSERVATION_LIMIT)
+#define OAK_SOURCES_MAX (OAK_PROJECTED_COUNT(OAK_OBSERVATION_LIMIT) + OAK_TRACE_LEVELS * OAK_OBSERVATION_LIMIT)
+#define OAK_PERM_STRIDE (((OAK_SOURCES_MAX + 4u + 3u) / 4u) * 4u)
 #define OAK_FEATURE_MAX (OAK_INPUT_MAX + OAK_UNITS)
+_Static_assert(OAK_INPUTS(1u) >= OAK_FANIN, "");
 #define OAK_FEATURE_TIMESCALE (OAK_CAPACITY * (1u + OAK_TRACE_LEVELS))
-#define OAK_ELIGIBILITY_DECAY (1.0f - 1.0f / (float)(1u << 1u))
+#define OAK_ELIGIBILITY_DECAY 0.5f
+#define OAK_DYNA_PREDS 4u
+#define OAK_DYNA_STEPS (2u * OAK_DYNA_PREDS)
+#define OAK_DYNA_QUEUE (2u * (1u + OAK_TRACE_LEVELS))
 #define OAK_TABLE_BITS 14u
 #define OAK_TABLE (1u << OAK_TABLE_BITS)
 #define OAK_TRACKED_TUPLES (2u * (1u + OAK_TRACE_LEVELS))
@@ -33,17 +42,20 @@ _Static_assert(OAK_UNITS % 8u == 0u, "");
 #define OAK_TABLE_ARMS 5u
 #define OAK_ARMS (OAK_HEADS + OAK_TABLE_ARMS)
 _Static_assert(OAK_ARMS <= 8u, "");
-#define OAK_QTABLE_BITS 14u
-#define OAK_QTABLE (1u << OAK_QTABLE_BITS)
+#define OAK_EXACT_BITS 15u
+_Static_assert(OAK_EXACT_BITS <= 16u, "");
+#define OAK_EXACT (1u << OAK_EXACT_BITS)
+#define OAK_HIST_BITS 14u
+#define OAK_HIST (1u << OAK_HIST_BITS)
 #define OAK_QROW (2u * OAK_CELL_STRIDE)
-#define OAK_PLAN_BUDGET OAK_FEATURE_TIMESCALE
+#define OAK_PLAN_BUDGET (2u * OAK_FEATURE_TIMESCALE)
 #define OAK_BLOCK OAK_FEATURE_TIMESCALE
 _Static_assert(OAK_CELL_STRIDE > OAK_POLICY_MAX, "");
 #define OAK_ACTOR_ALPHA_DENOM ((float)(OAK_ACTION_PARAMS * OAK_CAPACITY))
 
 typedef struct {
     uint32_t projected, inputs, features;
-    float trackingRate, metaRate, ridgeFloor;
+    float trackingRate, metaRate, ridgeFloor, hiddenRate;
 } OakGeometry;
 
 static inline OakGeometry oak_geometry(uint32_t obs) {
@@ -54,6 +66,7 @@ static inline OakGeometry oak_geometry(uint32_t obs) {
     g.trackingRate = 1.0f / (float)OAK_FEATURE_TIMESCALE;
     g.metaRate = g.trackingRate / (float)(OAK_FEATURE_TIMESCALE + OAK_ACTION_PARAMS);
     g.ridgeFloor = 1.0f / (float)(2u * OAK_CAPACITY);
+    g.hiddenRate = sqrtf(g.trackingRate * g.ridgeFloor);
     return g;
 }
 
