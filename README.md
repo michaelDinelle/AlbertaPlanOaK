@@ -18,10 +18,6 @@ Recorded on a binned M4 Max.
 
 ## Best recording
 
-Capacity 64, declared once in `Sources/geometry.h`: standardized observations on a seven-level trace ladder, 64 learned units of fan-in 32, and per step 23 hashed tuple cells plus two cells per observation channel on a 16,384-slot table, feeding three actor heads and five table arms that a Thompson-sampling bandit chooses among every 512 steps; 5,670,144 bytes of state per lane. 12,197,513 SPS on the 245-environment schedule.
-
-Reward per step over the final 100,928 steps of the 1,000,000-step best recording (`e72b4a8eaa14533a80f8a498bd73017eaea8fd74`), all 245 environments with 32 seeds each (7,840 lanes), with the Oracle, Random and PPO baselines on the same seeds. Mean over seeds; Score = (OaK − Random) / (Oracle − Random), unclipped.
-
 | Environment | Category | OaK | Oracle | Random | PPO | Score |
 |---|---|---:|---:|---:|---:|---:|
 | AccessControl-cont-v0 | decision | 2.7363 | 2.7480 | 1.6985 | 2.7397 | 0.9888 |
@@ -269,30 +265,3 @@ Reward per step over the final 100,928 steps of the 1,000,000-step best recordin
 | Umbrella-64-noise-cont-v0 | memory | 0.0026 | 0.0167 | 0.0010 | -0.0042 | 0.0999 |
 | WalkBet-cont-v0 | prediction | 1.0000 | 1.0000 | 0.5000 | 0.9942 | 1.0000 |
 | WalkBet-drift-cont-v0 | prediction | 0.9933 | 1.0000 | 0.4999 | 0.8967 | 0.9865 |
-
-Baseline throughput, lane-weighted over the recordings that hold each environment's baseline: PPO 4,014,458 steps/s, Random 253,157,592 steps/s, Oracle 69,938,847 steps/s.
-
-Every environment runs 32 seeds, from the start of its seed block, so each weighs the same in every suite statistic; 245 environments make 7,840 lanes. The latest promotion replaced the agent with this portfolio: three actor heads over one shared representation, owner-tagged exact tables keyed on observations and on observation history, a planner, a frontier explorer and a differential Q-learning arm over the tile-coded cells, which include settled trace cells and cells relating the channel the agent controls to every other channel. Against the best it replaced, its suite IQM difference was +1.294 (95% CI [+1.260, +1.328]), the per-environment regression guard was silent on all 245 environments, and its paired speed probe measured 1.0679. The last adoption before it added Craftax-Classic and Reacher, each after a speed pass that changed no bit of its behaviour. On all 7,776 lanes it shares with the previous best, rewards match bit for bit, and so does every refiled baseline; its speed gate against the recording that began the environment program measured 1.1227. The adoption before it added Reversi, chess, Kuhn and Leduc poker, backgammon, LightCycles, SlimeVolley, Pommerman, Overcooked-AI, LBF, RWARE and Hanabi; HalfCheetah-friction, InvertedDoublePendulum and Hopper on the planar physics core, Quadrotor2D and Arm2; Eleven, Skirmish, MinAtar, Dungeon and RelicFog; and IDBD, SlowRegression, RateTracking, FrostHollow, SymbolicAlchemy, DarkKeyToDoor and Homeostasis. It also made Contextual, Regression and HalfCheetah faster without changing a bit of their behaviour, and a Tetris game now ends at level 155. On all 5,248 lanes it shares with the previous best, rewards match bit for bit, and so does every refiled baseline. Its speed gate against the recording that began the environment program (`4262868f4bce5ea25ac4905e60742f75d11be371`) measured 1.1297 over three interleaved paired probes. The adoption before that restored KeyCorridor-1, KeyCorridor-3, ProceduralMaze-5, POMaze, HighDimMaze, FourRooms, DelayedChain and HalfCheetah exactly as the suite once ran them, added ProceduralMaze-15, two Sokoban rungs and the Ancients, Generals, Hanoi, PocketCube, 2048, Tetris, Minesweeper and ConnectFour families, and aligned every function to the cache line so each environment's speed no longer depends on the code linked around it; it matched bit for bit on all 4,096 shared lanes and measured 1.1586. The adoption before those moved to the 32-seed schedule and added the MicroRTS family and the engine's league and replay-view hooks, matching bit for bit on all 3,120 shared lanes and measuring 1.1544 against the same recording. The promotion before those rewrote every environment for speed without changing a bit of its behaviour, cutting the lane-weighted environment step from 58.8 ns to 10.7 ns, and moved work only the oracle reads out of environment resets; it measured 1.1955 against the best it replaced, on probes of 20,000 steps per lane, where those resets weigh more than in a full recording. From the reference recording (`019b414811583459f6931b87ecf61724d6e31d68`) to that promotion, rewards matched bit for bit on all 4,915 lanes of the earlier schedule across four promotions and two adoptions, and throughput rose 53.4%, the product of five interleaved paired probes (1.2226, 1.0302, 1.0215, 0.9976, 1.1955). No unhealthy lanes.
-
-Regenerate with `./fleet radar`.
-
-## Setup and run
-
-The engine and harness are plain C. `cc -O3 -std=c11 fleet.c -lm -lpthread -o fleet` builds `./fleet` once (after which `./fleet` auto-rebuilds itself whenever `fleet.c` changes), `./fleet build` compiles `.build/oak` in parallel with ThinLTO and content-addressed object caching for Apple silicon, and the theater needs Bun. Benchmark recordings stay local and are ignored by Git. `./fleet` queues the working tree for a background runner that builds it, times it against the best, records it when it can still promote, and judges it; `./fleet adopt` queues it to become the best without judging reward, for intended schedule changes; `./fleet probe` times the working tree against the best without recording and waits for the result. Verdicts land in `.oak-benchmarks/verdicts.log`, and `cd frontend && bun install && bun run dev` serves the recordings and prints the URL to open. The theater replays any lane on demand with the engine its recording carries and shows whether the replay reproduces the recorded reward stream bit for bit.
-
-The judge promotes when the candidate is better on reward or throughput and worse on neither. Reward is compared on paired seeds: identical reward streams count as not worse with no uncertainty; otherwise the suite statistic is the interquartile mean over every environment and seed of the difference scaled by the best's per-environment interquartile range, with a stratified bootstrap CI, and a Holm-adjusted one-sided Wilcoxon test per environment guards against a single large regression. Throughput is an interleaved paired probe against the best rebuilt from the source snapshot in its recording, one percent above to count as better and at least matching (`>= 1.00x`) to count as not worse. The speed gate runs before the recording: a candidate slower than the best is rejected without recording, and a byte-identical binary is rejected as having nothing to judge. An adoption must also keep pace with the throughput of the recording that began the environment program (`4262868f4bce5ea25ac4905e60742f75d11be371`). Random, PPO and Oracle baselines are filed per environment under that environment's digest and seeds, the baseline policy's source and the horizon, recorded once when missing and reused otherwise.
-
-Geometry is agent capacity, declared once in `Sources/geometry.h`; every size below derives from it, and growing the agent means changing that one declaration and letting the judge decide.
-
-| Quantity | Value |
-| --- | ---: |
-| Capacity | 64 |
-| Learned units × fan-in | 64 × 32 |
-| Trace ladder | 7 levels |
-| Feature timescale and bandit block | 512 steps |
-| Tuple cells per step | 23 |
-| Observation cells per step | 2 per channel |
-| Cell table | 16,384 slots |
-| Exact tables | 2 × 16,384 rows |
-| Actor heads and table arms | 3 and 5 |
-| State per lane | 5,670,144 bytes |

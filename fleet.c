@@ -722,13 +722,12 @@ static void cmdRadar(void) {
     svgTxt(svg, 54, 827, 15, "#637084", "start", 400, "OaK ahead of PPO on"); for (int i = 0; i < 8; i++) svgTxt(svg, cols[i], 827, 15, "#637084", "middle", 400, "%zu of %zu", ah[i], ac[i]);
     svgTxt(svg, 54, 904, 15, "#637084", "start", 400, "Equal weight per environment \xc2\xb7 outlines, not areas \xc2\xb7 Random = 0 \xc2\xb7 Oracle = 1 \xc2\xb7 final %s of %s steps", wb, sb); fputs("</g></svg>\n", svg); fclose(svg);
     char rmP[PATH_MAX]; snprintf(rmP, sizeof rmP, "%s/README.md", REPO); char *rm = readAll(rmP, NULL);
-    const char *st = strstr(rm, " SPS on the"), *ss = st, *fl = strstr(rm, "Reward per step over the final"), *ll = strstr(rm, "Baseline throughput"), *al = strchr(ll, '\n');
-    while (ss > rm && (isdigit((unsigned char)ss[-1]) || ss[-1] == ',')) ss--; FILE *rf = fopen(rmP, "wb"); if (!rf) die("README");
-    fwrite(rm, 1u, (size_t)(ss - rm), rf); fputs(fmtCommas(sps[0]), rf); fwrite(st, 1u, (size_t)(fl - st), rf);
-    fprintf(rf, "Reward per step over the final %s steps of the %s-step best recording (`%s`), all %zu environments with %u seeds each (%s lanes), with the Oracle, Random and PPO baselines on the same seeds. Mean over seeds; Score = (OaK \xe2\x88\x92 Random) / (Oracle \xe2\x88\x92 Random), unclipped.\n\n| Environment | Category | OaK | Oracle | Random | PPO | Score |\n|---|---|---:|---:|---:|---:|---:|\n", wb, sb, best, ne, oak->lanes / (uint32_t)ne, fmtCommas((double)oak->lanes));
+    const char *mk = "## Best recording\n", *hd = strstr(rm, mk); if (!hd) die("README");
+    FILE *rf = fopen(rmP, "wb"); if (!rf) die("README");
+    fwrite(rm, 1u, (size_t)(hd - rm) + strlen(mk), rf);
+    fputs("\n| Environment | Category | OaK | Oracle | Random | PPO | Score |\n|---|---|---:|---:|---:|---:|---:|\n", rf);
     for (size_t e = 0u; e < ne; e++) fprintf(rf, "| %s | %s | %s | %s | %s | %s | %s |\n", rs[e].env, rs[e].cat, fmtVal(rs[e].m[0]), fmtVal(rs[e].m[1]), fmtVal(rs[e].m[3]), fmtVal(rs[e].m[2]), fmtVal((rs[e].m[0] - rs[e].m[3]) / (rs[e].m[1] - rs[e].m[3])));
-    fprintf(rf, "\nBaseline throughput, lane-weighted over the recordings that hold each environment's baseline: PPO %s steps/s, Random %s steps/s, Oracle %s steps/s.", fmtCommas(sps[2]), fmtCommas(sps[3]), fmtCommas(sps[1]));
-    if (al) fputs(al, rf); fclose(rf); free(rm); for (int g = 0; g < 9; g++) printf("%-11s n=%3zu  OaK %+.3f  Oracle %+.3f  PPO %+.3f  Random %+.3f\n", g < 8 ? CT[g] : "all", ac[g], ax[g][0], ax[g][1], ax[g][2], ax[g][3]);
+    fclose(rf); free(rm); for (int g = 0; g < 9; g++) printf("%-11s n=%3zu  OaK %+.3f  Oracle %+.3f  PPO %+.3f  Random %+.3f\n", g < 8 ? CT[g] : "all", ac[g], ax[g][0], ax[g][1], ax[g][2], ax[g][3]);
     free(best); free(rs); freeRec(oak);
 }
 
