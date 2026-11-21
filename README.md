@@ -18,9 +18,9 @@ Recorded on a binned M4 Max.
 
 ## Best recording
 
-Capacity 64, declared once in `Sources/geometry.h`: standardized observations on a seven-level trace ladder, 64 learned units of fan-in 32, and per step 23 hashed tuple cells plus two cells per observation channel on a 16,384-slot table, feeding three actor heads and five table arms that a Thompson-sampling bandit chooses among every 512 steps; 5,670,144 bytes of state per lane. 11,725,835 SPS on the 245-environment schedule.
+Capacity 64, declared once in `Sources/geometry.h`: standardized observations on a seven-level trace ladder, 64 learned units of fan-in 32, and per step 23 hashed tuple cells plus two cells per observation channel on a 16,384-slot table, feeding three actor heads and five table arms that a Thompson-sampling bandit chooses among every 512 steps; 5,670,144 bytes of state per lane. 11,535,488 SPS on the 245-environment schedule.
 
-Reward per step over the final 100,928 steps of the 1,000,000-step best recording (`a8e2e71057b22b8b874a5d68c4c2d4b4b2fd0243`), all 245 environments with 32 seeds each (7,840 lanes), with the Oracle, Random and PPO baselines on the same seeds. Mean over seeds; Score = (OaK − Random) / (Oracle − Random), unclipped.
+Reward per step over the final 100,928 steps of the 1,000,000-step best recording (`7a09ed7f5667e6d1333e520fef483a1fc1675d7e`), all 245 environments with 32 seeds each (7,840 lanes), with the Oracle, Random and PPO baselines on the same seeds. Mean over seeds; Score = (OaK − Random) / (Oracle − Random), unclipped.
 
 | Environment | Category | OaK | Oracle | Random | PPO | Score |
 |---|---|---:|---:|---:|---:|---:|
